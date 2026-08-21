@@ -51,6 +51,8 @@ The CI suite covers graph runtime, PDC, node registry, hot swap, multi-output, H
 
 The measured-fit synthetic regression intentionally verifies that a known DS-1 tone setting can be recovered from generated reference response points. This validates the fitting machinery; it is not hardware reference data.
 
+Validated checkpoint `d49bd7414978dd009ec1b4d79ebf09eb5b8eb43d`: Graph Core CI runs #105 and #106 both completed successfully with configure, build and all 15 tests passing.
+
 ## Next high-value work
 
 1. introduce real measurement datasets with provenance and metadata
