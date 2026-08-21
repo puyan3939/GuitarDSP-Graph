@@ -46,11 +46,12 @@ public:
         float cathodeMemoryMs = 35.0f;
     };
 
-    void prepare(double sampleRate, Config config = {}) noexcept {
+    void prepare(double sampleRate) noexcept { prepare(sampleRate, Config{}); }
+    void prepare(double sampleRate, const Config& config) noexcept {
         config_ = config;
         cathode_.setTimeConstant(sampleRate, config_.cathodeMemoryMs);
         reset();
-        quiescentPlate_ = solvePlate(config_.gridBias, 0.0f, config_.supplyVoltage * 0.6f);
+        quiescentPlate_ = solvePlate(config_.gridBias, config_.supplyVoltage * 0.6f);
     }
 
     void reset() noexcept {
@@ -60,7 +61,7 @@ public:
 
     float process(float gridSignalVolts) noexcept {
         const float effectiveGrid = config_.gridBias + gridSignalVolts - cathode_.voltage;
-        const float plate = solvePlate(effectiveGrid, cathode_.voltage, previousPlate_);
+        const float plate = solvePlate(effectiveGrid, previousPlate_);
         const float current = config_.tube.plateCurrent(effectiveGrid, plate);
         const float targetCathode = current * config_.cathodeResistance;
         cathode_.process(targetCathode);
@@ -72,7 +73,7 @@ public:
     float plateVoltage() const noexcept { return previousPlate_; }
 
 private:
-    float solvePlate(float grid, float /*cathode*/, float initial) const noexcept {
+    float solvePlate(float grid, float initial) const noexcept {
         float plate = std::clamp(initial, 1.0f, config_.supplyVoltage);
         for (int iteration = 0; iteration < 8; ++iteration) {
             const float current = config_.tube.plateCurrent(grid, plate);
@@ -106,7 +107,8 @@ public:
         float emitterMemoryMs = 6.0f;
     };
 
-    void prepare(double sampleRate, Config config = {}) noexcept {
+    void prepare(double sampleRate) noexcept { prepare(sampleRate, Config{}); }
+    void prepare(double sampleRate, const Config& config) noexcept {
         config_ = config;
         emitter_.setTimeConstant(sampleRate, config_.emitterMemoryMs);
         emitter_.voltage = 0.0f;
