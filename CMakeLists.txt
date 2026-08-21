@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.4.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,8 +12,8 @@ add_library(GuitarDSPGraphCore
     src/graph/CompiledAudioGraph.cpp
     src/graph/NodeRegistry.cpp
     src/graph/GraphBuilder.cpp
+    src/graph/RealtimeGraphHost.cpp
 )
-
 target_include_directories(GuitarDSPGraphCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(GuitarDSPGraphCore PUBLIC cxx_std_20)
 
@@ -48,3 +48,6 @@ add_test(NAME graph_document COMMAND GuitarDSPGraphDocumentTests)
 add_executable(GuitarDSPAdvancedNodeTests tests/AdvancedNodeTests.cpp)
 target_link_libraries(GuitarDSPAdvancedNodeTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME advanced_nodes COMMAND GuitarDSPAdvancedNodeTests)
+add_executable(GuitarDSPRealtimeHostTests tests/RealtimeGraphHostTests.cpp)
+target_link_libraries(GuitarDSPRealtimeHostTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME realtime_host COMMAND GuitarDSPRealtimeHostTests)
