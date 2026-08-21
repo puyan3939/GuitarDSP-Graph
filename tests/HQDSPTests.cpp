@@ -1,4 +1,5 @@
 #include "guitardsp/hq/ADAA.h"
+#include "guitardsp/hq/CircuitPrimitives.h"
 #include "guitardsp/hq/DiodeClipper.h"
 #include "guitardsp/hq/HQDriveNode.h"
 #include "guitardsp/hq/Measurement.h"
@@ -46,6 +47,17 @@ int main() {
         adaaFinite &= std::isfinite(adaa.process(x));
     }
     ok &= require(adaaFinite, "ADAA tanh is finite under hard drive");
+
+    hq::DynamicTriodeStage triode;
+    hq::TransformerStage transformer;
+    triode.prepare(48000.0); transformer.prepare(48000.0);
+    triode.setDrive(4.0f); triode.setAsymmetry(0.22f); triode.setSag(0.18f); transformer.setSaturation(0.4f);
+    bool circuitFinite = true;
+    for (int i=0; i<4000; ++i) {
+        const float x = 0.6f * std::sin(0.031f * static_cast<float>(i));
+        circuitFinite &= std::isfinite(transformer.process(triode.process(x)));
+    }
+    ok &= require(circuitFinite, "triode and transformer primitives remain finite");
 
     constexpr int block = 1024;
     graph::AudioBuffer input(2, block), output(2, block);
