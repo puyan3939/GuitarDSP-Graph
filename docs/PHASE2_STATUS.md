@@ -43,17 +43,17 @@ input coupling
 -> three-band tone stack abstraction
 -> differential phase inverter
 -> negative feedback
--> push-pull power stage with sag/crossover
+-> selectable push-pull EL34 / 6L6GC / KT88 power stage with sag/crossover
 -> transformer saturation
 ```
 
-Power-stage device-family primitives now provide distinct EL34, 6L6GC and KT88 transfer behavior as engineering starting points. They are not measured tube fits yet.
+The selectable power-tube family is exposed as an amp parameter and is processed inside the oversampled power stage. EL34, 6L6GC and KT88 currently provide distinct engineering transfer behavior; they are not measured tube fits yet.
 
 This remains an unnamed engineering reference. Named Marshall/Fender/Ampeg models require topology-specific networks and measured fitting.
 
 ## Current validation
 
-The CI suite covers graph runtime, PDC, node registry, hot swap, multi-output, HQ numerical regression, DS-1, TS808, measured fitting, BD-2, fuzz, reference amp topology, multi-parameter calibration, power-tube family differentiation and speaker nonlinear dynamics.
+The CI suite covers graph runtime, PDC, node registry, hot swap, multi-output, HQ numerical regression, DS-1, TS808, measured fitting, BD-2, fuzz, reference amp topology, multi-parameter calibration, power-tube family differentiation, selectable power-tube behavior inside the amp, and speaker nonlinear dynamics.
 
 The measured-fit synthetic regressions intentionally verify that known DS-1 control settings can be recovered from generated reference response points. This validates the fitting machinery; it is not hardware reference data.
 
@@ -61,8 +61,8 @@ The measured-fit synthetic regressions intentionally verify that known DS-1 cont
 
 1. introduce real measurement datasets with provenance and metadata
 2. fit DS-1 / TS808 / BD-2 control positions against those datasets
-3. connect EL34 / 6L6GC / KT88 families into configurable named amp power stages
-4. replace the abstract three-band stack with topology-specific Marshall/Fender tone-stack solvers
-5. add named preamp topologies and NFB/presence networks
+3. replace the abstract three-band stack with topology-specific Marshall/Fender tone-stack solvers
+4. add named preamp topologies and topology-specific NFB/presence networks
+5. fit EL34 / 6L6GC / KT88 power-stage parameters against reference data
 6. combine speaker dynamics with partitioned cabinet IR as a production cabinet chain
 7. expose quality and measurement information to the future analyzer/UI
