@@ -17,6 +17,8 @@ bool CompiledAudioGraph::build(Graph& graph,double sampleRate,int maxBlockSize,i
         auto* node=graph.node(id);if(!node)return false;NodeRuntime r;r.id=id;r.node=node;
         r.inputs.resize(static_cast<std::size_t>(std::max(0,node->inputPortCount())));
         r.outputs.resize(static_cast<std::size_t>(std::max(0,node->outputPortCount())));
+        r.inputPointers.reserve(r.inputs.size());
+        r.outputPointers.reserve(r.outputs.size());
         for(auto& in:r.inputs)in.mix.resize(channels,maxBlockSize);
         for(auto& out:r.outputs)out.resize(channels,maxBlockSize);
         node->prepare(spec);runtimeIndex_[id]=nodes_.size();nodes_.push_back(std::move(r));
