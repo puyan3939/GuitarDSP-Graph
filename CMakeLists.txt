@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(GUITARDSP_GRAPH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(GUITARDSP_BUILD_BENCHMARKS "Build local benchmark executables" OFF)
 option(GUITARDSP_BUILD_AUDIO_APP "Build the JUCE standalone realtime guitar host" OFF)
+option(GUITARDSP_FETCH_JUCE "Fetch the pinned JUCE release when building the audio app" OFF)
 set(GUITARDSP_JUCE_PATH "" CACHE PATH "Path to a JUCE source checkout containing CMakeLists.txt")
 
 add_library(GuitarDSPGraphCore
@@ -46,9 +47,20 @@ if (GUITARDSP_BUILD_AUDIO_APP)
         endif()
     endif()
 
+    if (NOT TARGET juce::juce_audio_utils AND GUITARDSP_FETCH_JUCE)
+        include(FetchContent)
+        FetchContent_Declare(
+            JUCE
+            GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+            GIT_TAG 9.0.0
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(JUCE)
+    endif()
+
     if (NOT TARGET juce::juce_audio_utils)
         message(FATAL_ERROR
-            "GUITARDSP_BUILD_AUDIO_APP=ON requires JUCE. Set GUITARDSP_JUCE_PATH to a JUCE source checkout or install a JUCE CMake package.")
+            "GUITARDSP_BUILD_AUDIO_APP=ON requires JUCE. Set GUITARDSP_JUCE_PATH, install a JUCE CMake package, or add -DGUITARDSP_FETCH_JUCE=ON.")
     endif()
 
     juce_add_gui_app(GuitarDSPApp
