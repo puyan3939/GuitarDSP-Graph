@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.3.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,23 +30,21 @@ else()
 endif()
 
 enable_testing()
-
 add_executable(GuitarDSPGraphTests tests/GraphTests.cpp)
 target_link_libraries(GuitarDSPGraphTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME graph_core COMMAND GuitarDSPGraphTests)
-
 add_executable(GuitarDSPAudioRuntimeTests tests/AudioRuntimeTests.cpp)
 target_link_libraries(GuitarDSPAudioRuntimeTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME audio_runtime COMMAND GuitarDSPAudioRuntimeTests)
-
 add_executable(GuitarDSPNodeTests tests/DSPNodeTests.cpp)
 target_link_libraries(GuitarDSPNodeTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME dsp_nodes COMMAND GuitarDSPNodeTests)
-
 add_executable(GuitarDSPNodeLibraryTests tests/NodeLibraryTests.cpp)
 target_link_libraries(GuitarDSPNodeLibraryTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME node_library COMMAND GuitarDSPNodeLibraryTests)
-
 add_executable(GuitarDSPGraphDocumentTests tests/GraphDocumentTests.cpp)
 target_link_libraries(GuitarDSPGraphDocumentTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME graph_document COMMAND GuitarDSPGraphDocumentTests)
+add_executable(GuitarDSPAdvancedNodeTests tests/AdvancedNodeTests.cpp)
+target_link_libraries(GuitarDSPAdvancedNodeTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME advanced_nodes COMMAND GuitarDSPAdvancedNodeTests)
