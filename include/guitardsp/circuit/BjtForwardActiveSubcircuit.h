@@ -39,7 +39,14 @@ inline hq::DiodeSpec baseEmitterJunction(const hq::BJTSpec& spec) noexcept {
     diode.nominalForwardVoltage = std::max(0.1f, spec.nominalVbe);
     diode.emissionCoefficient = 1.0f;
     diode.thermalVoltage = std::max(1.0e-4f, spec.thermalVoltage);
-    diode.seriesResistanceOhms = 1.0f;
+
+    // A transistor's intrinsic B-E junction is not connected to the external base
+    // through zero ohms. A modest base-spreading resistance both reflects that
+    // physical loss and prevents the beta-controlled collector source from turning
+    // a badly initialized exponential junction into an unrealistically stiff
+    // hundreds-of-siemens Newton stamp. The nominal operating-point error is tiny
+    // because base current is only a few microamps in these pedal buffers.
+    diode.seriesResistanceOhms = 75.0f;
     diode.junctionCapacitanceFarads = 0.0f; // explicit capacitors below
     diode.reverseVoltageRating = std::max(5.0f, spec.maxCollectorVoltage);
     diode.currentRatingAmps = std::max(1.0e-3f, spec.maxCollectorCurrentAmps);
