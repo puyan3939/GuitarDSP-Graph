@@ -6,6 +6,12 @@
 #include "guitardsp/dsp/ConvolutionNode.h"
 #include "guitardsp/graph/AdvancedRoutingNodes.h"
 #include "guitardsp/graph/IONodes.h"
+#include "guitardsp/hq/BD2TopologyNode.h"
+#include "guitardsp/hq/DS1TopologyNode.h"
+#include "guitardsp/hq/PartitionedCabNode.h"
+#include "guitardsp/hq/ReferenceAmpTopologyNode.h"
+#include "guitardsp/hq/TS808TopologyNode.h"
+#include "guitardsp/hq/TwoTransistorFuzzNode.h"
 
 namespace guitardsp::graph {
 
@@ -22,8 +28,14 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("dynamics.compressor", [] { return std::make_unique<dsp::CompressorNode>(); });
     r.registerType("dynamics.transient", [] { return std::make_unique<dsp::TransientEnhancerNode>(); });
     r.registerType("drive.ds1_prototype", [] { return std::make_unique<dsp::DS1PrototypeNode>(); });
+    r.registerType("drive.ds1_hq", [] { return std::make_unique<hq::DS1TopologyNode>(); });
+    r.registerType("drive.ts808_hq", [] { return std::make_unique<hq::TS808TopologyNode>(); });
+    r.registerType("drive.bd2_hq", [] { return std::make_unique<hq::BD2TopologyNode>(); });
+    r.registerType("drive.fuzz_two_transistor", [] { return std::make_unique<hq::TwoTransistorFuzzNode>(); });
+    r.registerType("amp.reference_hq", [] { return std::make_unique<hq::ReferenceAmpTopologyNode>(); });
     r.registerType("dynamics.keyed_gate", [] { return std::make_unique<dsp::KeyedGateNode>(); });
     r.registerType("cab.fir", [] { return std::make_unique<dsp::ConvolutionNode>(); });
+    r.registerType("cab.partitioned_hq", [] { return std::make_unique<hq::PartitionedCabNode>(); });
     r.registerType("route.crossover", [] { return std::make_unique<CrossoverSplitNode>(); });
     r.registerType("io.output", [] { return std::make_unique<OutputBusNode>(); });
     return r;
