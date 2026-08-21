@@ -67,15 +67,16 @@ int main() {
 
     {
         // Isolate the exact bias arrangement used by the TS808 emitter followers.
-        // This tells us whether a failure belongs to the BJT macro itself or only
-        // appears after the op-amp/clipping network is connected.
+        // The supplies are source-stepped just like the complete pedal so the test
+        // checks the physical operating point rather than an intentionally hostile
+        // all-zero -> 9 V Newton jump.
         circuit::MnaCircuitEngine c;
         const auto supply = c.addNode();
         const auto vref = c.addNode();
         const auto base = c.addNode();
         const auto emitter = c.addNode();
-        c.addVoltageSource(supply, circuit::ground, 9.0f);
-        c.addVoltageSource(vref, circuit::ground, 4.5f);
+        const auto supplySource = c.addVoltageSource(supply, circuit::ground, 0.0f);
+        const auto vrefSource = c.addVoltageSource(vref, circuit::ground, 0.0f);
         c.addResistor(vref, base, resistor(510000.0f));
         c.addResistor(emitter, circuit::ground, resistor(10000.0f));
 
@@ -91,7 +92,14 @@ int main() {
 
         ok &= require(c.prepare(48000.0), "isolated TS808 BJT buffer prepares");
         c.setNonlinearSolverMode(circuit::MnaCircuitEngine::NonlinearSolverMode::denseReference);
-        const auto stats = c.processSample(40, 1.0e-7f);
+        circuit::MnaCircuitEngine::SolveStats stats{};
+        for (int step = 1; step <= 128; ++step) {
+            const float t = static_cast<float>(step) / 128.0f;
+            c.setVoltageSource(supplySource, 9.0f * t);
+            c.setVoltageSource(vrefSource, 4.5f * t);
+            stats = c.processSample(40, 1.0e-7f);
+            stats = c.processSample(40, 1.0e-7f);
+        }
         const float vb = c.voltage(base);
         const float ve = c.voltage(emitter);
         const float iForward = c.currentThroughVoltageSource(q.forwardCurrentSense);
