@@ -1,4 +1,4 @@
-#include "guitardsp/circuit/BjtForwardActiveSubcircuit.h"
+#include "guitardsp/circuit/BjtEbersMollSubcircuit.h"
 #include "guitardsp/circuit/DiodeParasiticSubcircuit.h"
 #include "guitardsp/circuit/TS808Circuit.h"
 #include "guitardsp/hq/TS808CircuitNode.h"
@@ -87,20 +87,22 @@ int main() {
         transistor.maxCollectorVoltage = 50.0f;
         transistor.maxCollectorCurrentAmps = 0.15f;
         transistor.inputCapacitanceFarads = 8.0e-12f;
-        const auto q = circuit::addBjtForwardActiveSubcircuit(c, supply, base, emitter, transistor);
+        const auto q = circuit::addBjtEbersMollSubcircuit(c, supply, base, emitter, transistor);
 
         ok &= require(c.prepare(48000.0), "isolated TS808 BJT buffer prepares");
         c.setNonlinearSolverMode(circuit::MnaCircuitEngine::NonlinearSolverMode::denseReference);
         const auto stats = c.processSample(40, 1.0e-7f);
         const float vb = c.voltage(base);
         const float ve = c.voltage(emitter);
-        const float ib = c.currentThroughVoltageSource(q.baseCurrentSense);
-        std::cout << "DIAG isolated-bjt vb=" << vb << " ve=" << ve << " ib=" << ib
+        const float iForward = c.currentThroughVoltageSource(q.forwardCurrentSense);
+        const float iReverse = c.currentThroughVoltageSource(q.reverseCurrentSense);
+        std::cout << "DIAG isolated-bjt vb=" << vb << " ve=" << ve
+                  << " if=" << iForward << " ir=" << iReverse
                   << " iter=" << stats.iterations << " converged=" << stats.converged
                   << " singular=" << stats.singular << '\n';
         ok &= require(!stats.singular && stats.converged && std::isfinite(ve) &&
                       ve > 2.5f && ve < 4.5f,
-                      "isolated TS808 forward-active BJT settles as emitter follower");
+                      "isolated TS808 Ebers-Moll BJT settles as emitter follower");
     }
 
     {
