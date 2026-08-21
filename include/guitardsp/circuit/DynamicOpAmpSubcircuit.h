@@ -132,7 +132,11 @@ inline hq::MOSFETSpec opAmpRailShunt(hq::TransistorPolarity polarity) noexcept {
         ? "OpAmp negative-rail shunt" : "OpAmp positive-rail shunt";
     device.polarity = polarity;
     device.thresholdVoltage = opAmpRailShuntThresholdVolts();
-    device.transconductance = 1.0f;
+    // A moderate square-law coefficient is intentionally used here. A very stiff
+    // artificial shunt approximates an ideal clamp but produces enormous Newton
+    // curvature after a bad iterate. 20 mA/V^2 still clamps decisively around audio
+    // rails while allowing the global circuit Newton solve to recover smoothly.
+    device.transconductance = 0.02f;
     device.lambda = 0.0f;
     device.bodyDiodeForwardVoltage = 1000.0f;
     device.gateCapacitanceFarads = 0.0f;
@@ -232,9 +236,6 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
                                                    output,
                                                    detail::opAmpOutputCurrentLimiter(spec));
 
-    // A separate pair of rail shunts constrains the external output pin. Without
-    // these, the intentionally current-limited connection can leave a lightly loaded
-    // output node free to reach non-physical voltages inside nonlinear feedback loops.
     handles.outputPositiveRailShunt = engine.addMosfet(output, output,
         handles.positiveClamp, detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
     handles.outputNegativeRailShunt = engine.addMosfet(output, output,
