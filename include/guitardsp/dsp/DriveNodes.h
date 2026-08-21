@@ -13,6 +13,12 @@ class DS1PrototypeNode final : public guitardsp::graph::AudioNode {
 public:
     std::string_view typeName() const noexcept override { return "DS1Prototype"; }
     guitardsp::graph::NodeCategory category() const noexcept override { return guitardsp::graph::NodeCategory::drive; }
+    std::size_t parameterCount() const noexcept override { return 3; }
+    guitardsp::graph::ParameterDescriptor parameterDescriptor(std::size_t i) const noexcept override {
+        using namespace guitardsp::graph; static constexpr ParameterDescriptor p[]={{"distortion","Distortion",0.0f,1.0f,0.55f,ParameterUnit::percent,1.0f},{"tone","Tone",0.0f,1.0f,0.58f,ParameterUnit::percent,1.0f},{"level","Level",0.0f,1.5f,0.72f,ParameterUnit::generic,1.0f}};return i<3?p[i]:ParameterDescriptor{};
+    }
+    float parameterValue(std::size_t i) const noexcept override {switch(i){case 0:return distortion_.load();case 1:return tone_.load();case 2:return level_.load();default:return 0.0f;}}
+    bool setParameterValue(std::size_t i,float v) noexcept override { if(i>=3)return false;v=guitardsp::graph::clampParameter(parameterDescriptor(i),v);if(i==0)setDistortion(v);else if(i==1)setTone(v);else setLevel(v);return true;}
 
     void setDistortion(float v) noexcept { distortion_.store(std::clamp(v, 0.0f, 1.0f), std::memory_order_relaxed); }
     void setTone(float v) noexcept { tone_.store(std::clamp(v, 0.0f, 1.0f), std::memory_order_relaxed); }

@@ -14,6 +14,10 @@ public:
     void setGain(float gain) noexcept { gain_.store(gain, std::memory_order_relaxed); }
     [[nodiscard]] float gain() const noexcept { return gain_.load(std::memory_order_relaxed); }
     std::string_view typeName() const noexcept override { return "Gain"; }
+    std::size_t parameterCount() const noexcept override { return 1; }
+    ParameterDescriptor parameterDescriptor(std::size_t i) const noexcept override { return i==0 ? ParameterDescriptor{"gain","Gain",0.0f,4.0f,1.0f,ParameterUnit::generic,1.0f} : ParameterDescriptor{}; }
+    float parameterValue(std::size_t i) const noexcept override { return i==0 ? gain() : 0.0f; }
+    bool setParameterValue(std::size_t i,float v) noexcept override { if(i!=0)return false; setGain(clampParameter(parameterDescriptor(0),v)); return true; }
     void prepare(const PrepareSpec&) override {}
     void reset() noexcept override {}
     void process(const AudioBuffer& input, AudioBuffer& output, int numSamples) noexcept override {
@@ -55,6 +59,10 @@ public:
     explicit PanNode(float pan = 0.0f) : pan_(std::clamp(pan, -1.0f, 1.0f)) {}
     void setPan(float value) noexcept { pan_.store(std::clamp(value, -1.0f, 1.0f), std::memory_order_relaxed); }
     std::string_view typeName() const noexcept override { return "Pan"; }
+    std::size_t parameterCount() const noexcept override { return 1; }
+    ParameterDescriptor parameterDescriptor(std::size_t i) const noexcept override { return i==0 ? ParameterDescriptor{"pan","Pan",-1.0f,1.0f,0.0f,ParameterUnit::generic,1.0f} : ParameterDescriptor{}; }
+    float parameterValue(std::size_t i) const noexcept override { return i==0 ? pan_.load(std::memory_order_relaxed) : 0.0f; }
+    bool setParameterValue(std::size_t i,float v) noexcept override { if(i!=0)return false; setPan(v); return true; }
     void prepare(const PrepareSpec&) override {}
     void reset() noexcept override {}
     void process(const AudioBuffer& input, AudioBuffer& output, int numSamples) noexcept override {
@@ -153,6 +161,10 @@ public:
     explicit DirectOutNode(float level = 1.0f) : level_(level) {}
     void setLevel(float level) noexcept { level_.store(level, std::memory_order_relaxed); }
     std::string_view typeName() const noexcept override { return "DirectOut"; }
+    std::size_t parameterCount() const noexcept override { return 1; }
+    ParameterDescriptor parameterDescriptor(std::size_t i) const noexcept override { return i==0 ? ParameterDescriptor{"level","Level",0.0f,2.0f,1.0f,ParameterUnit::generic,1.0f} : ParameterDescriptor{}; }
+    float parameterValue(std::size_t i) const noexcept override { return i==0 ? level_.load(std::memory_order_relaxed) : 0.0f; }
+    bool setParameterValue(std::size_t i,float v) noexcept override { if(i!=0)return false; setLevel(clampParameter(parameterDescriptor(0),v)); return true; }
     NodeCategory category() const noexcept override { return NodeCategory::io; }
     void prepare(const PrepareSpec&) override {}
     void reset() noexcept override {}

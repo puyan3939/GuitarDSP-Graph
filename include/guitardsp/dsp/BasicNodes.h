@@ -12,6 +12,9 @@ using guitardsp::graph::AudioBuffer;
 using guitardsp::graph::AudioNode;
 using guitardsp::graph::NodeCategory;
 using guitardsp::graph::PrepareSpec;
+using guitardsp::graph::ParameterDescriptor;
+using guitardsp::graph::ParameterUnit;
+using guitardsp::graph::clampParameter;
 
 class OnePoleFilterNode final : public AudioNode {
 public:
@@ -45,6 +48,27 @@ private:
 class CompressorNode final : public AudioNode {
 public:
     std::string_view typeName() const noexcept override { return "Compressor"; }
+    std::size_t parameterCount() const noexcept override { return 7; }
+    ParameterDescriptor parameterDescriptor(std::size_t i) const noexcept override {
+        static constexpr ParameterDescriptor p[] = {
+            {"threshold","Threshold",-60.0f,0.0f,-18.0f,ParameterUnit::decibels,1.0f},
+            {"ratio","Ratio",1.0f,20.0f,4.0f,ParameterUnit::generic,1.0f},
+            {"attack","Attack",0.05f,200.0f,12.0f,ParameterUnit::milliseconds,0.5f},
+            {"release","Release",5.0f,3000.0f,120.0f,ParameterUnit::milliseconds,0.4f},
+            {"makeup","Makeup",-18.0f,18.0f,0.0f,ParameterUnit::decibels,1.0f},
+            {"mix","Mix",0.0f,1.0f,1.0f,ParameterUnit::percent,1.0f},
+            {"sidechainHp","Sidechain HP",10.0f,1000.0f,60.0f,ParameterUnit::hertz,0.4f}};
+        return i<7?p[i]:ParameterDescriptor{};
+    }
+    float parameterValue(std::size_t i) const noexcept override {
+        switch(i){case 0:return thresholdDb_.load();case 1:return ratio_.load();case 2:return attackMs_.load();case 3:return releaseMs_.load();case 4:return makeupDb_.load();case 5:return mix_.load();case 6:return sidechainHpHz_.load();default:return 0.0f;}
+    }
+    bool setParameterValue(std::size_t i,float v) noexcept override {
+        if(i>=7)return false;
+        v=clampParameter(parameterDescriptor(i),v);
+        switch(i){case 0:setThresholdDb(v);break;case 1:setRatio(v);break;case 2:setAttackMs(v);break;case 3:setReleaseMs(v);break;case 4:setMakeupDb(v);break;case 5:setMix(v);break;case 6:setSidechainHpHz(v);break;}
+        return true;
+    }
     NodeCategory category() const noexcept override { return NodeCategory::dynamics; }
     void prepare(const PrepareSpec& spec) override { sampleRate_ = spec.sampleRate; channels_ = std::clamp(spec.channels, 1, 2); reset(); }
     void reset() noexcept override { envelope_.fill(0.0f); sidechainLow_.fill(0.0f); }
@@ -108,6 +132,12 @@ private:
 class TransientEnhancerNode final : public AudioNode {
 public:
     std::string_view typeName() const noexcept override { return "TransientEnhancer"; }
+    std::size_t parameterCount() const noexcept override { return 4; }
+    ParameterDescriptor parameterDescriptor(std::size_t i) const noexcept override {
+        static constexpr ParameterDescriptor p[]={{"amount","Amount",0.0f,2.0f,0.45f,ParameterUnit::generic,1.0f},{"brightness","Brightness",500.0f,10000.0f,2200.0f,ParameterUnit::hertz,0.4f},{"decay","Decay",8.0f,250.0f,55.0f,ParameterUnit::milliseconds,0.6f},{"drive","Harmonic Drive",0.0f,4.0f,0.35f,ParameterUnit::generic,1.0f}}; return i<4?p[i]:ParameterDescriptor{};
+    }
+    float parameterValue(std::size_t i) const noexcept override { switch(i){case 0:return amount_.load();case 1:return brightnessHz_.load();case 2:return decayMs_.load();case 3:return drive_.load();default:return 0.0f;} }
+    bool setParameterValue(std::size_t i,float v) noexcept override { if(i>=4)return false; v=clampParameter(parameterDescriptor(i),v); switch(i){case 0:setAmount(v);break;case 1:setBrightnessHz(v);break;case 2:setDecayMs(v);break;case 3:setDrive(v);break;}return true; }
     NodeCategory category() const noexcept override { return NodeCategory::dynamics; }
     void prepare(const PrepareSpec& spec) override { sampleRate_ = spec.sampleRate; channels_ = std::clamp(spec.channels, 1, 2); reset(); }
     void reset() noexcept override { fast_.fill(0.0f); slow_.fill(0.0f); hpLow_.fill(0.0f); }

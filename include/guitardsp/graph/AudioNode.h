@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioBuffer.h"
+#include "Parameter.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -35,9 +36,19 @@ public:
     virtual void reset() noexcept = 0;
     virtual void process(const AudioBuffer& input, AudioBuffer& output, int numSamples) noexcept = 0;
 
-    // Declared algorithmic latency. Changing it requires a graph rebuild so PDC can be recalculated.
     [[nodiscard]] virtual int latencySamples() const noexcept { return 0; }
     [[nodiscard]] virtual int tailSamples() const noexcept { return 0; }
+
+    [[nodiscard]] virtual std::size_t parameterCount() const noexcept { return 0; }
+    [[nodiscard]] virtual ParameterDescriptor parameterDescriptor(std::size_t) const noexcept { return {}; }
+    [[nodiscard]] virtual float parameterValue(std::size_t) const noexcept { return 0.0f; }
+    virtual bool setParameterValue(std::size_t, float) noexcept { return false; }
+
+    [[nodiscard]] int parameterIndex(std::string_view id) const noexcept {
+        for (std::size_t i = 0; i < parameterCount(); ++i)
+            if (parameterDescriptor(i).id == id) return static_cast<int>(i);
+        return -1;
+    }
 
     void setBypassed(bool value) noexcept { bypassed_.store(value, std::memory_order_relaxed); }
     [[nodiscard]] bool isBypassed() const noexcept { return bypassed_.load(std::memory_order_relaxed); }

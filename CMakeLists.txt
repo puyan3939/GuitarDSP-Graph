@@ -11,6 +11,7 @@ add_library(GuitarDSPGraphCore
     src/graph/Graph.cpp
     src/graph/CompiledAudioGraph.cpp
     src/graph/NodeRegistry.cpp
+    src/graph/GraphBuilder.cpp
 )
 
 target_include_directories(GuitarDSPGraphCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -45,3 +46,7 @@ add_test(NAME dsp_nodes COMMAND GuitarDSPNodeTests)
 add_executable(GuitarDSPNodeLibraryTests tests/NodeLibraryTests.cpp)
 target_link_libraries(GuitarDSPNodeLibraryTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME node_library COMMAND GuitarDSPNodeLibraryTests)
+
+add_executable(GuitarDSPGraphDocumentTests tests/GraphDocumentTests.cpp)
+target_link_libraries(GuitarDSPGraphDocumentTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME graph_document COMMAND GuitarDSPGraphDocumentTests)
