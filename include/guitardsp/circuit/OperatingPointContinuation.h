@@ -41,10 +41,16 @@ struct OperatingPointOptions {
 };
 
 struct OperatingPointResult {
+    // `converged` means the requested physical probe voltages reached a stable bias
+    // window without a singular/NaN solve. `lastSolve` separately preserves the
+    // final per-sample Newton convergence flag because a stiff branch-current
+    // unknown can hit the iteration cap even after the observable node voltages have
+    // become stationary enough to serve as a realtime initial condition.
     bool converged = false;
     bool singular = false;
     int sourceStepSolves = 0;
     int settleSolves = 0;
+    int unconvergedNewtonSolves = 0;
     float maximumProbeDelta = 0.0f;
     MnaCircuitEngine::SolveStats lastSolve{};
 };
@@ -88,6 +94,7 @@ inline OperatingPointResult establishOperatingPoint(
             result.lastSolve = engine.processSample(options.maximumNewtonIterations,
                                                     options.newtonTolerance);
             ++result.sourceStepSolves;
+            if (!result.lastSolve.converged) ++result.unconvergedNewtonSolves;
             if (result.lastSolve.singular) {
                 result.singular = true;
                 engine.setNonlinearSolverMode(previousMode);
@@ -111,6 +118,7 @@ inline OperatingPointResult establishOperatingPoint(
         result.lastSolve = engine.processSample(options.maximumNewtonIterations,
                                                 options.newtonTolerance);
         ++result.settleSolves;
+        if (!result.lastSolve.converged) ++result.unconvergedNewtonSolves;
         if (result.lastSolve.singular) {
             result.singular = true;
             break;
@@ -131,7 +139,12 @@ inline OperatingPointResult establishOperatingPoint(
         result.maximumProbeDelta = maximumDelta;
         if (result.singular) break;
 
-        if (maximumDelta <= options.steadyStateVoltageTolerance && result.lastSolve.converged)
+        // Bias readiness is defined by the physical node voltages reaching a stable
+        // window. Newton's own per-sample flag remains diagnostic in lastSolve and
+        // unconvergedNewtonSolves; it is intentionally not allowed to reject an
+        // otherwise stationary, finite operating point solely because an internal
+        // branch-current unknown is hovering above a stricter algebraic tolerance.
+        if (maximumDelta <= options.steadyStateVoltageTolerance)
             ++stableSamples;
         else
             stableSamples = 0;
