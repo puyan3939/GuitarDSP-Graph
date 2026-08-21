@@ -11,22 +11,36 @@ This project distinguishes between circuit/component references, simulated data,
 - MD5 published by Zenodo: `4d08dac89b44f618f2d6c2a69739e104`
 - Authors: Stepan Miklanek, Alec Wright, Vesa Valimaki, Jiri Schimmel
 - Purpose: audio dataset used for the DAFx-23 work *Neural Grey-Box Guitar Amplifier Modelling with Limited Data*
+- Sample rate used by the upstream realtime/model code: 44.1 kHz
 - Capture note from the project page: recorded from the speaker output of a Marshall JVM 410H connected to a reactive load; presented references do not apply a speaker cabinet IR.
 
-This is useful for whole-amplifier and tone-control validation. It is large enough that it should not be committed to this repository. Keep it in a local `external-data/` directory and validate the checksum before use.
+The upstream public loader encodes controls directly in directory/file names. Examples include:
 
-Suggested local download command:
-
-```bash
-mkdir -p external-data/marshall-jvm410h
-curl -L --fail --continue-at - \
-  -o external-data/marshall-jvm410h/MarshallJVM410H.zip \
-  https://zenodo.org/records/7970723/files/MarshallJVM410H.zip
-printf '%s  %s\n' 4d08dac89b44f618f2d6c2a69739e104 \
-  external-data/marshall-jvm410h/MarshallJVM410H.zip | md5sum -c -
+```text
+B0_M5_T5_G5/B0_M5_T5_G5-speakerout.wav
+B5_M0_T5_G5/B5_M0_T5_G5-speakerout.wav
+B5_M5_T10_G5/B5_M5_T10_G5-speakerout.wav
+B6.5_M8.5_T3.5_G5/B6.5_M8.5_T3.5_G5-speakerout.wav
 ```
 
-The downloader is intentionally manual because the archive is multi-gigabyte. CI must not fetch it.
+The published loader interprets B/M/T/G as bass, middle, treble and gain values divided by 10 for conditioning. It constructs a paired input WAV from the same condition name. This makes the dataset directly useful for whole-amplifier and control-response validation, while still requiring careful level/alignment handling before sample-wise model scoring.
+
+The archive is too large for Git or CI. The repository provides an explicit local workflow:
+
+```bash
+# Download + checksum only
+tools/fetch_marshall_jvm410h.sh external-data/marshall-jvm410h
+
+# Download/checksum + extract
+tools/fetch_marshall_jvm410h.sh external-data/marshall-jvm410h extract
+
+# Download/checksum + extract + generate a CSV condition manifest
+tools/fetch_marshall_jvm410h.sh external-data/marshall-jvm410h index
+```
+
+`tools/index_jvm410h_dataset.py` scans the extracted condition directories and emits `jvm410h_manifest.csv` with setting, bass, mid, treble, gain, paired input path and speaker-output path. The manifest is intended as the input contract for future offline fitting/evaluation tools.
+
+CI must not fetch the multi-gigabyte archive.
 
 ## BYU guitar amplifier directivity measurements
 
