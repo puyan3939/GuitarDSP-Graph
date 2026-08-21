@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AmpDriverAndFeedback.h"
 #include "AmpTopologyPrimitives.h"
 #include "DeviceStages.h"
 #include "PolyphaseOversampler.h"
@@ -16,8 +17,6 @@
 
 namespace guitardsp::hq {
 
-// Generic high-quality amplifier topology used to validate the reusable amp blocks.
-// It remains an engineering reference: named hardware claims require measured fits.
 class ReferenceAmpTopologyNode final : public graph::AudioNode {
 public:
     std::string_view typeName() const noexcept override { return "Reference Amp Topology"; }
@@ -31,6 +30,8 @@ public:
         interCoupling_.assign(channels, {});
         v1_.assign(channels, {});
         v2_.assign(channels, {});
+        cathodeFollower_.assign(channels, {});
+        plateDriver_.assign(channels, {});
         tone_.assign(channels, {});
         phaseInverter_.assign(channels, {});
         feedback_.assign(channels, {});
@@ -58,9 +59,11 @@ public:
             interCoupling_[i].prepare(highRate, 55.0f);
             v1_[i].prepare(highRate, first);
             v2_[i].prepare(highRate, second);
+            cathodeFollower_[i].prepare(highRate);
+            plateDriver_[i].prepare(highRate);
             tone_[i].prepare(highRate, ToneStackFamily::reference);
             phaseInverter_[i].prepare(highRate);
-            feedback_[i].prepare(highRate, 7200.0f);
+            feedback_[i].prepare(highRate);
             power_[i].prepare(highRate);
         }
         reset();
@@ -72,6 +75,8 @@ public:
         for (auto& x : interCoupling_) x.reset();
         for (auto& x : v1_) x.reset();
         for (auto& x : v2_) x.reset();
+        for (auto& x : cathodeFollower_) x.reset();
+        for (auto& x : plateDriver_) x.reset();
         for (auto& x : tone_) x.reset();
         for (auto& x : phaseInverter_) x.reset();
         for (auto& x : feedback_) x.reset();
@@ -86,6 +91,7 @@ public:
         const float master = master_.load(std::memory_order_relaxed);
         const float presence = presence_.load(std::memory_order_relaxed);
         const float outputGain = std::pow(10.0f, outputDb_.load(std::memory_order_relaxed) / 20.0f);
+
         const float tubeSelector = powerTube_.load(std::memory_order_relaxed);
         const auto tubeType = tubeSelector < 0.5f ? PowerTubeType::el34
                            : tubeSelector < 1.5f ? PowerTubeType::sixL6GC
@@ -94,16 +100,30 @@ public:
         const auto stackFamily = stackSelector < 0.5f ? ToneStackFamily::reference
                                : stackSelector < 1.5f ? ToneStackFamily::british
                                                      : ToneStackFamily::american;
+        const float driverSelector = toneDriver_.load(std::memory_order_relaxed);
+        const auto driverType = driverSelector < 0.5f ? ToneStackDriverType::reference
+                              : driverSelector < 1.5f ? ToneStackDriverType::cathodeFollower
+                                                     : ToneStackDriverType::plateDriven;
+        const float feedbackSelector = feedbackVoicing_.load(std::memory_order_relaxed);
+        const auto feedbackVoicing = feedbackSelector < 0.5f ? FeedbackVoicing::reference
+                                   : feedbackSelector < 1.5f ? FeedbackVoicing::british
+                                                            : FeedbackVoicing::american;
 
         for (auto& t : tone_) {
             t.setFamily(stackFamily);
             t.setControls(bass, mid, treble);
         }
+        for (auto& d : cathodeFollower_) d.setDrive(0.86f + 0.50f * gain);
+        for (auto& d : plateDriver_) d.setDrive(0.78f + 0.62f * gain);
         for (auto& p : phaseInverter_) {
             p.setDrive(1.1f + 2.8f * master);
             p.setImbalance(0.02f + 0.05f * gain);
         }
-        for (auto& f : feedback_) f.setAmount(0.48f - 0.30f * presence);
+        for (auto& f : feedback_) {
+            f.setVoicing(feedbackVoicing);
+            f.setPresence(presence);
+            f.setAmount(0.34f + 0.18f * (1.0f - presence));
+        }
         for (auto& p : power_) {
             p.setDrive(1.0f + 5.0f * master);
             p.setSag(0.08f + 0.34f * master);
@@ -121,6 +141,10 @@ public:
             y = v1_[i].process(y * preGain);
             y = interCoupling_[i].process(y);
             y = v2_[i].process(y * secondGain);
+            if (driverType == ToneStackDriverType::cathodeFollower)
+                y = cathodeFollower_[i].process(y);
+            else if (driverType == ToneStackDriverType::plateDriven)
+                y = plateDriver_[i].process(y);
             y = tone_[i].process(y);
             y = phaseInverter_[i].process(y * (0.30f + 1.70f * master));
             y = feedback_[i].drive(y);
@@ -147,6 +171,8 @@ public:
             case 6: return outputDb_.load(std::memory_order_relaxed);
             case 7: return powerTube_.load(std::memory_order_relaxed);
             case 8: return toneStack_.load(std::memory_order_relaxed);
+            case 9: return toneDriver_.load(std::memory_order_relaxed);
+            case 10: return feedbackVoicing_.load(std::memory_order_relaxed);
             default: return 0.0f;
         }
     }
@@ -163,6 +189,8 @@ public:
             case 6: outputDb_.store(v, std::memory_order_relaxed); break;
             case 7: powerTube_.store(std::round(v), std::memory_order_relaxed); break;
             case 8: toneStack_.store(std::round(v), std::memory_order_relaxed); break;
+            case 9: toneDriver_.store(std::round(v), std::memory_order_relaxed); break;
+            case 10: feedbackVoicing_.store(std::round(v), std::memory_order_relaxed); break;
             default: return false;
         }
         return true;
@@ -172,9 +200,11 @@ private:
     PolyphaseOversampler oversampler_;
     std::vector<CouplingHighpass> inputCoupling_, interCoupling_;
     std::vector<TriodeCommonCathodeStage> v1_, v2_;
+    std::vector<CathodeFollowerDriver> cathodeFollower_;
+    std::vector<PlateToneStackDriver> plateDriver_;
     std::vector<YehSmithToneStack> tone_;
     std::vector<LongTailPairPhaseInverter> phaseInverter_;
-    std::vector<NegativeFeedbackLoop> feedback_;
+    std::vector<VoicedNegativeFeedbackLoop> feedback_;
     std::vector<PushPullPowerStage> power_;
 
     std::atomic<float> gain_{0.35f};
@@ -186,8 +216,10 @@ private:
     std::atomic<float> outputDb_{-10.0f};
     std::atomic<float> powerTube_{0.0f};
     std::atomic<float> toneStack_{0.0f};
+    std::atomic<float> toneDriver_{0.0f};
+    std::atomic<float> feedbackVoicing_{0.0f};
 
-    static constexpr std::array<graph::ParameterDescriptor, 9> descriptors_{{
+    static constexpr std::array<graph::ParameterDescriptor, 11> descriptors_{{
         {"gain", "Gain", 0.0f, 1.0f, 0.35f, graph::ParameterUnit::percent, 1.0f},
         {"bass", "Bass", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
         {"mid", "Mid", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
@@ -195,8 +227,10 @@ private:
         {"master", "Master", 0.0f, 1.0f, 0.45f, graph::ParameterUnit::percent, 1.0f},
         {"presence", "Presence", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
         {"output", "Output", -30.0f, 6.0f, -10.0f, graph::ParameterUnit::decibels, 1.0f},
-        {"power_tube", "Power Tube (0=EL34, 1=6L6GC, 2=KT88)", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f},
-        {"tone_stack", "Tone Stack (0=Reference, 1=British, 2=American)", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f}
+        {"power_tube", "Power Tube", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f},
+        {"tone_stack", "Tone Stack", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f},
+        {"tone_driver", "Tone Stack Driver", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f},
+        {"feedback_voicing", "Feedback Voicing", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f}
     }};
 };
 
