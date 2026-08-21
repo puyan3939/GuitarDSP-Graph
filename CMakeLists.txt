@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.26.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.27.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -118,3 +118,6 @@ add_test(NAME active_device_fidelity COMMAND GuitarDSPActiveDeviceFidelityTests)
 add_executable(GuitarDSPMnaSparseNonlinearTests tests/MnaSparseNonlinearTests.cpp)
 target_link_libraries(GuitarDSPMnaSparseNonlinearTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME mna_sparse_nonlinear COMMAND GuitarDSPMnaSparseNonlinearTests)
+add_executable(GuitarDSPPedalCircuitReadinessTests tests/PedalCircuitReadinessTests.cpp)
+target_link_libraries(GuitarDSPPedalCircuitReadinessTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME pedal_circuit_readiness COMMAND GuitarDSPPedalCircuitReadinessTests)
