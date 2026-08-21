@@ -2,6 +2,7 @@
 #include "guitardsp/hq/FFT.h"
 #include "guitardsp/hq/PartitionedConvolver.h"
 #include "guitardsp/hq/PolyphaseOversampler.h"
+#include "guitardsp/hq/StreamingConvolver.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,6 @@ bool require(bool condition, const char* name) {
 int main() {
     bool ok = true;
 
-    // FFT energy sanity: forward FFT energy is N times time-domain energy.
     {
         constexpr std::size_t n = 256;
         std::vector<std::complex<float>> x(n);
@@ -40,7 +40,6 @@ int main() {
         ok &= require(relative < 2.0e-4, "FFT satisfies Parseval scaling");
     }
 
-    // Long IR reference: uniform partitioned convolution must agree with direct convolution.
     {
         constexpr int block = 16;
         constexpr int blocks = 8;
@@ -71,7 +70,32 @@ int main() {
         ok &= require(maxError < 2.0e-4f, "partitioned convolution matches direct convolution");
     }
 
-    // Identity-through-polyphase should preserve DC after filter warm-up.
+    {
+        constexpr int partition = 8;
+        constexpr int total = 40;
+        const std::vector<float> ir {1.0f, 0.5f, -0.25f, 0.125f, 0.0625f, 0.0f, 0.0f, 0.0f, 0.03125f};
+        std::vector<float> input(total, 0.0f), output(total, 0.0f), expected(total, 0.0f);
+        input[0] = 1.0f;
+
+        hq::StreamingPartitionedConvolver c;
+        c.prepare(partition, 32);
+        c.setImpulseResponse(ir);
+        const int hostBlocks[] {3, 5, 7, 4, 9, 12};
+        int offset = 0;
+        for (int size : hostBlocks) {
+            c.process(input.data() + offset, output.data() + offset, size);
+            offset += size;
+        }
+        for (std::size_t k = 0; k < ir.size(); ++k) {
+            const std::size_t index = k + static_cast<std::size_t>(partition);
+            if (index < expected.size()) expected[index] = ir[k];
+        }
+        float maxError = 0.0f;
+        for (int i = 0; i < total; ++i) maxError = std::max(maxError, std::abs(output[static_cast<std::size_t>(i)] - expected[static_cast<std::size_t>(i)]));
+        ok &= require(c.latencySamples() == partition, "streaming convolver reports deterministic partition latency");
+        ok &= require(maxError < 2.0e-4f, "streaming convolver accepts arbitrary host block sizes");
+    }
+
     {
         constexpr int samples = 1024;
         graph::AudioBuffer in(1, samples), out(1, samples);
