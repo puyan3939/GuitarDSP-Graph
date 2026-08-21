@@ -13,19 +13,16 @@ namespace guitardsp::circuit {
 // - finite DC open-loop gain
 // - dominant-pole / gain-bandwidth behavior
 // - input offset and input bias current
-// - rail headroom limiting through polynomial MOSFET shunts
+// - internal large-signal saturation and output rail headroom limiting
 // - slew-rate limiting through a current-limited JFET / capacitor stage
 // - finite output resistance and smooth bidirectional output-current limiting
 //
 // The large-signal stage deliberately keeps high-gain, slew and load-current
-// responsibilities separated. The dominant-pole command is buffered before the
-// slew limiter, and the slew node is buffered again before the load-current path.
-// Both the internal slew state and the externally visible output are constrained
-// to supply-relative headroom. The second rail clamp matters when the current-
-// limiter is feeding a high-impedance/nonlinear feedback network: a real output
-// pin cannot drift beyond its supply rails merely because load current is small.
-// Rail shunts use the engine's bounded square-law MOSFET stamp rather than an
-// exponential Shockley clamp so gross internal errors remain recoverable by Newton.
+// responsibilities separated. The dominant pole itself is constrained to the
+// available supply neighborhood before it drives the slew limiter. This avoids the
+// non-physical multi-kilovolt/multimegavolt integrator wind-up that a perfectly
+// linear input transconductance can otherwise create under hard overload. The slew
+// node and externally visible output are constrained separately as well.
 struct DynamicOpAmpSubcircuit {
     Node dominantPole = ground;
     Node slewCommand = ground;
@@ -41,6 +38,8 @@ struct DynamicOpAmpSubcircuit {
     ControlledSourceHandle differentialGm{};
     ControlledSourceHandle offsetGm{};
     SourceHandle offsetVoltage{};
+    MosfetHandle dominantPositiveRailShunt{};
+    MosfetHandle dominantNegativeRailShunt{};
     ControlledSourceHandle slewCommandFollower{};
 
     JfetHandle slewLimiter{};
@@ -208,6 +207,22 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
         engine.addCurrentSource(inverting, reference, spec.inputBiasCurrentAmps);
     }
 
+    handles.positiveClampOffset = engine.addVoltageSource(positiveRail,
+        handles.positiveClamp, detail::positiveClampOffset(spec));
+    handles.negativeClampOffset = engine.addVoltageSource(handles.negativeClamp,
+        negativeRail, detail::negativeClampOffset(spec));
+
+    // Saturate the dominant-pole integrator itself. This is the circuit-level
+    // equivalent of limiting internal op-amp stage swing before the dedicated slew
+    // stage. It preserves the small-signal open-loop transfer while preventing
+    // extreme integrator wind-up during startup or hard feedback clipping.
+    handles.dominantPositiveRailShunt = engine.addMosfet(handles.dominantPole,
+        handles.dominantPole, handles.positiveClamp,
+        detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
+    handles.dominantNegativeRailShunt = engine.addMosfet(handles.dominantPole,
+        handles.dominantPole, handles.negativeClamp,
+        detail::opAmpRailShunt(hq::TransistorPolarity::pChannel));
+
     handles.slewCommandFollower = engine.addVcvs(handles.slewCommand, reference,
                                                   handles.dominantPole, reference, 1.0f);
     handles.slewLimiter = engine.addJfet(handles.slewCommand, handles.outputDrive,
@@ -216,10 +231,6 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
     handles.slewCapacitance = engine.addCapacitor(handles.outputDrive, reference,
         detail::genericCircuitCapacitor(detail::opAmpSlewCapacitanceFarads()));
 
-    handles.positiveClampOffset = engine.addVoltageSource(positiveRail,
-        handles.positiveClamp, detail::positiveClampOffset(spec));
-    handles.negativeClampOffset = engine.addVoltageSource(handles.negativeClamp,
-        negativeRail, detail::negativeClampOffset(spec));
     handles.positiveRailShunt = engine.addMosfet(handles.outputDrive,
         handles.outputDrive, handles.positiveClamp,
         detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
@@ -255,11 +266,15 @@ inline bool updateDynamicOpAmpSubcircuit(MnaCircuitEngine& engine,
     ok &= engine.setVccsTransconductance(handles.differentialGm, gm);
     ok &= engine.setVccsTransconductance(handles.offsetGm, gm);
     ok &= engine.setVoltageSource(handles.offsetVoltage, spec.inputOffsetVoltage);
-    ok &= engine.setJfetSpec(handles.slewLimiter, detail::opAmpSlewLimiter(spec));
     ok &= engine.setVoltageSource(handles.positiveClampOffset,
                                   detail::positiveClampOffset(spec));
     ok &= engine.setVoltageSource(handles.negativeClampOffset,
                                   detail::negativeClampOffset(spec));
+    ok &= engine.setMosfetSpec(handles.dominantPositiveRailShunt,
+        detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
+    ok &= engine.setMosfetSpec(handles.dominantNegativeRailShunt,
+        detail::opAmpRailShunt(hq::TransistorPolarity::pChannel));
+    ok &= engine.setJfetSpec(handles.slewLimiter, detail::opAmpSlewLimiter(spec));
     ok &= engine.setMosfetSpec(handles.positiveRailShunt,
         detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
     ok &= engine.setMosfetSpec(handles.negativeRailShunt,
