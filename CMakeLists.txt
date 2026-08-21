@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.16.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.17.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -85,3 +85,6 @@ add_test(NAME amp_driver_cab_chain COMMAND GuitarDSPAampDriverCabChainTests)
 add_executable(GuitarDSPComponentCatalogTests tests/ComponentCatalogTests.cpp)
 target_link_libraries(GuitarDSPComponentCatalogTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME component_catalog COMMAND GuitarDSPComponentCatalogTests)
+add_executable(GuitarDSPMnaCircuitEngineTests tests/MnaCircuitEngineTests.cpp)
+target_link_libraries(GuitarDSPMnaCircuitEngineTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME mna_circuit_engine COMMAND GuitarDSPMnaCircuitEngineTests)
