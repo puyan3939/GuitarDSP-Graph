@@ -9,8 +9,12 @@ const CompiledAudioGraph::NodeRuntime* CompiledAudioGraph::runtime(NodeId id)con
 
 bool CompiledAudioGraph::build(Graph& graph,double sampleRate,int maxBlockSize,int channels,ProcessingQuality quality){
     if(maxBlockSize<=0||channels<=0)return false;
+
+    // First compile validates topology and gives us a deterministic preparation
+    // order. Node latency is allowed to depend on PrepareSpec (quality, sample rate,
+    // partition size, oversampling factor), so this first pass is NOT used for PDC.
     const auto validation=graph.compile();if(!validation.ok)return false;
-    maxBlockSize_=maxBlockSize;channels_=channels;totalLatencySamples_=graph.maximumGraphLatencySamples();order_=graph.schedule();nodes_.clear();runtimeIndex_.clear();sinks_.clear();nodes_.reserve(order_.size());
+    maxBlockSize_=maxBlockSize;channels_=channels;order_=graph.schedule();nodes_.clear();runtimeIndex_.clear();sinks_.clear();nodes_.reserve(order_.size());
     const PrepareSpec spec{sampleRate,maxBlockSize,channels,quality};
 
     for(const NodeId id:order_){
@@ -23,6 +27,13 @@ bool CompiledAudioGraph::build(Graph& graph,double sampleRate,int maxBlockSize,i
         for(auto& out:r.outputs)out.resize(channels,maxBlockSize);
         node->prepare(spec);runtimeIndex_[id]=nodes_.size();nodes_.push_back(std::move(r));
     }
+
+    // Recompile after prepare so quality-dependent latency is the value used by
+    // every edge and sink compensation delay. This closes a subtle PDC bug where an
+    // unprepared oversampling node reported zero latency during the old single pass.
+    const auto preparedValidation=graph.compile();if(!preparedValidation.ok)return false;
+    order_=graph.schedule();
+    totalLatencySamples_=graph.maximumGraphLatencySamples();
 
     for(auto& r:nodes_){
         for(int port=0;port<static_cast<int>(r.inputs.size());++port){
