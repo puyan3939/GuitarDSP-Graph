@@ -74,8 +74,8 @@ int main() {
     ds1.process(input, output, samples);
     std::copy(output.channel(0), output.channel(0) + samples, highDrive.begin());
 
-    const auto lowMetrics = hq::measureHarmonics(lowDrive, sr, 440.0, 12);
-    const auto highMetrics = hq::measureHarmonics(highDrive, sr, 440.0, 12);
+    const auto lowMetrics = hq::analyzeHarmonics(lowDrive, sr, 440.0, 12);
+    const auto highMetrics = hq::analyzeHarmonics(highDrive, sr, 440.0, 12);
     ok &= require(std::isfinite(lowMetrics.thdDb) && std::isfinite(highMetrics.thdDb), "DS-1 harmonic metrics finite");
     ok &= require(highMetrics.thd > lowMetrics.thd, "DS-1 distortion control increases THD");
 
