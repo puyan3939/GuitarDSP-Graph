@@ -344,6 +344,18 @@ public:
         linearLu_.assign(matrixSize, 0.0f);
         linearPivots_.assign(dimension_, 0U);
 
+        // Nodes directly constrained by an independent source to ground do not need
+        // Newton voltage limiting: their exact value is known from the linear MNA
+        // equations. Exempting them allows a 9 V pedal supply or 250 V tube supply
+        // to land immediately while nonlinear internal nodes remain trust-limited.
+        fixedVoltageNodes_.assign(nodeCount_, 0U);
+        for (const auto& source : voltageSources_) {
+            if (source.negative == ground && source.positive != ground)
+                fixedVoltageNodes_[nodeIndex(source.positive)] = 1U;
+            else if (source.positive == ground && source.negative != ground)
+                fixedVoltageNodes_[nodeIndex(source.negative)] = 1U;
+        }
+
         performanceStats_ = {};
         staticCacheDirty_ = true;
         prepared_ = true;
@@ -441,12 +453,28 @@ public:
             for (std::size_t i = 0; i < dimension_; ++i)
                 maxDelta = std::max(maxDelta, std::abs(solution_[i] - candidate_[i]));
 
-            if (iteration < 3) {
-                constexpr float damping = 0.65f;
-                for (std::size_t i = 0; i < dimension_; ++i)
-                    candidate_[i] += damping * (solution_[i] - candidate_[i]);
-            } else {
-                candidate_ = solution_;
+            // Apply a lightweight trust region instead of taking an unrestricted
+            // Newton jump after the first few iterations. Audio circuits routinely
+            // combine exponential junctions, large op-amp gains and capacitor
+            // companion conductances; a single full step can otherwise jump from a
+            // valid several-volt operating point to hundreds of volts and poison the
+            // next sample's dynamic history. The step limit scales with the current
+            // node magnitude, so low-voltage semiconductor junctions stay tightly
+            // controlled while tube/transformer nodes can still move by tens of volts.
+            const float damping = iteration < 3 ? 0.65f : 0.85f;
+            for (std::size_t i = 0; i < dimension_; ++i) {
+                const float rawDelta = solution_[i] - candidate_[i];
+                if (i < nodeCount_) {
+                    if (i < fixedVoltageNodes_.size() && fixedVoltageNodes_[i] != 0U) {
+                        candidate_[i] = solution_[i];
+                        continue;
+                    }
+                    const float scale = std::max(1.0f, std::abs(candidate_[i]));
+                    const float maximumStep = std::clamp(0.25f * scale, 0.25f, 25.0f);
+                    candidate_[i] += damping * std::clamp(rawDelta, -maximumStep, maximumStep);
+                } else {
+                    candidate_[i] += damping * rawDelta;
+                }
             }
 
             stats.iterations = iteration + 1;
@@ -1195,6 +1223,7 @@ private:
     std::vector<float> workRhs_;
     std::vector<float> linearLu_;
     std::vector<std::size_t> linearPivots_;
+    std::vector<std::uint8_t> fixedVoltageNodes_;
     FixedPatternSparseSolver sparseSolver_;
 };
 
