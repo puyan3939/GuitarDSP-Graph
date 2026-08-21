@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.8.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.8.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,3 +58,6 @@ add_test(NAME hq_dsp COMMAND GuitarDSPHQDSPTests)
 add_executable(GuitarDSPHQFoundationTests tests/HQFoundationTests.cpp)
 target_link_libraries(GuitarDSPHQFoundationTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME hq_foundation COMMAND GuitarDSPHQFoundationTests)
+add_executable(GuitarDSPHQNumericalRegressionTests tests/HQNumericalRegressionTests.cpp)
+target_link_libraries(GuitarDSPHQNumericalRegressionTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hq_numerical_regression COMMAND GuitarDSPHQNumericalRegressionTests)
