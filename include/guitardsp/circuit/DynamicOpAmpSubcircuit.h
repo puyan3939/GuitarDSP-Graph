@@ -138,9 +138,14 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
     handles.negativeClampOffset = engine.addVoltageSource(handles.negativeClamp, negativeRail,
         std::max(0.0f, spec.negativeRailHeadroomVolts));
 
+    // Clamp the dominant-pole state rather than the low-impedance follower output.
+    // This prevents the ideal VCVS buffer from demanding an unbounded internal
+    // voltage after the external output has already hit a supply rail.
     const auto clampDiode = detail::opAmpRailClampDiode();
-    handles.positiveClampDiode = engine.addDiode(output, handles.positiveClamp, clampDiode);
-    handles.negativeClampDiode = engine.addDiode(handles.negativeClamp, output, clampDiode);
+    handles.positiveClampDiode = engine.addDiode(handles.dominantPole,
+                                                  handles.positiveClamp, clampDiode);
+    handles.negativeClampDiode = engine.addDiode(handles.negativeClamp,
+                                                  handles.dominantPole, clampDiode);
     return handles;
 }
 
