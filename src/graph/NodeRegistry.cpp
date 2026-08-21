@@ -13,6 +13,7 @@
 #include "guitardsp/hq/PartitionedCabNode.h"
 #include "guitardsp/hq/ReferenceAmpTopologyNode.h"
 #include "guitardsp/hq/SpeakerDynamicsNode.h"
+#include "guitardsp/hq/TS808CircuitNode.h"
 #include "guitardsp/hq/TS808TopologyNode.h"
 #include "guitardsp/hq/TwoTransistorFuzzNode.h"
 
@@ -33,6 +34,7 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("drive.ds1_prototype", [] { return std::make_unique<dsp::DS1PrototypeNode>(); });
     r.registerType("drive.ds1_hq", [] { return std::make_unique<hq::DS1TopologyNode>(); });
     r.registerType("drive.ts808_hq", [] { return std::make_unique<hq::TS808TopologyNode>(); });
+    r.registerType("drive.ts808_circuit_hq", [] { return std::make_unique<hq::TS808CircuitNode>(); });
     r.registerType("drive.bd2_hq", [] { return std::make_unique<hq::BD2TopologyNode>(); });
     r.registerType("drive.fuzz_two_transistor", [] { return std::make_unique<hq::TwoTransistorFuzzNode>(); });
     r.registerType("amp.reference_hq", [] { return std::make_unique<hq::ReferenceAmpTopologyNode>(); });
