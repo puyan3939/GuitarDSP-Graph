@@ -12,7 +12,7 @@
 namespace guitardsp::hq {
 
 // Graph node backed by the actual component-level TS808 MNA circuit rather than
-// the earlier circuit-inspired transfer approximation.  One independent circuit
+// the earlier circuit-inspired transfer approximation. One independent circuit
 // instance is kept per channel so nonlinear device and capacitor history never
 // leaks between channels.
 class TS808CircuitNode final : public graph::AudioNode {
@@ -54,16 +54,14 @@ public:
         for (int ch = 0; ch < channels; ++ch) {
             auto& circuit = circuits_[static_cast<std::size_t>(ch)];
             circuit.setControls(drive, tone, level);
-            const float* src = input.channelData(ch);
-            float* dst = output.channelData(ch);
-            if (src == nullptr || dst == nullptr) continue;
+            const float* src = input.channel(ch);
+            float* dst = output.channel(ch);
             for (int i = 0; i < samples; ++i)
                 dst[i] = circuit.processSample(src[i]);
         }
 
         for (int ch = channels; ch < output.channels(); ++ch) {
-            float* dst = output.channelData(ch);
-            if (dst == nullptr) continue;
+            float* dst = output.channel(ch);
             for (int i = 0; i < samples; ++i) dst[i] = 0.0f;
         }
     }
