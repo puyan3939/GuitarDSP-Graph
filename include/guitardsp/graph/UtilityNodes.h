@@ -1,27 +1,29 @@
 #pragma once
 #include "AudioNode.h"
-#include "AudioBuffer.h"
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 #include <vector>
 
 namespace guitardsp::graph {
+
+inline void copyBlock(const AudioBlock& input, AudioBlock& output, std::size_t n) noexcept {
+    std::copy_n(input.left.data(), n, output.left.data());
+    std::copy_n(input.right.data(), n, output.right.data());
+}
 
 class GainNode final : public AudioNode {
 public:
     explicit GainNode(float gain = 1.0f) : gain_(gain) {}
     void setGain(float g) noexcept { gain_ = g; }
-    float gain() const noexcept { return gain_; }
-    const char* name() const noexcept override { return "Gain"; }
-    int latencySamples() const noexcept override { return 0; }
-    void prepare(double, int, int) override {}
+    [[nodiscard]] float gain() const noexcept { return gain_; }
+    [[nodiscard]] std::string_view typeName() const noexcept override { return "Gain"; }
+    void prepare(double, std::size_t) override {}
     void reset() noexcept override {}
-    void process(const AudioBuffer& input, AudioBuffer& output, int numSamples) noexcept override {
-        const int channels = std::min(input.channels(), output.channels());
-        for (int ch = 0; ch < channels; ++ch) {
-            const auto* in = input.channel(ch);
-            auto* out = output.channel(ch);
-            for (int i = 0; i < numSamples; ++i) out[i] = in[i] * gain_;
+    void process(const ProcessContext& c, const AudioBlock& input, AudioBlock& output) noexcept override {
+        for (std::size_t i = 0; i < c.numSamples; ++i) {
+            output.left[i] = input.left[i] * gain_;
+            output.right[i] = input.right[i] * gain_;
         }
     }
 private:
@@ -32,17 +34,14 @@ class PolarityNode final : public AudioNode {
 public:
     explicit PolarityNode(bool inverted = false) : inverted_(inverted) {}
     void setInverted(bool v) noexcept { inverted_ = v; }
-    const char* name() const noexcept override { return "Polarity"; }
-    int latencySamples() const noexcept override { return 0; }
-    void prepare(double, int, int) override {}
+    [[nodiscard]] std::string_view typeName() const noexcept override { return "Polarity"; }
+    void prepare(double, std::size_t) override {}
     void reset() noexcept override {}
-    void process(const AudioBuffer& input, AudioBuffer& output, int numSamples) noexcept override {
+    void process(const ProcessContext& c, const AudioBlock& input, AudioBlock& output) noexcept override {
         const float g = inverted_ ? -1.0f : 1.0f;
-        const int channels = std::min(input.channels(), output.channels());
-        for (int ch = 0; ch < channels; ++ch) {
-            const auto* in = input.channel(ch);
-            auto* out = output.channel(ch);
-            for (int i = 0; i < numSamples; ++i) out[i] = in[i] * g;
+        for (std::size_t i = 0; i < c.numSamples; ++i) {
+            output.left[i] = input.left[i] * g;
+            output.right[i] = input.right[i] * g;
         }
     }
 private:
@@ -51,54 +50,40 @@ private:
 
 class DelayNode final : public AudioNode {
 public:
-    explicit DelayNode(int delaySamples = 0) : delaySamples_(std::max(0, delaySamples)) {}
-    void setDelaySamples(int samples) noexcept { delaySamples_ = std::max(0, samples); }
-    const char* name() const noexcept override { return "Delay"; }
-    int latencySamples() const noexcept override { return delaySamples_; }
-    void prepare(double, int maxBlockSize, int channels) override {
-        maxBlock_ = maxBlockSize;
-        channels_ = channels;
-        const int size = std::max(1, delaySamples_ + maxBlockSize + 1);
-        lines_.assign(static_cast<std::size_t>(channels_), std::vector<float>(static_cast<std::size_t>(size), 0.0f));
-        write_.assign(static_cast<std::size_t>(channels_), 0);
+    explicit DelayNode(std::size_t delaySamples = 0) : delaySamples_(delaySamples) {}
+    void setDelaySamples(std::size_t samples) noexcept { delaySamples_ = samples; }
+    [[nodiscard]] std::string_view typeName() const noexcept override { return "Delay"; }
+    [[nodiscard]] std::size_t latencySamples() const noexcept override { return delaySamples_; }
+    void prepare(double, std::size_t maximumBlockSize) override {
+        const auto size = std::max<std::size_t>(1, delaySamples_ + maximumBlockSize + 1);
+        left_.assign(size, 0.0f); right_.assign(size, 0.0f); write_ = 0;
     }
     void reset() noexcept override {
-        for (auto& l : lines_) std::fill(l.begin(), l.end(), 0.0f);
-        std::fill(write_.begin(), write_.end(), 0);
+        std::fill(left_.begin(), left_.end(), 0.0f);
+        std::fill(right_.begin(), right_.end(), 0.0f);
+        write_ = 0;
     }
-    void process(const AudioBuffer& input, AudioBuffer& output, int numSamples) noexcept override {
-        const int channels = std::min({input.channels(), output.channels(), channels_});
-        if (delaySamples_ == 0) { output.copyFrom(input); return; }
-        for (int ch = 0; ch < channels; ++ch) {
-            auto& line = lines_[static_cast<std::size_t>(ch)];
-            auto& w = write_[static_cast<std::size_t>(ch)];
-            const auto* in = input.channel(ch);
-            auto* out = output.channel(ch);
-            const int size = static_cast<int>(line.size());
-            for (int i = 0; i < numSamples; ++i) {
-                line[static_cast<std::size_t>(w)] = in[i];
-                int r = w - delaySamples_;
-                while (r < 0) r += size;
-                out[i] = line[static_cast<std::size_t>(r)];
-                if (++w >= size) w = 0;
-            }
+    void process(const ProcessContext& c, const AudioBlock& input, AudioBlock& output) noexcept override {
+        if (delaySamples_ == 0) { copyBlock(input, output, c.numSamples); return; }
+        const auto size = left_.size();
+        for (std::size_t i = 0; i < c.numSamples; ++i) {
+            left_[write_] = input.left[i]; right_[write_] = input.right[i];
+            const auto read = (write_ + size - (delaySamples_ % size)) % size;
+            output.left[i] = left_[read]; output.right[i] = right_[read];
+            write_ = (write_ + 1) % size;
         }
     }
 private:
-    int delaySamples_ = 0;
-    int maxBlock_ = 0;
-    int channels_ = 0;
-    std::vector<std::vector<float>> lines_;
-    std::vector<int> write_;
+    std::size_t delaySamples_ = 0, write_ = 0;
+    std::vector<float> left_, right_;
 };
 
 class PassthroughNode final : public AudioNode {
 public:
-    const char* name() const noexcept override { return "Passthrough"; }
-    int latencySamples() const noexcept override { return 0; }
-    void prepare(double, int, int) override {}
+    [[nodiscard]] std::string_view typeName() const noexcept override { return "Passthrough"; }
+    void prepare(double, std::size_t) override {}
     void reset() noexcept override {}
-    void process(const AudioBuffer& input, AudioBuffer& output, int) noexcept override { output.copyFrom(input); }
+    void process(const ProcessContext& c, const AudioBlock& input, AudioBlock& output) noexcept override { copyBlock(input, output, c.numSamples); }
 };
 
 } // namespace guitardsp::graph
