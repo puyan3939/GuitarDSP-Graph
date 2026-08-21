@@ -64,11 +64,12 @@ public:
         const Node outputCouplingInput = engine_.addNode();
         outputNode_ = engine_.addNode();
 
-        engine_.addVoltageSource(supply_, ground, 9.0f);
-        // Ideal 4.5 V audio bias for this engaged model. A later DC operating-point
-        // pass will let us replace this with the physical divider/decoupling network
-        // without spending audio startup time charging the supply capacitor.
-        engine_.addVoltageSource(vref_, ground, 4.5f);
+        // Supply sources are initially zero. After the topology is prepared we use
+        // control-thread source stepping to establish a nearby nonlinear operating
+        // point instead of asking Newton to jump from an all-zero guess directly to
+        // a 9 V / 4.5 V semiconductor circuit in one sample.
+        supplySource_ = engine_.addVoltageSource(supply_, ground, 0.0f);
+        vrefSource_ = engine_.addVoltageSource(vref_, ground, 0.0f);
         inputSource_ = engine_.addVoltageSource(inputJack_, ground, 0.0f);
 
         // Input emitter follower. The two-junction Ebers-Moll macro preserves B-E
@@ -143,13 +144,19 @@ public:
                              capacitor(10.0e-6f, 16.0f, hq::CapacitorTechnology::electrolytic));
         engine_.addResistor(outputNode_, ground, resistor(10000.0f));
 
-        engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
+        engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::denseReference);
         if (!engine_.prepare(sampleRate_)) return false;
 
         drive_ = defaultDrive;
         tone_ = defaultTone;
         level_ = defaultLevel;
         lastSolve_ = {};
+
+        if (!primeOperatingPoint()) return false;
+
+        // Once the DC neighborhood is established, return to the automatic solver
+        // so normal audio processing can use the prepared sparse nonlinear path.
+        engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
 
         const auto warmSamples = static_cast<std::size_t>(
             std::clamp(sampleRate_ * 0.08, 512.0, 8192.0));
@@ -218,6 +225,25 @@ public:
     MnaCircuitEngine& engine() noexcept { return engine_; }
 
 private:
+    bool primeOperatingPoint() noexcept {
+        // Source stepping is a standard nonlinear-circuit continuation technique:
+        // each solution becomes the initial guess for the next slightly higher
+        // supply voltage. It runs only during prepare(), never on the audio thread.
+        constexpr int sourceSteps = 128;
+        constexpr int solvesPerStep = 2;
+        for (int step = 1; step <= sourceSteps; ++step) {
+            const float t = static_cast<float>(step) / static_cast<float>(sourceSteps);
+            engine_.setVoltageSource(supplySource_, 9.0f * t);
+            engine_.setVoltageSource(vrefSource_, 4.5f * t);
+            engine_.setVoltageSource(inputSource_, 0.0f);
+            for (int settle = 0; settle < solvesPerStep; ++settle) {
+                lastSolve_ = engine_.processSample(40, 1.0e-6f);
+                if (lastSolve_.singular || !finiteStages()) return false;
+            }
+        }
+        return true;
+    }
+
     bool finiteStages() const noexcept {
         const auto s = stageVoltages();
         return std::isfinite(s.inputEmitter) && std::isfinite(s.clippingInput) &&
@@ -278,6 +304,8 @@ private:
 
     MnaCircuitEngine engine_;
     double sampleRate_ = 48000.0;
+    SourceHandle supplySource_{};
+    SourceHandle vrefSource_{};
     SourceHandle inputSource_{};
     Node supply_ = ground;
     Node vref_ = ground;
