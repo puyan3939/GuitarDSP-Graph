@@ -9,6 +9,7 @@
 #include "guitardsp/hq/AmpFamilyNodes.h"
 #include "guitardsp/hq/BD2TopologyNode.h"
 #include "guitardsp/hq/CabinetChainNode.h"
+#include "guitardsp/hq/DS1CircuitNode.h"
 #include "guitardsp/hq/DS1TopologyNode.h"
 #include "guitardsp/hq/PartitionedCabNode.h"
 #include "guitardsp/hq/ReferenceAmpTopologyNode.h"
@@ -33,6 +34,7 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("dynamics.transient", [] { return std::make_unique<dsp::TransientEnhancerNode>(); });
     r.registerType("drive.ds1_prototype", [] { return std::make_unique<dsp::DS1PrototypeNode>(); });
     r.registerType("drive.ds1_hq", [] { return std::make_unique<hq::DS1TopologyNode>(); });
+    r.registerType("drive.ds1_circuit_hq", [] { return std::make_unique<hq::DS1CircuitNode>(); });
     r.registerType("drive.ts808_hq", [] { return std::make_unique<hq::TS808TopologyNode>(); });
     r.registerType("drive.ts808_circuit_hq", [] { return std::make_unique<hq::TS808CircuitNode>(); });
     r.registerType("drive.bd2_hq", [] { return std::make_unique<hq::BD2TopologyNode>(); });
