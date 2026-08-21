@@ -3,6 +3,7 @@
 #include "ADAA.h"
 #include "CircuitPrimitives.h"
 #include "DeviceStages.h"
+#include "PowerTubeModels.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,8 +103,8 @@ private:
 };
 
 // Generic push-pull power-stage primitive with envelope-driven supply sag,
-// crossover/imbalance control and a transformer block. Specific EL34/6L6/KT88
-// models can later replace the branch transfer functions without changing users.
+// crossover control, a selectable engineering power-tube family model and a
+// transformer block. Device families are starting points for later measured fits.
 class PushPullPowerStage {
 public:
     void prepare(double sampleRate) noexcept {
@@ -111,13 +112,13 @@ public:
         transformer_.prepare(sampleRate);
         reset();
     }
-    void reset() noexcept {
-        upper_.reset(); lower_.reset(); envelope_.reset(); transformer_.reset();
-    }
+    void reset() noexcept { envelope_.reset(); transformer_.reset(); }
     void setDrive(float drive) noexcept { drive_ = std::clamp(drive, 0.2f, 15.0f); }
     void setSag(float sag) noexcept { sag_ = std::clamp(sag, 0.0f, 0.8f); }
     void setCrossover(float crossover) noexcept { crossover_ = std::clamp(crossover, 0.0f, 0.25f); }
     void setTransformerSaturation(float saturation) noexcept { transformer_.setSaturation(saturation); }
+    void setTubeModel(PowerTubeModel model) noexcept { tube_ = model; }
+    void setTubeType(PowerTubeType type) noexcept { tube_ = PowerTubeModel::forType(type); }
 
     float process(float x) noexcept {
         const float env = envelope_.processLowpass(std::abs(x));
@@ -125,12 +126,12 @@ public:
         const float driven = drive_ * x / supply;
         const float upperInput = std::max(0.0f, driven - crossover_);
         const float lowerInput = std::max(0.0f, -driven - crossover_);
-        const float upper = upper_.process(upperInput);
-        const float lower = lower_.process(lowerInput);
-        return transformer_.process(supply * (upper - lower) / std::max(1.0f, drive_ * 0.72f));
+        const float upper = tube_.transfer(upperInput, supply);
+        const float lower = tube_.transfer(lowerInput, supply);
+        return transformer_.process(supply * (upper - lower) / std::max(0.25f, drive_ * 0.72f));
     }
 private:
-    ADAATanh upper_, lower_;
+    PowerTubeModel tube_ = PowerTubeModel::forType(PowerTubeType::el34);
     OnePole envelope_;
     TransformerStage transformer_;
     float drive_ = 2.0f;
