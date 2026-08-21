@@ -37,21 +37,33 @@ float diodeTransient(float junctionFarads) {
     return c.voltage(node);
 }
 
-double measureRms(circuit::TS808Circuit& ts, float level) {
+double measureAcRms(circuit::TS808Circuit& ts, float level) {
     constexpr double sampleRate = 48000.0;
     constexpr double pi = 3.14159265358979323846;
+    constexpr int measurementSamples = 4096;
     ts.setLevel(level);
-    for (int i = 0; i < 2048; ++i) {
+
+    // Let the coupling capacitors and the newly rebuilt potentiometer matrix settle
+    // before measuring. The actual level metric removes residual DC because the
+    // pedal output is AC-coupled and gain should be judged on signal amplitude, not
+    // on the power-up discharge offset of C9.
+    for (int i = 0; i < 4096; ++i) {
         const float x = 0.12f * static_cast<float>(std::sin(2.0 * pi * 220.0 * i / sampleRate));
         ts.processSample(x);
     }
+
     double sum = 0.0;
-    for (int i = 0; i < 2048; ++i) {
+    double sumSquares = 0.0;
+    for (int i = 0; i < measurementSamples; ++i) {
         const float x = 0.12f * static_cast<float>(std::sin(2.0 * pi * 220.0 * i / sampleRate));
-        const float y = ts.processSample(x);
-        sum += static_cast<double>(y) * static_cast<double>(y);
+        const double y = static_cast<double>(ts.processSample(x));
+        sum += y;
+        sumSquares += y * y;
     }
-    return std::sqrt(sum / 2048.0);
+    const double mean = sum / static_cast<double>(measurementSamples);
+    const double variance = std::max(0.0,
+        sumSquares / static_cast<double>(measurementSamples) - mean * mean);
+    return std::sqrt(variance);
 }
 } // namespace
 
@@ -125,7 +137,7 @@ int main() {
 
         // Diagnostic node order mirrors TS808Circuit's explicit schematic nodes.
         // This is temporary bring-up instrumentation and will be removed once the
-        // first runaway stage is identified.
+        // remaining Newton-convergence rate is tightened.
         constexpr std::array<circuit::Node, 8> probeNodes{{6, 7, 11, 12, 16, 19, 21, 23}};
         constexpr std::array<const char*, 8> probeNames{{
             "q1e", "clip+", "clipout", "tone+", "toneout", "level", "q3e", "out"}};
@@ -169,11 +181,11 @@ int main() {
         ok &= require(minimum > -3.0f && maximum < 3.0f,
                       "TS808 AC-coupled output stays in a pedal-scale range");
 
-        const double lowLevel = measureRms(ts, 0.15f);
-        const double highLevel = measureRms(ts, 0.85f);
-        std::cout << "DIAG ts808 level_rms low=" << lowLevel << " high=" << highLevel << '\n';
+        const double lowLevel = measureAcRms(ts, 0.15f);
+        const double highLevel = measureAcRms(ts, 0.85f);
+        std::cout << "DIAG ts808 level_ac_rms low=" << lowLevel << " high=" << highLevel << '\n';
         ok &= require(std::isfinite(lowLevel) && std::isfinite(highLevel) && highLevel > lowLevel * 1.5,
-                      "TS808 level potentiometer changes actual circuit output");
+                      "TS808 level potentiometer changes actual AC output");
     }
 
     {
