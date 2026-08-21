@@ -55,6 +55,8 @@ This remains an unnamed engineering reference. Named Marshall/Fender/Ampeg model
 
 The CI suite covers graph runtime, PDC, node registry, hot swap, multi-output, HQ numerical regression, DS-1, TS808, measured fitting, BD-2, fuzz, reference amp topology, multi-parameter calibration, power-tube family differentiation, selectable power-tube behavior inside the amp, and speaker nonlinear dynamics.
 
+Latest code checkpoint `e201d19b429c583dff512551cda0b89d0a2aa1ea` passed configure, build and the full test suite in Graph Core CI run #133.
+
 The measured-fit synthetic regressions intentionally verify that known DS-1 control settings can be recovered from generated reference response points. This validates the fitting machinery; it is not hardware reference data.
 
 ## Next high-value work
