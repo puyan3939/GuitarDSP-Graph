@@ -54,7 +54,7 @@ inline OperatingPointResult establishOperatingPoint(
         MnaCircuitEngine& engine,
         std::span<const OperatingPointSourceTarget> sources,
         std::span<const Node> probeNodes,
-        OperatingPointOptions options = {}) noexcept {
+        OperatingPointOptions options = {}) {
     OperatingPointResult result{};
     if (!engine.prepared()) {
         result.singular = true;
