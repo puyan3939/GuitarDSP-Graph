@@ -13,15 +13,16 @@ namespace guitardsp::circuit {
 // - finite DC open-loop gain
 // - dominant-pole / gain-bandwidth behavior
 // - input offset and input bias current
-// - rail headroom limiting through bounded clamp nodes
+// - rail headroom limiting through polynomial MOSFET shunts
 // - slew-rate limiting through a current-limited JFET / capacitor stage
 // - finite output resistance and smooth bidirectional output-current limiting
 //
 // The large-signal stage deliberately keeps high-gain, slew and load-current
 // responsibilities separated. The dominant-pole command is buffered before the
 // slew limiter, and the slew node is buffered again before the load-current path.
-// This prevents a heavy external load from stealing current from the slew capacitor
-// and avoids the unstable hard-clamp feedback topology that was rejected earlier.
+// Rail shunts use the engine's bounded square-law MOSFET stamp rather than an
+// exponential Shockley clamp so a grossly overdriven internal command does not
+// require a diode junction solver to recover from hundreds of volts of error.
 struct DynamicOpAmpSubcircuit {
     Node dominantPole = ground;
     Node slewCommand = ground;
@@ -43,8 +44,8 @@ struct DynamicOpAmpSubcircuit {
     CapacitorHandle slewCapacitance{};
     SourceHandle positiveClampOffset{};
     SourceHandle negativeClampOffset{};
-    DiodeHandle positiveClampDiode{};
-    DiodeHandle negativeClampDiode{};
+    MosfetHandle positiveRailShunt{};
+    MosfetHandle negativeRailShunt{};
 
     ControlledSourceHandle outputFollower{};
     ResistorHandle outputResistance{};
@@ -118,29 +119,30 @@ inline hq::JFETSpec opAmpOutputCurrentLimiter(const hq::OpAmpSpec& spec) noexcep
                               "OpAmp output current limiter");
 }
 
-inline hq::DiodeSpec opAmpRailClampDiode() noexcept {
-    hq::DiodeSpec diode{};
-    diode.name = "OpAmp smooth rail clamp";
-    diode.technology = hq::DiodeTechnology::silicon;
-    diode.nominalForwardVoltage = 0.025f;
-    diode.saturationCurrent = 1.0e-3f;
-    diode.emissionCoefficient = 1.0f;
-    diode.thermalVoltage = 0.02585f;
-    diode.seriesResistanceOhms = 0.5f;
-    diode.junctionCapacitanceFarads = 0.0f;
-    diode.reverseVoltageRating = 1000.0f;
-    diode.currentRatingAmps = 1.0f;
-    return diode;
+inline constexpr float opAmpRailShuntThresholdVolts() noexcept { return 0.03f; }
+
+inline hq::MOSFETSpec opAmpRailShunt(hq::TransistorPolarity polarity) noexcept {
+    hq::MOSFETSpec device{};
+    device.name = polarity == hq::TransistorPolarity::pChannel
+        ? "OpAmp negative-rail shunt" : "OpAmp positive-rail shunt";
+    device.polarity = polarity;
+    device.thresholdVoltage = opAmpRailShuntThresholdVolts();
+    device.transconductance = 1.0f;
+    device.lambda = 0.0f;
+    device.bodyDiodeForwardVoltage = 1000.0f;
+    device.gateCapacitanceFarads = 0.0f;
+    device.maxDrainSourceVoltage = 1000.0f;
+    return device;
 }
 
-inline constexpr float opAmpClampForwardEstimate() noexcept { return 0.025f; }
-
 inline float positiveClampOffset(const hq::OpAmpSpec& spec) noexcept {
-    return std::max(0.0f, spec.positiveRailHeadroomVolts) + opAmpClampForwardEstimate();
+    return std::max(0.0f, spec.positiveRailHeadroomVolts) +
+           opAmpRailShuntThresholdVolts();
 }
 
 inline float negativeClampOffset(const hq::OpAmpSpec& spec) noexcept {
-    return std::max(0.0f, spec.negativeRailHeadroomVolts) + opAmpClampForwardEstimate();
+    return std::max(0.0f, spec.negativeRailHeadroomVolts) +
+           opAmpRailShuntThresholdVolts();
 }
 
 inline hq::ResistorSpec opAmpOutputResistance(const hq::OpAmpSpec& spec) noexcept {
@@ -206,14 +208,20 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
     handles.slewCapacitance = engine.addCapacitor(handles.outputDrive, reference,
         detail::genericCircuitCapacitor(detail::opAmpSlewCapacitanceFarads()));
 
+    // Clamp reference nodes are offset inward from the actual rails. Enhancement
+    // MOSFETs are diode-connected (gate=drain=outputDrive), so they conduct only
+    // when the slew node crosses the respective threshold. This gives a smooth,
+    // polynomial shunt without an exponential junction recovery problem.
     handles.positiveClampOffset = engine.addVoltageSource(positiveRail,
         handles.positiveClamp, detail::positiveClampOffset(spec));
     handles.negativeClampOffset = engine.addVoltageSource(handles.negativeClamp,
         negativeRail, detail::negativeClampOffset(spec));
-    handles.positiveClampDiode = engine.addDiode(handles.outputDrive,
-        handles.positiveClamp, detail::opAmpRailClampDiode());
-    handles.negativeClampDiode = engine.addDiode(handles.negativeClamp,
-        handles.outputDrive, detail::opAmpRailClampDiode());
+    handles.positiveRailShunt = engine.addMosfet(handles.outputDrive,
+        handles.outputDrive, handles.positiveClamp,
+        detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
+    handles.negativeRailShunt = engine.addMosfet(handles.outputDrive,
+        handles.outputDrive, handles.negativeClamp,
+        detail::opAmpRailShunt(hq::TransistorPolarity::pChannel));
 
     // The load-current path is buffered from the slew capacitor. The JFET model is
     // intentionally used as a smooth, bidirectional current limiter: with gate tied
@@ -246,6 +254,10 @@ inline bool updateDynamicOpAmpSubcircuit(MnaCircuitEngine& engine,
                                   detail::positiveClampOffset(spec));
     ok &= engine.setVoltageSource(handles.negativeClampOffset,
                                   detail::negativeClampOffset(spec));
+    ok &= engine.setMosfetSpec(handles.positiveRailShunt,
+        detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
+    ok &= engine.setMosfetSpec(handles.negativeRailShunt,
+        detail::opAmpRailShunt(hq::TransistorPolarity::pChannel));
     ok &= engine.setResistorSpec(handles.outputResistance,
                                   detail::opAmpOutputResistance(spec));
     ok &= engine.setJfetSpec(handles.outputCurrentLimiter,
