@@ -11,16 +11,17 @@ namespace guitardsp::circuit {
 //
 // The raw three-terminal BJT stamp is useful as a compact engineering device, but
 // a floating/base-biased emitter follower can present it with a very large initial
-// Vbe during startup.  This macro expresses the same forward-active mechanism in a
+// Vbe during startup. This macro expresses the same forward-active mechanism in a
 // SPICE-like decomposed form: a nonlinear base-emitter junction carries base current,
 // a zero-volt source senses that branch current, and a CCCS transfers beta times that
-// current from collector to emitter.  The diode already uses the engine's robust
+// current from collector to emitter. The diode already uses the engine's robust
 // series-resistance Newton linearization, so startup from an uninitialized state is
 // substantially better conditioned.
 //
 // This is deliberately *forward-active*, not yet a full Ebers-Moll/Gummel-Poon model.
-// It is appropriate for the TS808's emitter followers.  Saturating gain stages such
-// as the DS-1 transistor front end will get the later two-junction model.
+// It is appropriate for emitter followers such as the TS808 input/output buffers.
+// Saturating gain stages such as the DS-1 transistor front end will use the later
+// two-junction BJT model.
 struct BjtForwardActiveSubcircuit {
     Node baseSenseNode = ground;
     SourceHandle baseCurrentSense{};
@@ -44,7 +45,7 @@ inline hq::DiodeSpec baseEmitterJunction(const hq::BJTSpec& spec) noexcept {
     diode.currentRatingAmps = std::max(1.0e-3f, spec.maxCollectorCurrentAmps);
 
     // Calibrate the junction so nominalVbe corresponds to ~1 mA collector
-    // current at the requested beta.  This makes the catalog's Vbe/beta fields
+    // current at the requested beta. This makes the catalog's Vbe/beta fields
     // actually determine the operating point instead of relying on a hidden Is.
     const float beta = std::max(1.0f, spec.beta);
     const float referenceBaseCurrent = 1.0e-3f / beta;
@@ -86,14 +87,26 @@ inline BjtForwardActiveSubcircuit addBjtForwardActiveSubcircuit(
     BjtForwardActiveSubcircuit handles{};
     handles.baseSenseNode = engine.addNode();
     handles.baseCurrentSense = engine.addVoltageSource(base, handles.baseSenseNode, 0.0f);
-    handles.baseEmitterJunction = engine.addDiode(handles.baseSenseNode, emitter,
-                                                   bjt_forward_detail::baseEmitterJunction(spec));
 
-    const float polarity = spec.polarity == hq::TransistorPolarity::pnp ? -1.0f : 1.0f;
-    // MNA voltage-source branch current is negative when the source supplies the
-    // sensed base current, hence the minus sign for an NPN forward-current transfer.
+    const bool pnp = spec.polarity == hq::TransistorPolarity::pnp;
+    if (pnp) {
+        // PNP forward junction current runs emitter -> base. The voltage-source
+        // sensor keeps the same base->sense orientation, therefore sensed current
+        // becomes negative and the same positive beta transfer below naturally
+        // reverses collector current to emitter -> collector.
+        handles.baseEmitterJunction = engine.addDiode(emitter, handles.baseSenseNode,
+                                                       bjt_forward_detail::baseEmitterJunction(spec));
+    } else {
+        handles.baseEmitterJunction = engine.addDiode(handles.baseSenseNode, emitter,
+                                                       bjt_forward_detail::baseEmitterJunction(spec));
+    }
+
+    // The sensed branch current is positive when NPN base current leaves the base
+    // node toward the B-E junction. A positive CCCS gain therefore produces the
+    // required collector -> emitter current. For PNP the sensed current is negative,
+    // so this same stamp automatically yields emitter -> collector current.
     handles.collectorTransfer = engine.addCccs(collector, emitter,
-        handles.baseCurrentSense, -polarity * std::max(1.0f, spec.beta));
+        handles.baseCurrentSense, std::max(1.0f, spec.beta));
 
     const float total = std::max(0.0f, spec.inputCapacitanceFarads);
     handles.baseEmitterCapacitance = engine.addCapacitor(base, emitter,
