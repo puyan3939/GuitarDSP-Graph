@@ -28,18 +28,21 @@ int main() {
     node.setParameterValue(1, 0.75f);
     node.setParameterValue(2, -6.0f);
 
+    constexpr float probeAmplitude = 0.12f;
     const std::vector<float> frequencies {180.0f, 700.0f, 1800.0f, 4200.0f};
-    const auto target = hq::measureNodeFrequencyResponse(node, spec, frequencies, 0.025f, 128, 5, 5);
+    const auto target = hq::measureNodeFrequencyResponse(node, spec, frequencies, probeAmplitude, 128, 5, 5);
 
     std::vector<hq::FrequencyReferencePoint> reference;
     for (std::size_t i = 0; i < frequencies.size(); ++i)
         reference.push_back({frequencies[i], target[i], i == 2 ? 1.5f : 1.0f});
 
     node.setParameterValue(1, 0.0f);
-    const auto wrong = hq::fitNodeFrequencyResponse(node, spec, reference, 0.025f, 128);
+    const auto wrong = hq::fitNodeFrequencyResponse(node, spec, reference, probeAmplitude, 128);
+    std::cout << "wrong-tone weighted RMS dB = " << wrong.weightedRmsError << '\n';
     ok &= require(wrong.weightedRmsError > 0.05f, "wrong DS-1 tone produces measurable fit error");
 
-    const auto fit = hq::fitParameterGrid1D(node, 1, 0.0f, 1.0f, 5, spec, reference, 0.025f, 128);
+    const auto fit = hq::fitParameterGrid1D(node, 1, 0.0f, 1.0f, 5, spec, reference, probeAmplitude, 128);
+    std::cout << "best tone = " << fit.value << ", score = " << fit.score << " dB\n";
     ok &= require(std::abs(fit.value - 0.75f) < 1.0e-6f, "grid fit recovers synthetic DS-1 tone target");
     ok &= require(fit.score < 0.02f, "recovered DS-1 target has low response error");
 
