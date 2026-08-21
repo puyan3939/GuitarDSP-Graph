@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.28.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.29.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -124,3 +124,6 @@ add_test(NAME pedal_circuit_readiness COMMAND GuitarDSPPedalCircuitReadinessTest
 add_executable(GuitarDSPTS808CircuitTests tests/TS808CircuitTests.cpp)
 target_link_libraries(GuitarDSPTS808CircuitTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME ts808_circuit COMMAND GuitarDSPTS808CircuitTests)
+add_executable(GuitarDSPDS1CircuitTests tests/DS1CircuitTests.cpp)
+target_link_libraries(GuitarDSPDS1CircuitTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME ds1_circuit COMMAND GuitarDSPDS1CircuitTests)
