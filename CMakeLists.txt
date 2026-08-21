@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.12.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.13.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -73,3 +73,6 @@ add_test(NAME topology_expansion COMMAND GuitarDSPTopologyExpansionTests)
 add_executable(GuitarDSPMeasuredFitHarnessTests tests/MeasuredFitHarnessTests.cpp)
 target_link_libraries(GuitarDSPMeasuredFitHarnessTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME measured_fit_harness COMMAND GuitarDSPMeasuredFitHarnessTests)
+add_executable(GuitarDSPHQCalibrationAndSpeakerTests tests/HQCalibrationAndSpeakerTests.cpp)
+target_link_libraries(GuitarDSPHQCalibrationAndSpeakerTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hq_calibration_speaker COMMAND GuitarDSPHQCalibrationAndSpeakerTests)
