@@ -5,6 +5,7 @@
 #include "PolyphaseOversampler.h"
 #include "QualityPolicy.h"
 #include "ToneStackFamilies.h"
+#include "YehSmithToneStack.h"
 #include "guitardsp/graph/AudioNode.h"
 
 #include <algorithm>
@@ -171,7 +172,7 @@ private:
     PolyphaseOversampler oversampler_;
     std::vector<CouplingHighpass> inputCoupling_, interCoupling_;
     std::vector<TriodeCommonCathodeStage> v1_, v2_;
-    std::vector<InteractiveToneStack> tone_;
+    std::vector<YehSmithToneStack> tone_;
     std::vector<LongTailPairPhaseInverter> phaseInverter_;
     std::vector<NegativeFeedbackLoop> feedback_;
     std::vector<PushPullPowerStage> power_;
