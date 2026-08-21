@@ -12,19 +12,15 @@ namespace guitardsp::circuit {
 
 // Control-thread operating-point continuation for nonlinear audio circuits.
 //
-// This deliberately standardizes the robust startup procedure that the first
-// component-level pedals had implemented privately: independent supply sources are
-// ramped from zero, each continuation point is solved with the dense pivoting oracle,
-// and the final operating point is allowed to settle until selected probe voltages
-// stop moving. The resulting MNA solution and capacitor/inductor history become the
-// initial state for realtime audio processing.
+// Independent supply sources are ramped from zero with the dense pivoting oracle,
+// then selected probe nodes are observed until their windowed DC means stop moving.
+// Windowed means deliberately reject the tiny sample-to-sample trapezoidal ringing
+// that can remain around an otherwise settled bias point.
 //
 // Accuracy boundary: MnaCircuitEngine currently owns trapezoidal dynamic companion
 // models at all times, so this is a time-domain/quasi-DC operating-point continuation,
 // not yet a separate SPICE-style static matrix in which capacitors are opened and
-// inductors are shorted analytically. It nevertheless produces the physically useful
-// settled bias state required before the audio host starts and is intentionally named
-// "Continuation" rather than claiming an exact standalone DC formulation.
+// inductors are shorted analytically. The distinction is explicit and tested.
 struct OperatingPointSourceTarget {
     SourceHandle source{};
     float targetVolts = 0.0f;
@@ -36,16 +32,15 @@ struct OperatingPointOptions {
     int maximumNewtonIterations = 40;
     float newtonTolerance = 1.0e-6f;
     int maximumSettleSamples = 8192;
-    int requiredStableSamples = 32;
+    int settleWindowSamples = 32;
+    int requiredStableWindows = 4;
     float steadyStateVoltageTolerance = 2.0e-6f;
 };
 
 struct OperatingPointResult {
-    // `converged` means the requested physical probe voltages reached a stable bias
+    // `converged` means the observable DC probe means reached the requested stable
     // window without a singular/NaN solve. `lastSolve` separately preserves the
-    // final per-sample Newton convergence flag because a stiff branch-current
-    // unknown can hit the iteration cap even after the observable node voltages have
-    // become stationary enough to serve as a realtime initial condition.
+    // final per-sample Newton flag for diagnostics.
     bool converged = false;
     bool singular = false;
     int sourceStepSolves = 0;
@@ -71,7 +66,8 @@ inline OperatingPointResult establishOperatingPoint(
     options.maximumNewtonIterations = std::clamp(options.maximumNewtonIterations, 1, 40);
     options.newtonTolerance = std::max(1.0e-9f, options.newtonTolerance);
     options.maximumSettleSamples = std::clamp(options.maximumSettleSamples, 0, 1'000'000);
-    options.requiredStableSamples = std::clamp(options.requiredStableSamples, 1, 4096);
+    options.settleWindowSamples = std::clamp(options.settleWindowSamples, 1, 4096);
+    options.requiredStableWindows = std::clamp(options.requiredStableWindows, 1, 4096);
     options.steadyStateVoltageTolerance =
         std::max(1.0e-9f, options.steadyStateVoltageTolerance);
 
@@ -109,11 +105,12 @@ inline OperatingPointResult establishOperatingPoint(
         return result;
     }
 
-    std::vector<float> previousProbeVoltages(probeNodes.size(), 0.0f);
-    for (std::size_t i = 0; i < probeNodes.size(); ++i)
-        previousProbeVoltages[i] = engine.voltage(probeNodes[i]);
+    std::vector<double> windowSums(probeNodes.size(), 0.0);
+    std::vector<float> previousMeans(probeNodes.size(), 0.0f);
+    bool havePreviousWindow = false;
+    int samplesInWindow = 0;
+    int stableWindows = 0;
 
-    int stableSamples = 0;
     for (int sample = 0; sample < options.maximumSettleSamples; ++sample) {
         result.lastSolve = engine.processSample(options.maximumNewtonIterations,
                                                 options.newtonTolerance);
@@ -124,32 +121,43 @@ inline OperatingPointResult establishOperatingPoint(
             break;
         }
 
-        float maximumDelta = 0.0f;
         for (std::size_t i = 0; i < probeNodes.size(); ++i) {
             const float voltage = engine.voltage(probeNodes[i]);
             if (!std::isfinite(voltage)) {
                 result.singular = true;
-                maximumDelta = 1.0e30f;
                 break;
             }
-            maximumDelta = std::max(maximumDelta,
-                                    std::abs(voltage - previousProbeVoltages[i]));
-            previousProbeVoltages[i] = voltage;
+            windowSums[i] += static_cast<double>(voltage);
         }
-        result.maximumProbeDelta = maximumDelta;
         if (result.singular) break;
 
-        // Bias readiness is defined by the physical node voltages reaching a stable
-        // window. Newton's own per-sample flag remains diagnostic in lastSolve and
-        // unconvergedNewtonSolves; it is intentionally not allowed to reject an
-        // otherwise stationary, finite operating point solely because an internal
-        // branch-current unknown is hovering above a stricter algebraic tolerance.
-        if (maximumDelta <= options.steadyStateVoltageTolerance)
-            ++stableSamples;
-        else
-            stableSamples = 0;
+        ++samplesInWindow;
+        if (samplesInWindow < options.settleWindowSamples) continue;
 
-        if (stableSamples >= options.requiredStableSamples) {
+        float maximumMeanDelta = 0.0f;
+        for (std::size_t i = 0; i < probeNodes.size(); ++i) {
+            const float mean = static_cast<float>(windowSums[i] /
+                static_cast<double>(options.settleWindowSamples));
+            if (havePreviousWindow)
+                maximumMeanDelta = std::max(maximumMeanDelta,
+                                             std::abs(mean - previousMeans[i]));
+            previousMeans[i] = mean;
+            windowSums[i] = 0.0;
+        }
+        samplesInWindow = 0;
+        result.maximumProbeDelta = maximumMeanDelta;
+
+        if (!havePreviousWindow) {
+            havePreviousWindow = true;
+            continue;
+        }
+
+        if (maximumMeanDelta <= options.steadyStateVoltageTolerance)
+            ++stableWindows;
+        else
+            stableWindows = 0;
+
+        if (stableWindows >= options.requiredStableWindows) {
             result.converged = true;
             break;
         }
