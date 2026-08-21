@@ -147,9 +147,9 @@ public:
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::denseReference);
         if (!engine_.prepare(sampleRate_)) return false;
 
-        drive_ = defaultDrive;
-        tone_ = defaultTone;
-        level_ = defaultLevel;
+        targetDrive_ = appliedDrive_ = defaultDrive;
+        targetTone_ = appliedTone_ = defaultTone;
+        targetLevel_ = appliedLevel_ = defaultLevel;
         lastSolve_ = {};
 
         if (!primeOperatingPoint()) return false;
@@ -170,39 +170,39 @@ public:
 
     void reset() noexcept {
         engine_.reset();
+        targetDrive_ = appliedDrive_ = defaultDrive;
+        targetTone_ = appliedTone_ = defaultTone;
+        targetLevel_ = appliedLevel_ = defaultLevel;
+        engine_.setPotentiometerPosition(drivePot_, 1.0f - appliedDrive_);
+        engine_.setPotentiometerPosition(tonePot_, 1.0f - appliedTone_);
+        engine_.setPotentiometerPosition(levelPot_, appliedLevel_);
         lastSolve_ = {};
     }
 
     bool setDrive(float normalized) noexcept {
-        normalized = std::clamp(normalized, 0.0f, 1.0f);
-        if (std::abs(normalized - drive_) < 1.0e-6f) return true;
-        drive_ = normalized;
-        return engine_.setPotentiometerPosition(drivePot_, 1.0f - normalized);
+        targetDrive_ = std::clamp(normalized, 0.0f, 1.0f);
+        return true;
     }
 
     bool setTone(float normalized) noexcept {
-        normalized = std::clamp(normalized, 0.0f, 1.0f);
-        if (std::abs(normalized - tone_) < 1.0e-6f) return true;
-        tone_ = normalized;
-        return engine_.setPotentiometerPosition(tonePot_, 1.0f - normalized);
+        targetTone_ = std::clamp(normalized, 0.0f, 1.0f);
+        return true;
     }
 
     bool setLevel(float normalized) noexcept {
-        normalized = std::clamp(normalized, 0.0f, 1.0f);
-        if (std::abs(normalized - level_) < 1.0e-6f) return true;
-        level_ = normalized;
-        return engine_.setPotentiometerPosition(levelPot_, normalized);
+        targetLevel_ = std::clamp(normalized, 0.0f, 1.0f);
+        return true;
     }
 
     bool setControls(float drive, float tone, float level) noexcept {
-        bool ok = true;
-        ok &= setDrive(drive);
-        ok &= setTone(tone);
-        ok &= setLevel(level);
-        return ok;
+        setDrive(drive);
+        setTone(tone);
+        setLevel(level);
+        return true;
     }
 
     float processSample(float input) noexcept {
+        applySmoothedControls();
         engine_.setVoltageSource(inputSource_, input);
         lastSolve_ = engine_.processSample(40, 2.0e-5f);
         const float out = engine_.voltage(outputNode_);
@@ -217,14 +217,48 @@ public:
                 engine_.voltage(q3Emitter_), engine_.voltage(outputNode_)};
     }
 
-    float drive() const noexcept { return drive_; }
-    float tone() const noexcept { return tone_; }
-    float level() const noexcept { return level_; }
+    float drive() const noexcept { return targetDrive_; }
+    float tone() const noexcept { return targetTone_; }
+    float level() const noexcept { return targetLevel_; }
+    float appliedDrive() const noexcept { return appliedDrive_; }
+    float appliedTone() const noexcept { return appliedTone_; }
+    float appliedLevel() const noexcept { return appliedLevel_; }
     MnaCircuitEngine::SolveStats lastSolveStats() const noexcept { return lastSolve_; }
     const MnaCircuitEngine& engine() const noexcept { return engine_; }
     MnaCircuitEngine& engine() noexcept { return engine_; }
 
 private:
+    static float approach(float current, float target, float maximumStep) noexcept {
+        return current + std::clamp(target - current, -maximumStep, maximumStep);
+    }
+
+    void applySmoothedControls() noexcept {
+        // About 5 ms for a full-scale knob jump at any sample rate. This is fast
+        // enough to feel immediate but prevents a preset/UI discontinuity from
+        // replacing the MNA conductance matrix with a radically different one in a
+        // single Newton step. All three edits happen before processSample(), so at
+        // most one static-cache rebuild occurs for that audio sample.
+        const float maximumStep = 1.0f /
+            static_cast<float>(std::max(1.0, sampleRate_ * 0.005));
+
+        const float nextDrive = approach(appliedDrive_, targetDrive_, maximumStep);
+        const float nextTone = approach(appliedTone_, targetTone_, maximumStep);
+        const float nextLevel = approach(appliedLevel_, targetLevel_, maximumStep);
+
+        if (nextDrive != appliedDrive_) {
+            appliedDrive_ = nextDrive;
+            engine_.setPotentiometerPosition(drivePot_, 1.0f - appliedDrive_);
+        }
+        if (nextTone != appliedTone_) {
+            appliedTone_ = nextTone;
+            engine_.setPotentiometerPosition(tonePot_, 1.0f - appliedTone_);
+        }
+        if (nextLevel != appliedLevel_) {
+            appliedLevel_ = nextLevel;
+            engine_.setPotentiometerPosition(levelPot_, appliedLevel_);
+        }
+    }
+
     bool primeOperatingPoint() noexcept {
         // Source stepping is a standard nonlinear-circuit continuation technique:
         // each solution becomes the initial guess for the next slightly higher
@@ -327,9 +361,12 @@ private:
     DiodeParasiticSubcircuit clippingDiodePositive_{};
     DiodeParasiticSubcircuit clippingDiodeNegative_{};
     MnaCircuitEngine::SolveStats lastSolve_{};
-    float drive_ = defaultDrive;
-    float tone_ = defaultTone;
-    float level_ = defaultLevel;
+    float targetDrive_ = defaultDrive;
+    float targetTone_ = defaultTone;
+    float targetLevel_ = defaultLevel;
+    float appliedDrive_ = defaultDrive;
+    float appliedTone_ = defaultTone;
+    float appliedLevel_ = defaultLevel;
 };
 
 } // namespace guitardsp::circuit
