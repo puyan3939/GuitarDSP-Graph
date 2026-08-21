@@ -22,8 +22,8 @@ public:
                                   std::vector<std::complex<float>>(static_cast<std::size_t>(fftSize_)));
         inputHistory_.assign(static_cast<std::size_t>(maxPartitions_),
                              std::vector<std::complex<float>>(static_cast<std::size_t>(fftSize_)));
-        fftInput_.assign(static_cast<std::size_t>(fftSize_), {});
-        accumulator_.assign(static_cast<std::size_t>(fftSize_), {});
+        fftInput_.assign(static_cast<std::size_t>(fftSize_), std::complex<float>{0.0f, 0.0f});
+        accumulator_.assign(static_cast<std::size_t>(fftSize_), std::complex<float>{0.0f, 0.0f});
         overlap_.assign(static_cast<std::size_t>(partitionSize_), 0.0f);
         activePartitions_ = 1;
         historyWrite_ = 0;
@@ -60,7 +60,8 @@ public:
         std::fill(fftInput_.begin(), fftInput_.end(), std::complex<float>{});
         for (int i = 0; i < partitionSize_; ++i) fftInput_[static_cast<std::size_t>(i)] = {input[i], 0.0f};
         Radix2FFT::transform(fftInput_, false);
-        inputHistory_[static_cast<std::size_t>(historyWrite_)] = fftInput_;
+        auto& historySlot = inputHistory_[static_cast<std::size_t>(historyWrite_)];
+        std::copy(fftInput_.begin(), fftInput_.end(), historySlot.begin());
 
         std::fill(accumulator_.begin(), accumulator_.end(), std::complex<float>{});
         for (int p = 0; p < activePartitions_; ++p) {
