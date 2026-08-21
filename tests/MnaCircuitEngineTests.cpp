@@ -72,14 +72,14 @@ int main() {
         const auto out = c.addNode();
         hq::ResistorSpec r{};
         r.resistanceOhms = 2200.0f;
-        c.addVoltageSource(in, circuit::ground, 2.0f);
+        c.addVoltageSource(in, circuit::ground, 0.8f);
         c.addResistor(in, out, r);
         c.addDiode(out, circuit::ground, hq::component_presets::oneN4148());
         c.prepare(48000.0);
         const auto stats = c.processSample(20, 1.0e-7f);
         ok &= require(!stats.singular && stats.converged, "nonlinear diode circuit converges");
-        ok &= require(c.voltage(out) > 0.35f && c.voltage(out) < 0.95f,
-                      "1N4148-style diode clamps through series resistor");
+        ok &= require(c.voltage(out) > 0.45f && c.voltage(out) < 0.65f,
+                      "1N4148-style diode bends transfer through series resistor");
     }
 
     {
