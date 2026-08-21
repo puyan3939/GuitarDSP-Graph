@@ -18,10 +18,11 @@ namespace guitardsp::circuit {
 //
 // Numeric solve() performs no allocation. It copies only the prepared structural
 // entries from the dense correctness matrix into CSR storage, factors that fixed
-// pattern, and solves the permuted-row system. If a numerical pivot becomes too
-// small, solve() returns false so the caller can fall back to the dense partial-
-// pivot reference solver. Columns are never permuted, so the output vector remains
-// in the original MNA variable order.
+// pattern, and solves the permuted-row system. Because the numeric phase deliberately
+// avoids dynamic pivoting, every candidate solution is validated against the original
+// dense equations using a scaled backward-error residual. An unsafe pivot or residual
+// returns false so the caller can fall back to the dense partial-pivot reference solver.
+// Columns are never permuted, so the output vector remains in original MNA order.
 class FixedPatternSparseSolver {
 public:
     bool prepare(std::size_t dimension,
@@ -197,7 +198,28 @@ public:
             solution[row] = sum / diagonal;
             if (!std::isfinite(solution[row])) return false;
         }
-        return true;
+
+        // A fixed ordering can encounter poor numeric pivots even when every pivot
+        // remains formally non-zero. Validate the candidate against A*x=b before
+        // exposing it to Newton. The row-scaled backward error is dimensionless and
+        // works for both millivolt pedals and hundreds-of-volts tube circuits.
+        constexpr double residualFloor = 1.0e-18;
+        constexpr double maximumBackwardError = 2.0e-4;
+        double worstBackwardError = 0.0;
+        for (std::size_t row = 0; row < dimension_; ++row) {
+            double residual = -static_cast<double>(rhs[row]);
+            double scale = std::abs(static_cast<double>(rhs[row]));
+            for (std::size_t column = 0; column < dimension_; ++column) {
+                const double a = static_cast<double>(denseMatrix[row * dimension_ + column]);
+                const double x = static_cast<double>(solution[column]);
+                residual += a * x;
+                scale += std::abs(a) * std::abs(x);
+            }
+            const double backwardError = std::abs(residual) / std::max(residualFloor, scale);
+            if (!std::isfinite(backwardError)) return false;
+            worstBackwardError = std::max(worstBackwardError, backwardError);
+        }
+        return worstBackwardError <= maximumBackwardError;
     }
 
     bool available() const noexcept { return available_; }
