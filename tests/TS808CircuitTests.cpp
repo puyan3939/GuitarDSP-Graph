@@ -3,6 +3,7 @@
 #include "guitardsp/hq/TS808CircuitNode.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 
@@ -68,14 +69,21 @@ int main() {
         ok &= require(ts.prepare(48000.0), "component-level TS808 prepares");
         ok &= require(ts.engine().sparseNonlinearSolverAvailable(),
                       "TS808 prepares a sparse nonlinear pattern");
-
-        // Dense partial-pivot mode is the numerical oracle while the first full
-        // pedal is being brought up. If this also fails, the problem is the device/
-        // topology model rather than fixed-pattern sparse factorization.
         ts.engine().setNonlinearSolverMode(
             circuit::MnaCircuitEngine::NonlinearSolverMode::denseReference);
 
         for (int i = 0; i < 4096; ++i) ts.processSample(0.0f);
+
+        // Diagnostic node order mirrors TS808Circuit's explicit schematic nodes.
+        // This is temporary bring-up instrumentation and will be removed once the
+        // first runaway stage is identified.
+        constexpr std::array<circuit::Node, 8> probeNodes{{6, 7, 11, 12, 16, 19, 21, 23}};
+        constexpr std::array<const char*, 8> probeNames{{
+            "q1e", "clip+", "clipout", "tone+", "toneout", "level", "q3e", "out"}};
+        std::array<float, 8> probeMin{};
+        std::array<float, 8> probeMax{};
+        probeMin.fill(1.0e30f);
+        probeMax.fill(-1.0e30f);
 
         constexpr double pi = 3.14159265358979323846;
         float minimum = 1.0e9f;
@@ -91,12 +99,21 @@ int main() {
             unconverged += stats.converged ? 0 : 1;
             minimum = std::min(minimum, output);
             maximum = std::max(maximum, output);
+            for (std::size_t p = 0; p < probeNodes.size(); ++p) {
+                const float value = ts.engine().voltage(probeNodes[p]);
+                probeMin[p] = std::min(probeMin[p], value);
+                probeMax[p] = std::max(probeMax[p], value);
+            }
         }
         std::cout << "DIAG dense-ts808 min=" << minimum << " max=" << maximum
                   << " unconverged=" << unconverged
                   << " sparse=" << ts.engine().performanceStats().sparseNewtonSolves
                   << " fallback=" << ts.engine().performanceStats().sparseFallbackSolves
                   << " dense=" << ts.engine().performanceStats().generalLinearSolves << '\n';
+        for (std::size_t p = 0; p < probeNodes.size(); ++p)
+            std::cout << "DIAG stage " << probeNames[p] << " min=" << probeMin[p]
+                      << " max=" << probeMax[p] << '\n';
+
         ok &= require(healthy, "TS808 circuit stays finite and nonsingular under guitar-level drive");
         ok &= require(maximum - minimum > 0.01f,
                       "TS808 circuit produces a driven AC output");
