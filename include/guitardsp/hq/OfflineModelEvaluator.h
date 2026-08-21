@@ -83,10 +83,13 @@ FitMetrics fitNodeFrequencyResponse(Node& node,
                                     graph::PrepareSpec spec,
                                     std::span<const FrequencyReferencePoint> reference,
                                     float amplitude = 0.05f,
-                                    int blockSize = 256) {
+                                    int blockSize = 256,
+                                    int settleBlocks = 5,
+                                    int captureBlocks = 4) {
     std::vector<float> frequencies(reference.size());
     for (std::size_t i = 0; i < reference.size(); ++i) frequencies[i] = reference[i].frequencyHz;
-    const auto model = measureNodeFrequencyResponse(node, spec, frequencies, amplitude, blockSize);
+    const auto model = measureNodeFrequencyResponse(node, spec, frequencies, amplitude,
+                                                    blockSize, settleBlocks, captureBlocks);
     return compareFrequencyResponse(reference, model);
 }
 
@@ -101,7 +104,9 @@ ParameterFitResult fitParameterGrid1D(Node& node,
                                       graph::PrepareSpec spec,
                                       std::span<const FrequencyReferencePoint> reference,
                                       float amplitude = 0.05f,
-                                      int blockSize = 256) {
+                                      int blockSize = 256,
+                                      int settleBlocks = 5,
+                                      int captureBlocks = 4) {
     ParameterFitResult best;
     steps = std::max(2, steps);
     const float low = std::min(minimum, maximum);
@@ -111,7 +116,8 @@ ParameterFitResult fitParameterGrid1D(Node& node,
         const float t = static_cast<float>(i) / static_cast<float>(steps - 1);
         const float value = low + t * (high - low);
         if (!node.setParameterValue(parameterIndex, value)) continue;
-        const auto metrics = fitNodeFrequencyResponse(node, spec, reference, amplitude, blockSize);
+        const auto metrics = fitNodeFrequencyResponse(node, spec, reference, amplitude,
+                                                      blockSize, settleBlocks, captureBlocks);
         const float score = metrics.weightedRmsError;
         if (score < best.score) {
             best.value = value;
