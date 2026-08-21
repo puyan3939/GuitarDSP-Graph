@@ -1,117 +1,78 @@
 #include "guitardsp/graph/CompiledAudioGraph.h"
-
 #include <algorithm>
-#include <unordered_map>
-#include <unordered_set>
+#include <set>
 
 namespace guitardsp::graph {
 
-CompiledAudioGraph::NodeRuntime* CompiledAudioGraph::runtime(NodeId id) noexcept {
-    const auto it = runtimeIndex_.find(id);
-    return it == runtimeIndex_.end() ? nullptr : &nodes_[it->second];
-}
+CompiledAudioGraph::NodeRuntime* CompiledAudioGraph::runtime(NodeId id)noexcept{const auto it=runtimeIndex_.find(id);return it==runtimeIndex_.end()?nullptr:&nodes_[it->second];}
+const CompiledAudioGraph::NodeRuntime* CompiledAudioGraph::runtime(NodeId id)const noexcept{const auto it=runtimeIndex_.find(id);return it==runtimeIndex_.end()?nullptr:&nodes_[it->second];}
 
-const CompiledAudioGraph::NodeRuntime* CompiledAudioGraph::runtime(NodeId id) const noexcept {
-    const auto it = runtimeIndex_.find(id);
-    return it == runtimeIndex_.end() ? nullptr : &nodes_[it->second];
-}
+bool CompiledAudioGraph::build(Graph& graph,double sampleRate,int maxBlockSize,int channels,ProcessingQuality quality){
+    if(maxBlockSize<=0||channels<=0)return false;
+    const auto validation=graph.compile();if(!validation.ok)return false;
+    maxBlockSize_=maxBlockSize;channels_=channels;totalLatencySamples_=graph.maximumGraphLatencySamples();order_=graph.schedule();nodes_.clear();runtimeIndex_.clear();sinks_.clear();nodes_.reserve(order_.size());
+    const PrepareSpec spec{sampleRate,maxBlockSize,channels,quality};
 
-bool CompiledAudioGraph::build(Graph& graph, double sampleRate, int maxBlockSize, int channels,
-                               ProcessingQuality quality) {
-    if (maxBlockSize <= 0 || channels <= 0) return false;
-    const auto result = graph.compile();
-    if (!result.ok) return false;
-
-    maxBlockSize_ = maxBlockSize;
-    channels_ = channels;
-    totalLatencySamples_ = graph.maximumGraphLatencySamples();
-    order_ = graph.schedule();
-    nodes_.clear(); runtimeIndex_.clear(); sinks_.clear();
-    nodes_.reserve(order_.size());
-
-    std::unordered_map<NodeId, std::vector<NodeId>> incoming;
-    std::unordered_set<NodeId> hasOutgoing;
-    for (const auto& c : graph.connections()) {
-        incoming[c.to].push_back(c.from);
-        hasOutgoing.insert(c.from);
+    for(const NodeId id:order_){
+        auto* node=graph.node(id);if(!node)return false;NodeRuntime r;r.id=id;r.node=node;
+        r.inputs.resize(static_cast<std::size_t>(std::max(0,node->inputPortCount())));
+        r.outputs.resize(static_cast<std::size_t>(std::max(0,node->outputPortCount())));
+        for(auto& in:r.inputs)in.mix.resize(channels,maxBlockSize);
+        for(auto& out:r.outputs)out.resize(channels,maxBlockSize);
+        node->prepare(spec);runtimeIndex_[id]=nodes_.size();nodes_.push_back(std::move(r));
     }
 
-    const PrepareSpec spec{sampleRate, maxBlockSize, channels, quality};
-    for (const NodeId id : order_) {
-        auto* node = graph.node(id);
-        if (node == nullptr) return false;
-        NodeRuntime r;
-        r.id = id;
-        r.node = node;
-        r.mixInput.resize(channels, maxBlockSize);
-        r.output.resize(channels, maxBlockSize);
-
-        int maxParentLatency = 0;
-        if (const auto it = incoming.find(id); it != incoming.end()) {
-            for (const NodeId parent : it->second)
-                maxParentLatency = std::max(maxParentLatency, graph.cumulativeLatencySamples(parent).value_or(0));
-            r.upstream.reserve(it->second.size());
-            for (const NodeId parent : it->second) {
-                InputEdgeRuntime edge;
-                edge.source = parent;
-                edge.compensation.prepare(channels, totalLatencySamples_, maxBlockSize);
-                edge.compensation.setDelaySamples(maxParentLatency - graph.cumulativeLatencySamples(parent).value_or(0));
-                r.upstream.push_back(std::move(edge));
+    for(auto& r:nodes_){
+        for(int port=0;port<static_cast<int>(r.inputs.size());++port){
+            int maxParentLatency=0;
+            for(const auto&e:graph.connections())if(e.to==r.id&&e.toPort==port)maxParentLatency=std::max(maxParentLatency,graph.cumulativeLatencySamples(e.from).value_or(0));
+            for(const auto&e:graph.connections())if(e.to==r.id&&e.toPort==port){
+                InputEdgeRuntime edge;edge.source=e.from;edge.sourcePort=e.fromPort;edge.compensation.prepare(channels,totalLatencySamples_,maxBlockSize);edge.compensation.setDelaySamples(maxParentLatency-graph.cumulativeLatencySamples(e.from).value_or(0));r.inputs[static_cast<std::size_t>(port)].upstream.push_back(std::move(edge));
             }
         }
-        node->prepare(spec);
-        runtimeIndex_[id] = nodes_.size();
-        nodes_.push_back(std::move(r));
     }
 
-    for (const NodeId id : order_) {
-        if (hasOutgoing.contains(id)) continue;
-        SinkRuntime sink;
-        sink.source = id;
-        sink.compensation.prepare(channels, totalLatencySamples_, maxBlockSize);
-        sink.compensation.setDelaySamples(totalLatencySamples_ - graph.cumulativeLatencySamples(id).value_or(0));
-        sinks_.push_back(std::move(sink));
+    std::set<std::pair<NodeId,int>> connectedOutputs;
+    for(const auto&e:graph.connections())connectedOutputs.emplace(e.from,e.fromPort);
+    for(const NodeId id:order_){
+        const auto* node=graph.node(id);if(!node)continue;
+        for(int port=0;port<node->outputPortCount();++port){
+            if(connectedOutputs.contains({id,port}))continue;
+            SinkRuntime sink;sink.source=id;sink.sourcePort=port;sink.compensation.prepare(channels,totalLatencySamples_,maxBlockSize);sink.compensation.setDelaySamples(totalLatencySamples_-graph.cumulativeLatencySamples(id).value_or(0));sinks_.push_back(std::move(sink));
+        }
     }
-
-    reset();
-    return !nodes_.empty() && !sinks_.empty();
+    reset();return !nodes_.empty()&&!sinks_.empty();
 }
 
-void CompiledAudioGraph::reset() noexcept {
-    for (auto& r : nodes_) {
-        r.mixInput.clear(); r.output.clear();
-        for (auto& edge : r.upstream) edge.compensation.reset();
-        if (r.node != nullptr) r.node->reset();
-    }
-    for (auto& sink : sinks_) sink.compensation.reset();
+void CompiledAudioGraph::reset()noexcept{
+    for(auto&r:nodes_){for(auto&in:r.inputs){in.mix.clear();for(auto&e:in.upstream)e.compensation.reset();}for(auto&out:r.outputs)out.clear();if(r.node)r.node->reset();}
+    for(auto&s:sinks_)s.compensation.reset();
 }
 
-void CompiledAudioGraph::process(const AudioBuffer& externalInput, AudioBuffer& externalOutput, int numSamples) noexcept {
-    if (numSamples <= 0 || numSamples > maxBlockSize_) return;
+void CompiledAudioGraph::process(const AudioBuffer& externalInput,AudioBuffer& externalOutput,int numSamples)noexcept{
+    if(numSamples<=0||numSamples>maxBlockSize_)return;
     externalOutput.clear(numSamples);
-
-    for (auto& r : nodes_) {
-        r.mixInput.clear(numSamples);
-        if (r.upstream.empty()) {
-            r.mixInput.copyFrom(externalInput, numSamples);
-        } else {
-            for (auto& edge : r.upstream)
-                if (const auto* u = runtime(edge.source)) edge.compensation.processAdd(u->output, r.mixInput, numSamples);
+    for(auto&r:nodes_){
+        r.inputPointers.clear();r.outputPointers.clear();
+        for(std::size_t port=0;port<r.inputs.size();++port){
+            auto&in=r.inputs[port];in.mix.clear(numSamples);
+            if(in.upstream.empty()){
+                if(port==0)in.mix.copyFrom(externalInput,numSamples);
+            }else{
+                for(auto&e:in.upstream){const auto*u=runtime(e.source);if(!u||e.sourcePort<0||e.sourcePort>=static_cast<int>(u->outputs.size()))continue;e.compensation.processAdd(u->outputs[static_cast<std::size_t>(e.sourcePort)],in.mix,numSamples);}
+            }
+            r.inputPointers.push_back(&in.mix);
         }
-
-        r.output.clear(numSamples);
-        if (r.node->isMuted()) {
+        for(auto&out:r.outputs){out.clear(numSamples);r.outputPointers.push_back(&out);}
+        if(r.node->isMuted())continue;
+        if(r.node->isBypassed()){
+            if(!r.inputs.empty())for(auto&out:r.outputs)out.copyFrom(r.inputs[0].mix,numSamples);
             continue;
         }
-        if (r.node->isBypassed()) {
-            r.output.copyFrom(r.mixInput, numSamples);
-            continue;
-        }
-        r.node->process(r.mixInput, r.output, numSamples);
+        const ProcessPorts ports{std::span<const AudioBuffer* const>(r.inputPointers.data(),r.inputPointers.size()),std::span<AudioBuffer* const>(r.outputPointers.data(),r.outputPointers.size())};
+        r.node->processPorts(ports,numSamples);
     }
-
-    for (auto& sink : sinks_)
-        if (const auto* s = runtime(sink.source)) sink.compensation.processAdd(s->output, externalOutput, numSamples);
+    for(auto&s:sinks_){const auto*r=runtime(s.source);if(!r||s.sourcePort<0||s.sourcePort>=static_cast<int>(r->outputs.size()))continue;s.compensation.processAdd(r->outputs[static_cast<std::size_t>(s.sourcePort)],externalOutput,numSamples);}
 }
 
 } // namespace guitardsp::graph
