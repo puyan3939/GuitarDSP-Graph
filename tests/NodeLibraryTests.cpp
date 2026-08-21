@@ -16,12 +16,12 @@ int main() {
     bool ok = true; constexpr int block=256; constexpr double sr=48000.0;
     auto registry = NodeRegistry::createBuiltins();
     ok &= require(registry.create("drive.ds1_prototype") != nullptr, "registry creates DS-1 prototype");
-    ok &= require(registry.create("drive.ds1_hq") != nullptr, "registry creates HQ DS-1 topology");
-    ok &= require(registry.create("drive.ts808_hq") != nullptr, "registry creates HQ TS808 topology");
-    ok &= require(registry.create("drive.bd2_hq") != nullptr, "registry creates HQ BD-2 topology");
-    ok &= require(registry.create("drive.fuzz_two_transistor") != nullptr, "registry creates two-transistor fuzz topology");
-    ok &= require(registry.create("amp.reference_hq") != nullptr, "registry creates reference amp topology");
-    ok &= require(registry.create("cab.partitioned_hq") != nullptr, "registry creates partitioned cabinet node");
+    ok &= require(registry.create("drive.ds1_hq") != nullptr, "registry creates HQ DS-1");
+    ok &= require(registry.create("drive.ts808_hq") != nullptr, "registry creates HQ TS808");
+    ok &= require(registry.create("drive.bd2_hq") != nullptr, "registry creates HQ BD-2");
+    ok &= require(registry.create("amp.reference_hq") != nullptr, "registry creates reference HQ amp");
+    ok &= require(registry.create("cab.partitioned_hq") != nullptr, "registry creates partitioned HQ cab");
+    ok &= require(registry.create("cab.speaker_dynamics_hq") != nullptr, "registry creates HQ speaker dynamics");
     ok &= require(registry.create("route.split") != nullptr, "registry creates split node");
     ok &= require(registry.create("does.not.exist") == nullptr, "registry rejects unknown node type");
 
