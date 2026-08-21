@@ -34,10 +34,14 @@ public:
 protected:
     virtual float fixedPowerTube() const noexcept = 0;
     virtual float fixedToneStack() const noexcept = 0;
+    virtual float fixedToneDriver() const noexcept = 0;
+    virtual float fixedFeedbackVoicing() const noexcept = 0;
 
     void applyFamily() noexcept {
         core_.setParameterValue(7, fixedPowerTube());
         core_.setParameterValue(8, fixedToneStack());
+        core_.setParameterValue(9, fixedToneDriver());
+        core_.setParameterValue(10, fixedFeedbackVoicing());
     }
 
     ReferenceAmpTopologyNode core_;
@@ -54,23 +58,24 @@ private:
     }};
 };
 
-// Family-level engineering reference: British tone-stack values + EL34 branch.
-// This is deliberately not named after a specific amplifier until measured fit.
 class BritishPlexiFamilyNode final : public AmpFamilyReferenceBase {
 public:
     std::string_view typeName() const noexcept override { return "British Plexi Family Reference"; }
 protected:
     float fixedPowerTube() const noexcept override { return 0.0f; }
     float fixedToneStack() const noexcept override { return 1.0f; }
+    float fixedToneDriver() const noexcept override { return 1.0f; }
+    float fixedFeedbackVoicing() const noexcept override { return 1.0f; }
 };
 
-// Family-level engineering reference: American tone-stack values + 6L6GC branch.
 class AmericanCleanFamilyNode final : public AmpFamilyReferenceBase {
 public:
     std::string_view typeName() const noexcept override { return "American Clean Family Reference"; }
 protected:
     float fixedPowerTube() const noexcept override { return 1.0f; }
     float fixedToneStack() const noexcept override { return 2.0f; }
+    float fixedToneDriver() const noexcept override { return 2.0f; }
+    float fixedFeedbackVoicing() const noexcept override { return 2.0f; }
 };
 
 } // namespace guitardsp::hq
