@@ -54,7 +54,13 @@ bool CompiledAudioGraph::build(Graph& graph,double sampleRate,int maxBlockSize,i
             SinkRuntime sink;sink.source=id;sink.sourcePort=port;sink.busIndex=std::max(0,node->physicalOutputBusIndex());sink.compensation.prepare(channels,totalLatencySamples_,maxBlockSize);sink.compensation.setDelaySamples(totalLatencySamples_-graph.cumulativeLatencySamples(id).value_or(0));sinks_.push_back(std::move(sink));
         }
     }
-    reset();return !nodes_.empty()&&!sinks_.empty();
+
+    // Do not call reset() here. prepare() is the control-thread point at which a
+    // nonlinear node is allowed to establish its operating point and dynamic initial
+    // conditions. Resetting immediately after prepare used to erase that bias state
+    // before the first audio callback. Newly prepared mix/output/PDC buffers are
+    // already zero-initialized by resize()/prepare().
+    return !nodes_.empty()&&!sinks_.empty();
 }
 
 void CompiledAudioGraph::reset()noexcept{
