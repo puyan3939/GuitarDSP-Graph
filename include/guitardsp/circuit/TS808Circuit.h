@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ActiveDeviceParasiticSubcircuits.h"
+#include "BjtForwardActiveSubcircuit.h"
 #include "DiodeParasiticSubcircuit.h"
 #include "DynamicOpAmpSubcircuit.h"
 
@@ -10,128 +10,135 @@
 
 namespace guitardsp::circuit {
 
-// Engaged-audio-path TS808 circuit assembled from MNA components.
+// Component-level engaged TS808 audio path.
 //
-// Topology follows the classic block order:
-//   9 V / 4.5 V bias -> 2SC1815-style input emitter follower
-//   -> JRC4558 clipping amplifier with 4k7/47n high-pass feedback,
-//      51k + 500k drive resistance, anti-parallel silicon diodes and 51 pF
-//   -> 1k/220n passive low-pass -> active 20k tone network
-//   -> 100k level control -> 2SC1815-style output emitter follower.
-//
-// The JFET bypass/toggle logic and reverse-polarity supply protection are not in
-// this engaged signal-path model yet. The 4.5 V node is represented as an ideal
-// bias source: this avoids simulating the pedal's long power-on decoupling transient
-// in every audio instance while preserving the AC operating point seen by the audio
-// circuit. A later DC-operating-point/power-network pass can remove that shortcut.
+// Implemented as ordinary MNA parts:
+// 9 V / 4.5 V bias, 2SC1815-style input emitter follower, JRC4558 clipping
+// amplifier, 4k7/47n feedback high-pass, 51k + 500k drive resistance,
+// anti-parallel silicon diodes + junction capacitance, 51 pF compensation,
+// passive/active 20k tone network, 100k level pot, and a 2SC1815-style output
+// emitter follower. Bypass JFET switching and supply protection are intentionally
+// outside this engaged-signal-path model for now.
 class TS808Circuit {
 public:
     static constexpr float defaultDrive = 0.45f;
     static constexpr float defaultTone = 0.50f;
     static constexpr float defaultLevel = 0.55f;
 
+    struct StageVoltages {
+        float inputEmitter = 0.0f;
+        float clippingInput = 0.0f;
+        float clippingOutput = 0.0f;
+        float toneInput = 0.0f;
+        float toneOutput = 0.0f;
+        float levelWiper = 0.0f;
+        float outputEmitter = 0.0f;
+        float output = 0.0f;
+    };
+
     bool prepare(double sampleRate) {
         sampleRate_ = std::max(1.0, sampleRate);
         engine_ = MnaCircuitEngine{};
 
-        const Node supply = engine_.addNode();
-        const Node vref = engine_.addNode();
-        const Node inputJack = engine_.addNode();
+        supply_ = engine_.addNode();
+        vref_ = engine_.addNode();
+        inputJack_ = engine_.addNode();
         const Node inputCoupled = engine_.addNode();
         const Node q1Base = engine_.addNode();
-        const Node q1Emitter = engine_.addNode();
-        const Node clipNonInv = engine_.addNode();
+        q1Emitter_ = engine_.addNode();
+        clipNonInv_ = engine_.addNode();
         const Node clipInv = engine_.addNode();
         const Node clipHpNode = engine_.addNode();
         const Node clipFeedbackNode = engine_.addNode();
-        const Node clipOut = engine_.addNode();
-        const Node toneNonInv = engine_.addNode();
+        clipOut_ = engine_.addNode();
+        toneNonInv_ = engine_.addNode();
         const Node toneInv = engine_.addNode();
         const Node toneWiper = engine_.addNode();
         const Node toneRcNode = engine_.addNode();
-        const Node toneOut = engine_.addNode();
+        toneOut_ = engine_.addNode();
         const Node levelFeed = engine_.addNode();
         const Node levelTop = engine_.addNode();
-        const Node levelWiper = engine_.addNode();
+        levelWiper_ = engine_.addNode();
         const Node q3Base = engine_.addNode();
-        const Node q3Emitter = engine_.addNode();
+        q3Emitter_ = engine_.addNode();
         const Node outputCouplingInput = engine_.addNode();
         outputNode_ = engine_.addNode();
 
-        engine_.addVoltageSource(supply, ground, 9.0f);
-        engine_.addVoltageSource(vref, ground, 4.5f);
-        inputSource_ = engine_.addVoltageSource(inputJack, ground, 0.0f);
+        engine_.addVoltageSource(supply_, ground, 9.0f);
+        // Ideal 4.5 V audio bias for this engaged model. A later DC operating-point
+        // pass will let us replace this with the physical divider/decoupling network
+        // without spending audio startup time charging the supply capacitor.
+        engine_.addVoltageSource(vref_, ground, 4.5f);
+        inputSource_ = engine_.addVoltageSource(inputJack_, ground, 0.0f);
 
-        // Input buffer: C1 22 nF, R1 1 k, R2 510 k, Q1 emitter follower,
-        // R3 10 k and C2 1 uF.
-        engine_.addCapacitor(inputJack, inputCoupled, capacitor(22.0e-9f, 50.0f,
-                                                               hq::CapacitorTechnology::film));
+        // Input emitter follower.
+        engine_.addCapacitor(inputJack_, inputCoupled,
+                             capacitor(22.0e-9f, 50.0f, hq::CapacitorTechnology::film));
         engine_.addResistor(inputCoupled, q1Base, resistor(1000.0f));
-        engine_.addResistor(vref, q1Base, resistor(510000.0f));
-        addBjtParasiticSubcircuit(engine_, supply, q1Base, q1Emitter, twoSC1815Style());
-        engine_.addResistor(q1Emitter, ground, resistor(10000.0f));
-        engine_.addCapacitor(q1Emitter, clipNonInv, capacitor(1.0e-6f, 50.0f,
-                                                             hq::CapacitorTechnology::film));
-        engine_.addResistor(clipNonInv, vref, resistor(10000.0f));
+        engine_.addResistor(vref_, q1Base, resistor(510000.0f));
+        inputBuffer_ = addBjtForwardActiveSubcircuit(
+            engine_, supply_, q1Base, q1Emitter_, twoSC1815Style());
+        engine_.addResistor(q1Emitter_, ground, resistor(10000.0f));
+        engine_.addCapacitor(q1Emitter_, clipNonInv_,
+                             capacitor(1.0e-6f, 50.0f, hq::CapacitorTechnology::film));
+        engine_.addResistor(clipNonInv_, vref_, resistor(10000.0f));
 
-        // Clipping amplifier: the 4k7/47n branch is AC-ground referenced exactly
-        // as in the classic schematic. The drive control is used as a rheostat.
+        // First JRC4558 half: clipping amplifier.
         const auto opAmp = ts808OpAmp();
-        clipOpAmp_ = addDynamicOpAmpSubcircuit(engine_, clipOut, clipNonInv, clipInv,
-                                                supply, ground, ground, opAmp);
-        engine_.addCapacitor(clipInv, clipHpNode, capacitor(47.0e-9f, 50.0f,
-                                                           hq::CapacitorTechnology::film));
+        clipOpAmp_ = addDynamicOpAmpSubcircuit(
+            engine_, clipOut_, clipNonInv_, clipInv, supply_, ground, ground, opAmp);
+        engine_.addCapacitor(clipInv, clipHpNode,
+                             capacitor(47.0e-9f, 50.0f, hq::CapacitorTechnology::film));
         engine_.addResistor(clipHpNode, ground, resistor(4700.0f));
         engine_.addResistor(clipInv, clipFeedbackNode, resistor(51000.0f));
-
-        auto drive = potentiometer(500000.0f, hq::PotTaper::audio, 1.0f - defaultDrive);
-        drivePot_ = engine_.addPotentiometer(clipFeedbackNode, clipOut, clipOut, drive);
+        drivePot_ = engine_.addPotentiometer(
+            clipFeedbackNode, clipOut_, clipOut_,
+            potentiometer(500000.0f, hq::PotTaper::audio, 1.0f - defaultDrive));
 
         auto clipDiode = hq::component_presets::oneN4148();
         clipDiode.name = "TS808 1N914/1N4148-style";
-        clippingDiodePositive_ = addDiodeParasiticSubcircuit(engine_, clipInv, clipOut, clipDiode);
-        clippingDiodeNegative_ = addDiodeParasiticSubcircuit(engine_, clipOut, clipInv, clipDiode);
-        engine_.addCapacitor(clipInv, clipOut, capacitor(51.0e-12f, 50.0f,
-                                                        hq::CapacitorTechnology::ceramic));
+        clippingDiodePositive_ = addDiodeParasiticSubcircuit(
+            engine_, clipInv, clipOut_, clipDiode);
+        clippingDiodeNegative_ = addDiodeParasiticSubcircuit(
+            engine_, clipOut_, clipInv, clipDiode);
+        engine_.addCapacitor(clipInv, clipOut_,
+                             capacitor(51.0e-12f, 50.0f, hq::CapacitorTechnology::ceramic));
 
-        // Tone / volume section from the classic second half of the JRC4558.
-        // R7/C5 create the ~723 Hz passive low-pass. The 20 k tone pot spans the
-        // op-amp inputs, with its wiper returned to ground through 220 nF + 220 R.
-        engine_.addResistor(clipOut, toneNonInv, resistor(1000.0f));
-        engine_.addCapacitor(toneNonInv, ground, capacitor(220.0e-9f, 35.0f,
-                                                           hq::CapacitorTechnology::film));
-        engine_.addResistor(toneNonInv, vref, resistor(10000.0f));
-
-        auto tone = potentiometer(20000.0f, hq::PotTaper::linear, 1.0f - defaultTone);
-        tonePot_ = engine_.addPotentiometer(toneNonInv, toneWiper, toneInv, tone);
-        engine_.addCapacitor(toneWiper, toneRcNode, capacitor(220.0e-9f, 35.0f,
-                                                             hq::CapacitorTechnology::film));
+        // Second half: R7/C5 passive rolloff plus the 20k active tone network.
+        engine_.addResistor(clipOut_, toneNonInv_, resistor(1000.0f));
+        engine_.addCapacitor(toneNonInv_, ground,
+                             capacitor(220.0e-9f, 35.0f, hq::CapacitorTechnology::film));
+        engine_.addResistor(toneNonInv_, vref_, resistor(10000.0f));
+        tonePot_ = engine_.addPotentiometer(
+            toneNonInv_, toneWiper, toneInv,
+            potentiometer(20000.0f, hq::PotTaper::linear, 1.0f - defaultTone));
+        engine_.addCapacitor(toneWiper, toneRcNode,
+                             capacitor(220.0e-9f, 35.0f, hq::CapacitorTechnology::film));
         engine_.addResistor(toneRcNode, ground, resistor(220.0f));
-        engine_.addResistor(toneOut, toneInv, resistor(1000.0f));
+        engine_.addResistor(toneOut_, toneInv, resistor(1000.0f));
 
-        // The second 4558 half is intentionally kept as the engine's finite-gain
-        // op-amp primitive for now. The clipping half needs large-signal rail/slew
-        // behavior; the tone half normally remains linear, and avoiding a second
-        // artificial rail/slew macro materially improves Newton conditioning while
-        // preserving the actual passive tone network around it.
-        engine_.addOpAmp(toneOut, toneNonInv, toneInv, ground, opAmp);
+        // The tone half normally stays linear, so the finite-gain MNA op-amp keeps
+        // the exact surrounding R/C/pot topology without adding a second stiff
+        // large-signal macro to the same Newton system.
+        engine_.addOpAmp(toneOut_, toneNonInv_, toneInv, ground, opAmp);
 
-        engine_.addCapacitor(toneOut, levelFeed, capacitor(1.0e-6f, 50.0f,
-                                                           hq::CapacitorTechnology::film));
+        engine_.addCapacitor(toneOut_, levelFeed,
+                             capacitor(1.0e-6f, 50.0f, hq::CapacitorTechnology::film));
         engine_.addResistor(levelFeed, levelTop, resistor(1000.0f));
-        auto level = potentiometer(100000.0f, hq::PotTaper::audio, defaultLevel);
-        levelPot_ = engine_.addPotentiometer(levelTop, levelWiper, ground, level);
+        levelPot_ = engine_.addPotentiometer(
+            levelTop, levelWiper_, ground,
+            potentiometer(100000.0f, hq::PotTaper::audio, defaultLevel));
 
-        // Output buffer: C8 100 nF, 510 k bias, 10 k emitter resistor, 100 R
-        // output resistor, C9 10 uF and 10 k output load/pulldown.
-        engine_.addCapacitor(levelWiper, q3Base, capacitor(100.0e-9f, 50.0f,
-                                                           hq::CapacitorTechnology::film));
-        engine_.addResistor(vref, q3Base, resistor(510000.0f));
-        addBjtParasiticSubcircuit(engine_, supply, q3Base, q3Emitter, twoSC1815Style());
-        engine_.addResistor(q3Emitter, ground, resistor(10000.0f));
-        engine_.addResistor(q3Emitter, outputCouplingInput, resistor(100.0f));
-        engine_.addCapacitor(outputCouplingInput, outputNode_, capacitor(10.0e-6f, 16.0f,
-                                                                        hq::CapacitorTechnology::electrolytic));
+        // Output emitter follower.
+        engine_.addCapacitor(levelWiper_, q3Base,
+                             capacitor(100.0e-9f, 50.0f, hq::CapacitorTechnology::film));
+        engine_.addResistor(vref_, q3Base, resistor(510000.0f));
+        outputBuffer_ = addBjtForwardActiveSubcircuit(
+            engine_, supply_, q3Base, q3Emitter_, twoSC1815Style());
+        engine_.addResistor(q3Emitter_, ground, resistor(10000.0f));
+        engine_.addResistor(q3Emitter_, outputCouplingInput, resistor(100.0f));
+        engine_.addCapacitor(outputCouplingInput, outputNode_,
+                             capacitor(10.0e-6f, 16.0f, hq::CapacitorTechnology::electrolytic));
         engine_.addResistor(outputNode_, ground, resistor(10000.0f));
 
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
@@ -142,14 +149,12 @@ public:
         level_ = defaultLevel;
         lastSolve_ = {};
 
-        // Control-thread warm-up only. It suppresses most coupling-cap startup
-        // transient without putting any allocation or topology work on the audio path.
         const auto warmSamples = static_cast<std::size_t>(
             std::clamp(sampleRate_ * 0.08, 512.0, 8192.0));
         for (std::size_t i = 0; i < warmSamples; ++i) {
             engine_.setVoltageSource(inputSource_, 0.0f);
             lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !std::isfinite(engine_.voltage(outputNode_))) return false;
+            if (lastSolve_.singular || !finiteStages()) return false;
         }
         return true;
     }
@@ -163,8 +168,6 @@ public:
         normalized = std::clamp(normalized, 0.0f, 1.0f);
         if (std::abs(normalized - drive_) < 1.0e-6f) return true;
         drive_ = normalized;
-        // With high=feedback resistor and wiper/low tied to the op-amp output,
-        // electrical resistance increases as the mechanical position is reversed.
         return engine_.setPotentiometerPosition(drivePot_, 1.0f - normalized);
     }
 
@@ -172,8 +175,6 @@ public:
         normalized = std::clamp(normalized, 0.0f, 1.0f);
         if (std::abs(normalized - tone_) < 1.0e-6f) return true;
         tone_ = normalized;
-        // Parameter convention: 0=bass, 1=treble. The physical wiper reaches
-        // the inverting-input end at the treble side, hence the reversal.
         return engine_.setPotentiometerPosition(tonePot_, 1.0f - normalized);
     }
 
@@ -200,6 +201,13 @@ public:
         return out;
     }
 
+    StageVoltages stageVoltages() const noexcept {
+        return {engine_.voltage(q1Emitter_), engine_.voltage(clipNonInv_),
+                engine_.voltage(clipOut_), engine_.voltage(toneNonInv_),
+                engine_.voltage(toneOut_), engine_.voltage(levelWiper_),
+                engine_.voltage(q3Emitter_), engine_.voltage(outputNode_)};
+    }
+
     float drive() const noexcept { return drive_; }
     float tone() const noexcept { return tone_; }
     float level() const noexcept { return level_; }
@@ -208,6 +216,14 @@ public:
     MnaCircuitEngine& engine() noexcept { return engine_; }
 
 private:
+    bool finiteStages() const noexcept {
+        const auto s = stageVoltages();
+        return std::isfinite(s.inputEmitter) && std::isfinite(s.clippingInput) &&
+               std::isfinite(s.clippingOutput) && std::isfinite(s.toneInput) &&
+               std::isfinite(s.toneOutput) && std::isfinite(s.levelWiper) &&
+               std::isfinite(s.outputEmitter) && std::isfinite(s.output);
+    }
+
     static hq::ResistorSpec resistor(float ohms) noexcept {
         hq::ResistorSpec r{};
         r.resistanceOhms = std::max(1.0e-3f, ohms);
@@ -261,10 +277,22 @@ private:
     MnaCircuitEngine engine_;
     double sampleRate_ = 48000.0;
     SourceHandle inputSource_{};
+    Node supply_ = ground;
+    Node vref_ = ground;
+    Node inputJack_ = ground;
+    Node q1Emitter_ = ground;
+    Node clipNonInv_ = ground;
+    Node clipOut_ = ground;
+    Node toneNonInv_ = ground;
+    Node toneOut_ = ground;
+    Node levelWiper_ = ground;
+    Node q3Emitter_ = ground;
     Node outputNode_ = ground;
     PotHandle drivePot_{};
     PotHandle tonePot_{};
     PotHandle levelPot_{};
+    BjtForwardActiveSubcircuit inputBuffer_{};
+    BjtForwardActiveSubcircuit outputBuffer_{};
     DynamicOpAmpSubcircuit clipOpAmp_{};
     DiodeParasiticSubcircuit clippingDiodePositive_{};
     DiodeParasiticSubcircuit clippingDiodeNegative_{};
