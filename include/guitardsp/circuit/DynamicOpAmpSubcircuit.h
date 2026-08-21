@@ -14,16 +14,15 @@ namespace guitardsp::circuit {
 // - dominant-pole / gain-bandwidth behavior
 // - input offset and input bias current
 // - finite output resistance
-// - soft output rail clamps referenced to explicit supply nodes
 //
-// Slew-rate and output-current limiting remain explicit future upgrades because
-// they require a current-limited dynamic source rather than a linear VCCS.
+// Rail limiting, slew-rate and output-current limiting intentionally remain future
+// work. A first diode-clamp experiment was removed because a hard overdrive could
+// drive the internal high-gain state into Newton non-convergence. Shipping an
+// explicit boundary is preferable to hiding an unstable "rail" approximation.
 struct DynamicOpAmpSubcircuit {
     Node dominantPole = ground;
     Node outputDrive = ground;
     Node offsetNode = ground;
-    Node positiveClamp = ground;
-    Node negativeClamp = ground;
 
     ResistorHandle dominantResistance{};
     CapacitorHandle dominantCapacitance{};
@@ -32,10 +31,6 @@ struct DynamicOpAmpSubcircuit {
     SourceHandle offsetVoltage{};
     ControlledSourceHandle outputFollower{};
     ResistorHandle outputResistance{};
-    SourceHandle positiveClampOffset{};
-    SourceHandle negativeClampOffset{};
-    DiodeHandle positiveClampDiode{};
-    DiodeHandle negativeClampDiode{};
 };
 
 namespace detail {
@@ -77,21 +72,6 @@ inline hq::ResistorSpec opAmpOutputResistance(const hq::OpAmpSpec& spec) noexcep
     r.powerRatingWatts = 100.0f;
     return r;
 }
-
-inline hq::DiodeSpec opAmpRailClampDiode() noexcept {
-    hq::DiodeSpec diode{};
-    diode.name = "OpAmp soft rail clamp";
-    diode.technology = hq::DiodeTechnology::silicon;
-    diode.nominalForwardVoltage = 0.01f;
-    diode.saturationCurrent = 1.0e-3f;
-    diode.emissionCoefficient = 1.0f;
-    diode.thermalVoltage = 0.02585f;
-    diode.seriesResistanceOhms = 0.05f;
-    diode.junctionCapacitanceFarads = 0.0f;
-    diode.reverseVoltageRating = 1000.0f;
-    diode.currentRatingAmps = 10.0f;
-    return diode;
-}
 } // namespace detail
 
 inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine,
@@ -102,12 +82,16 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
                                                          Node negativeRail,
                                                          Node reference,
                                                          const hq::OpAmpSpec& spec) {
+    // Supply nodes are retained in the public contract so a future bounded-output
+    // stamp can be introduced without changing CircuitNetlist topology. They are
+    // intentionally unused until that stamp is numerically robust.
+    (void)positiveRail;
+    (void)negativeRail;
+
     DynamicOpAmpSubcircuit handles{};
     handles.dominantPole = engine.addNode();
     handles.outputDrive = engine.addNode();
     handles.offsetNode = engine.addNode();
-    handles.positiveClamp = engine.addNode();
-    handles.negativeClamp = engine.addNode();
 
     handles.dominantResistance = engine.addResistor(handles.dominantPole, reference,
                                                      detail::opAmpDominantResistance());
@@ -132,20 +116,6 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
                                              handles.dominantPole, reference, 1.0f);
     handles.outputResistance = engine.addResistor(handles.outputDrive, output,
                                                    detail::opAmpOutputResistance(spec));
-
-    handles.positiveClampOffset = engine.addVoltageSource(handles.positiveClamp, positiveRail,
-        -std::max(0.0f, spec.positiveRailHeadroomVolts));
-    handles.negativeClampOffset = engine.addVoltageSource(handles.negativeClamp, negativeRail,
-        std::max(0.0f, spec.negativeRailHeadroomVolts));
-
-    // Clamp the dominant-pole state rather than the low-impedance follower output.
-    // This prevents the ideal VCVS buffer from demanding an unbounded internal
-    // voltage after the external output has already hit a supply rail.
-    const auto clampDiode = detail::opAmpRailClampDiode();
-    handles.positiveClampDiode = engine.addDiode(handles.dominantPole,
-                                                  handles.positiveClamp, clampDiode);
-    handles.negativeClampDiode = engine.addDiode(handles.negativeClamp,
-                                                  handles.dominantPole, clampDiode);
     return handles;
 }
 
@@ -160,10 +130,6 @@ inline bool updateDynamicOpAmpSubcircuit(MnaCircuitEngine& engine,
     ok &= engine.setVccsTransconductance(handles.offsetGm, gm);
     ok &= engine.setVoltageSource(handles.offsetVoltage, spec.inputOffsetVoltage);
     ok &= engine.setResistorSpec(handles.outputResistance, detail::opAmpOutputResistance(spec));
-    ok &= engine.setVoltageSource(handles.positiveClampOffset,
-                                  -std::max(0.0f, spec.positiveRailHeadroomVolts));
-    ok &= engine.setVoltageSource(handles.negativeClampOffset,
-                                  std::max(0.0f, spec.negativeRailHeadroomVolts));
     return ok;
 }
 
