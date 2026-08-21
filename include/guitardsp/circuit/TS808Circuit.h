@@ -20,10 +20,10 @@ namespace guitardsp::circuit {
 //   -> 100k level control -> 2SC1815-style output emitter follower.
 //
 // The JFET bypass/toggle logic and reverse-polarity supply protection are not in
-// this engaged signal-path model yet.  The 4.5 V node is represented as an ideal
+// this engaged signal-path model yet. The 4.5 V node is represented as an ideal
 // bias source: this avoids simulating the pedal's long power-on decoupling transient
 // in every audio instance while preserving the AC operating point seen by the audio
-// circuit.  A later DC-operating-point/power-network pass can remove that shortcut.
+// circuit. A later DC-operating-point/power-network pass can remove that shortcut.
 class TS808Circuit {
 public:
     static constexpr float defaultDrive = 0.45f;
@@ -75,7 +75,7 @@ public:
         engine_.addResistor(clipNonInv, vref, resistor(10000.0f));
 
         // Clipping amplifier: the 4k7/47n branch is AC-ground referenced exactly
-        // as in the classic schematic.  The drive control is used as a rheostat.
+        // as in the classic schematic. The drive control is used as a rheostat.
         const auto opAmp = ts808OpAmp();
         clipOpAmp_ = addDynamicOpAmpSubcircuit(engine_, clipOut, clipNonInv, clipInv,
                                                 supply, ground, ground, opAmp);
@@ -95,7 +95,7 @@ public:
                                                         hq::CapacitorTechnology::ceramic));
 
         // Tone / volume section from the classic second half of the JRC4558.
-        // R7/C5 create the ~723 Hz passive low-pass.  The 20 k tone pot spans the
+        // R7/C5 create the ~723 Hz passive low-pass. The 20 k tone pot spans the
         // op-amp inputs, with its wiper returned to ground through 220 nF + 220 R.
         engine_.addResistor(clipOut, toneNonInv, resistor(1000.0f));
         engine_.addCapacitor(toneNonInv, ground, capacitor(220.0e-9f, 35.0f,
@@ -108,8 +108,13 @@ public:
                                                              hq::CapacitorTechnology::film));
         engine_.addResistor(toneRcNode, ground, resistor(220.0f));
         engine_.addResistor(toneOut, toneInv, resistor(1000.0f));
-        toneOpAmp_ = addDynamicOpAmpSubcircuit(engine_, toneOut, toneNonInv, toneInv,
-                                                supply, ground, ground, opAmp);
+
+        // The second 4558 half is intentionally kept as the engine's finite-gain
+        // op-amp primitive for now. The clipping half needs large-signal rail/slew
+        // behavior; the tone half normally remains linear, and avoiding a second
+        // artificial rail/slew macro materially improves Newton conditioning while
+        // preserving the actual passive tone network around it.
+        engine_.addOpAmp(toneOut, toneNonInv, toneInv, ground, opAmp);
 
         engine_.addCapacitor(toneOut, levelFeed, capacitor(1.0e-6f, 50.0f,
                                                            hq::CapacitorTechnology::film));
@@ -137,13 +142,13 @@ public:
         level_ = defaultLevel;
         lastSolve_ = {};
 
-        // Control-thread warm-up only.  It suppresses most coupling-cap startup
+        // Control-thread warm-up only. It suppresses most coupling-cap startup
         // transient without putting any allocation or topology work on the audio path.
         const auto warmSamples = static_cast<std::size_t>(
             std::clamp(sampleRate_ * 0.08, 512.0, 8192.0));
         for (std::size_t i = 0; i < warmSamples; ++i) {
             engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(32, 2.0e-5f);
+            lastSolve_ = engine_.processSample(40, 2.0e-5f);
             if (lastSolve_.singular || !std::isfinite(engine_.voltage(outputNode_))) return false;
         }
         return true;
@@ -167,7 +172,7 @@ public:
         normalized = std::clamp(normalized, 0.0f, 1.0f);
         if (std::abs(normalized - tone_) < 1.0e-6f) return true;
         tone_ = normalized;
-        // Parameter convention: 0=bass, 1=treble.  The physical wiper reaches
+        // Parameter convention: 0=bass, 1=treble. The physical wiper reaches
         // the inverting-input end at the treble side, hence the reversal.
         return engine_.setPotentiometerPosition(tonePot_, 1.0f - normalized);
     }
@@ -189,7 +194,7 @@ public:
 
     float processSample(float input) noexcept {
         engine_.setVoltageSource(inputSource_, input);
-        lastSolve_ = engine_.processSample(32, 2.0e-5f);
+        lastSolve_ = engine_.processSample(40, 2.0e-5f);
         const float out = engine_.voltage(outputNode_);
         if (lastSolve_.singular || !std::isfinite(out)) return 0.0f;
         return out;
@@ -261,7 +266,6 @@ private:
     PotHandle tonePot_{};
     PotHandle levelPot_{};
     DynamicOpAmpSubcircuit clipOpAmp_{};
-    DynamicOpAmpSubcircuit toneOpAmp_{};
     DiodeParasiticSubcircuit clippingDiodePositive_{};
     DiodeParasiticSubcircuit clippingDiodeNegative_{};
     MnaCircuitEngine::SolveStats lastSolve_{};
