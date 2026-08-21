@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.2.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,11 +12,7 @@ add_library(GuitarDSPGraphCore
     src/graph/CompiledAudioGraph.cpp
 )
 
-target_include_directories(GuitarDSPGraphCore
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
+target_include_directories(GuitarDSPGraphCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(GuitarDSPGraphCore PUBLIC cxx_std_20)
 
 if (MSVC)
@@ -33,14 +29,14 @@ endif()
 
 enable_testing()
 
-add_executable(GuitarDSPGraphTests
-    tests/GraphTests.cpp
-)
+add_executable(GuitarDSPGraphTests tests/GraphTests.cpp)
 target_link_libraries(GuitarDSPGraphTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME graph_core COMMAND GuitarDSPGraphTests)
 
-add_executable(GuitarDSPAudioRuntimeTests
-    tests/AudioRuntimeTests.cpp
-)
+add_executable(GuitarDSPAudioRuntimeTests tests/AudioRuntimeTests.cpp)
 target_link_libraries(GuitarDSPAudioRuntimeTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME audio_runtime COMMAND GuitarDSPAudioRuntimeTests)
+
+add_executable(GuitarDSPNodeTests tests/DSPNodeTests.cpp)
+target_link_libraries(GuitarDSPNodeTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME dsp_nodes COMMAND GuitarDSPNodeTests)

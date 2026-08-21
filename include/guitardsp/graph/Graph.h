@@ -7,22 +7,19 @@
 #include <unordered_map>
 #include <vector>
 
-namespace guitardsp::graph
-{
-struct Connection
-{
+namespace guitardsp::graph {
+
+struct Connection {
     NodeId from = 0;
     NodeId to = 0;
 };
 
-struct ValidationResult
-{
+struct ValidationResult {
     bool ok = false;
     std::string message;
 };
 
-class Graph
-{
+class Graph {
 public:
     NodeId addNode(std::unique_ptr<AudioNode> node);
     bool removeNode(NodeId id);
@@ -32,20 +29,21 @@ public:
 
     [[nodiscard]] AudioNode* node(NodeId id) noexcept;
     [[nodiscard]] const AudioNode* node(NodeId id) const noexcept;
-    [[nodiscard]] const std::vector<Connection>& connections() const noexcept { return edges; }
-    [[nodiscard]] const std::vector<NodeId>& schedule() const noexcept { return executionOrder; }
+    [[nodiscard]] const std::vector<Connection>& connections() const noexcept { return edges_; }
+    [[nodiscard]] const std::vector<NodeId>& schedule() const noexcept { return executionOrder_; }
 
     ValidationResult compile();
 
-    [[nodiscard]] std::optional<std::size_t> cumulativeLatencySamples(NodeId id) const;
-    [[nodiscard]] std::size_t maximumGraphLatencySamples() const noexcept { return maxGraphLatency; }
+    [[nodiscard]] std::optional<int> cumulativeLatencySamples(NodeId id) const;
+    [[nodiscard]] int maximumGraphLatencySamples() const noexcept { return maxGraphLatency_; }
 
 private:
-    NodeId nextId = 1;
-    std::unordered_map<NodeId, std::unique_ptr<AudioNode>> nodes;
-    std::vector<Connection> edges;
-    std::vector<NodeId> executionOrder;
-    std::unordered_map<NodeId, std::size_t> cumulativeLatencies;
-    std::size_t maxGraphLatency = 0;
+    NodeId nextId_ = 1;
+    std::unordered_map<NodeId, std::unique_ptr<AudioNode>> nodes_;
+    std::vector<Connection> edges_;
+    std::vector<NodeId> executionOrder_;
+    std::unordered_map<NodeId, int> cumulativeLatencies_;
+    int maxGraphLatency_ = 0;
 };
-}
+
+} // namespace guitardsp::graph

@@ -1,4 +1,5 @@
 #pragma once
+
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -15,32 +16,49 @@ public:
         assert(channels >= 0 && samples >= 0);
         channels_ = channels;
         samples_ = samples;
-        data_.assign(static_cast<std::size_t>(channels * samples), 0.0f);
+        data_.assign(static_cast<std::size_t>(channels_) * static_cast<std::size_t>(samples_), 0.0f);
     }
 
-    void clear() noexcept { std::fill(data_.begin(), data_.end(), 0.0f); }
-    int channels() const noexcept { return channels_; }
-    int samples() const noexcept { return samples_; }
+    [[nodiscard]] int channels() const noexcept { return channels_; }
+    [[nodiscard]] int samples() const noexcept { return samples_; }
 
     float* channel(int ch) noexcept {
         assert(ch >= 0 && ch < channels_);
-        return data_.data() + static_cast<std::size_t>(ch * samples_);
+        return data_.data() + static_cast<std::size_t>(ch) * static_cast<std::size_t>(samples_);
     }
+
     const float* channel(int ch) const noexcept {
         assert(ch >= 0 && ch < channels_);
-        return data_.data() + static_cast<std::size_t>(ch * samples_);
+        return data_.data() + static_cast<std::size_t>(ch) * static_cast<std::size_t>(samples_);
     }
 
-    void copyFrom(const AudioBuffer& other) noexcept {
-        assert(other.channels_ == channels_ && other.samples_ == samples_);
-        std::copy(other.data_.begin(), other.data_.end(), data_.begin());
+    void clear() noexcept { std::fill(data_.begin(), data_.end(), 0.0f); }
+
+    void clear(int numSamples) noexcept {
+        const int n = std::clamp(numSamples, 0, samples_);
+        for (int ch = 0; ch < channels_; ++ch)
+            std::fill_n(channel(ch), n, 0.0f);
     }
 
-    void addFrom(const AudioBuffer& other, float gain = 1.0f) noexcept {
-        assert(other.channels_ == channels_ && other.samples_ == samples_);
-        const auto n = data_.size();
-        for (std::size_t i = 0; i < n; ++i)
-            data_[i] += other.data_[i] * gain;
+    void copyFrom(const AudioBuffer& other) noexcept { copyFrom(other, std::min(samples_, other.samples_)); }
+
+    void copyFrom(const AudioBuffer& other, int numSamples) noexcept {
+        const int n = std::clamp(numSamples, 0, std::min(samples_, other.samples_));
+        const int chs = std::min(channels_, other.channels_);
+        for (int ch = 0; ch < chs; ++ch)
+            std::copy_n(other.channel(ch), n, channel(ch));
+        for (int ch = chs; ch < channels_; ++ch)
+            std::fill_n(channel(ch), n, 0.0f);
+    }
+
+    void addFrom(const AudioBuffer& other, int numSamples, float gain = 1.0f) noexcept {
+        const int n = std::clamp(numSamples, 0, std::min(samples_, other.samples_));
+        const int chs = std::min(channels_, other.channels_);
+        for (int ch = 0; ch < chs; ++ch) {
+            const float* src = other.channel(ch);
+            float* dst = channel(ch);
+            for (int i = 0; i < n; ++i) dst[i] += src[i] * gain;
+        }
     }
 
 private:
