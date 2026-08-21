@@ -27,7 +27,7 @@ inline AliasMetrics analyzeAliasResidual(std::span<const float> samples,
     if (samples.empty() || sampleRate <= 0.0 || fundamentalHz <= 0.0) return result;
 
     const std::size_t n = nextPowerOfTwo(samples.size());
-    std::vector<std::complex<float>> spectrum(n, {});
+    std::vector<std::complex<float>> spectrum(n, std::complex<float>{0.0f, 0.0f});
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const float phase = samples.size() > 1 ? static_cast<float>(i) / static_cast<float>(samples.size() - 1) : 0.0f;
         const float window = 0.5f - 0.5f * std::cos(2.0f * std::numbers::pi_v<float> * phase);
