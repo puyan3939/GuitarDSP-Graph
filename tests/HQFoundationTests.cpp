@@ -1,6 +1,7 @@
 #include "guitardsp/graph/AudioBuffer.h"
 #include "guitardsp/hq/AliasAnalysis.h"
 #include "guitardsp/hq/Components.h"
+#include "guitardsp/hq/DeviceStages.h"
 #include "guitardsp/hq/FFT.h"
 #include "guitardsp/hq/PartitionedConvolver.h"
 #include "guitardsp/hq/PolyphaseOversampler.h"
@@ -48,7 +49,7 @@ int main() {
     {
         constexpr int n = 1024;
         constexpr double sr = 48000.0;
-        constexpr double f = 1500.0; // exact FFT bin for N=1024
+        constexpr double f = 1500.0;
         std::vector<float> sine(static_cast<std::size_t>(n));
         for (int i = 0; i < n; ++i)
             sine[static_cast<std::size_t>(i)] = std::sin(2.0 * std::numbers::pi * f * static_cast<double>(i) / sr);
@@ -106,6 +107,39 @@ int main() {
         const float before = bias.voltage;
         for (int i = 0; i < 1000; ++i) bias.process(1.0f);
         ok &= require(bias.voltage > before && bias.voltage < 1.0f, "cathode bias state has memory");
+    }
+
+    {
+        hq::DiodePairSolver pair;
+        pair.setPositive(hq::DiodeModel::forType(hq::DiodeType::silicon));
+        pair.setNegative(hq::DiodeModel::forType(hq::DiodeType::germanium));
+        const float pos = pair.process(1.0f);
+        pair.reset();
+        const float neg = pair.process(-1.0f);
+        ok &= require(std::isfinite(pos) && std::isfinite(neg) && std::abs(pos + neg) > 1.0e-4f,
+                      "asymmetric diode pair solver is finite and asymmetric");
+
+        hq::TriodeCommonCathodeStage triodeStage;
+        triodeStage.prepare(48000.0);
+        float triodePeak = 0.0f;
+        bool triodeFinite = true;
+        for (int i = 0; i < 2000; ++i) {
+            const float y = triodeStage.process(0.7f * std::sin(0.03f * static_cast<float>(i)));
+            triodeFinite &= std::isfinite(y);
+            triodePeak = std::max(triodePeak, std::abs(y));
+        }
+        ok &= require(triodeFinite && triodePeak > 1.0e-5f, "common-cathode triode stage produces finite dynamic output");
+
+        hq::BJTCommonEmitterStage bjtStage;
+        bjtStage.prepare(48000.0);
+        float bjtPeak = 0.0f;
+        bool bjtFinite = true;
+        for (int i = 0; i < 2000; ++i) {
+            const float y = bjtStage.process(0.18f * std::sin(0.07f * static_cast<float>(i)));
+            bjtFinite &= std::isfinite(y);
+            bjtPeak = std::max(bjtPeak, std::abs(y));
+        }
+        ok &= require(bjtFinite && bjtPeak > 1.0e-5f, "common-emitter BJT stage produces finite dynamic output");
     }
 
     return ok ? 0 : 1;
