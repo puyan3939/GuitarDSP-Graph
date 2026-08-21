@@ -52,6 +52,53 @@ int main() {
     }
 
     {
+        circuit::MnaCircuitEngine c;
+        const auto high = c.addNode();
+        const auto wiper = c.addNode();
+        hq::PotentiometerSpec pot{};
+        pot.totalResistanceOhms = 100000.0f;
+        pot.taper = hq::PotTaper::linear;
+        pot.position = 0.25f;
+        c.addVoltageSource(high, circuit::ground, 1.0f);
+        const auto handle = c.addPotentiometer(high, wiper, circuit::ground, pot);
+        ok &= require(c.prepare(48000.0), "MNA prepares three-terminal potentiometer");
+        c.processSample();
+        ok &= require(std::abs(c.voltage(wiper) - 0.25f) < 1.0e-4f,
+                      "linear potentiometer maps mechanical position to divider voltage");
+        c.setPotentiometerPosition(handle, 0.75f);
+        c.processSample();
+        ok &= require(std::abs(c.voltage(wiper) - 0.75f) < 1.0e-4f,
+                      "potentiometer position updates without topology rebuild");
+    }
+
+    {
+        circuit::MnaCircuitEngine c;
+        const auto control = c.addNode();
+        const auto output = c.addNode();
+        hq::ResistorSpec load{};
+        load.resistanceOhms = 1000.0f;
+        c.addVoltageSource(control, circuit::ground, 1.0f);
+        c.addResistor(output, circuit::ground, load);
+        c.addVccs(circuit::ground, output, control, circuit::ground, 1.0e-3f);
+        ok &= require(c.prepare(48000.0), "MNA prepares VCCS");
+        c.processSample();
+        ok &= require(std::abs(c.voltage(output) - 1.0f) < 1.0e-4f,
+                      "VCCS converts control voltage into output current");
+    }
+
+    {
+        circuit::MnaCircuitEngine c;
+        const auto control = c.addNode();
+        const auto output = c.addNode();
+        c.addVoltageSource(control, circuit::ground, 0.2f);
+        c.addVcvs(output, circuit::ground, control, circuit::ground, 5.0f);
+        ok &= require(c.prepare(48000.0), "MNA prepares VCVS branch unknown");
+        c.processSample();
+        ok &= require(std::abs(c.voltage(output) - 1.0f) < 1.0e-4f,
+                      "VCVS enforces controlled output voltage");
+    }
+
+    {
         auto fast = makeRc(1.0e-6f);
         auto slow = makeRc(10.0e-6f);
         fast.processSample();
@@ -76,10 +123,74 @@ int main() {
         c.addResistor(in, out, r);
         c.addDiode(out, circuit::ground, hq::component_presets::oneN4148());
         c.prepare(48000.0);
-        const auto stats = c.processSample(20, 1.0e-7f);
+        const auto stats = c.processSample(24, 1.0e-7f);
         ok &= require(!stats.singular && stats.converged, "nonlinear diode circuit converges");
         ok &= require(c.voltage(out) > 0.45f && c.voltage(out) < 0.65f,
                       "1N4148-style diode bends transfer through series resistor");
+    }
+
+    {
+        circuit::MnaCircuitEngine c;
+        const auto vcc = c.addNode();
+        const auto base = c.addNode();
+        const auto collector = c.addNode();
+        const auto emitter = c.addNode();
+        hq::ResistorSpec rc{};
+        rc.resistanceOhms = 4700.0f;
+        hq::ResistorSpec re{};
+        re.resistanceOhms = 680.0f;
+        c.addVoltageSource(vcc, circuit::ground, 9.0f);
+        c.addVoltageSource(base, circuit::ground, 0.72f);
+        c.addResistor(vcc, collector, rc);
+        c.addResistor(emitter, circuit::ground, re);
+        c.addBjt(collector, base, emitter, hq::component_presets::twoN3904());
+        ok &= require(c.prepare(48000.0), "MNA prepares BJT three-terminal stamp");
+        const auto stats = c.processSample(32, 1.0e-6f);
+        ok &= require(!stats.singular && stats.converged, "BJT nonlinear stamp converges");
+        ok &= require(c.voltage(emitter) > 0.02f && c.voltage(collector) < 8.95f,
+                      "BJT bias produces emitter current and collector drop");
+    }
+
+    {
+        circuit::MnaCircuitEngine c;
+        const auto vdd = c.addNode();
+        const auto drain = c.addNode();
+        const auto source = c.addNode();
+        hq::ResistorSpec rd{};
+        rd.resistanceOhms = 10000.0f;
+        hq::ResistorSpec rs{};
+        rs.resistanceOhms = 1500.0f;
+        c.addVoltageSource(vdd, circuit::ground, 9.0f);
+        c.addResistor(vdd, drain, rd);
+        c.addResistor(source, circuit::ground, rs);
+        c.addJfet(drain, circuit::ground, source, hq::component_presets::j201());
+        ok &= require(c.prepare(48000.0), "MNA prepares JFET common-source stamp");
+        const auto stats = c.processSample(32, 1.0e-6f);
+        ok &= require(!stats.singular && stats.converged, "JFET nonlinear stamp converges");
+        ok &= require(c.voltage(source) > 0.05f && c.voltage(drain) > 1.0f && c.voltage(drain) < 8.8f,
+                      "J201-style self bias changes drain and source voltages");
+    }
+
+    {
+        circuit::MnaCircuitEngine c;
+        const auto vdd = c.addNode();
+        const auto gate = c.addNode();
+        const auto drain = c.addNode();
+        const auto source = c.addNode();
+        hq::ResistorSpec rd{};
+        rd.resistanceOhms = 4700.0f;
+        hq::ResistorSpec rs{};
+        rs.resistanceOhms = 470.0f;
+        c.addVoltageSource(vdd, circuit::ground, 9.0f);
+        c.addVoltageSource(gate, circuit::ground, 2.8f);
+        c.addResistor(vdd, drain, rd);
+        c.addResistor(source, circuit::ground, rs);
+        c.addMosfet(drain, gate, source, hq::component_presets::bs170());
+        ok &= require(c.prepare(48000.0), "MNA prepares MOSFET three-terminal stamp");
+        const auto stats = c.processSample(36, 1.0e-6f);
+        ok &= require(!stats.singular && stats.converged, "MOSFET nonlinear stamp converges");
+        ok &= require(c.voltage(source) > 0.10f && c.voltage(drain) > 0.5f && c.voltage(drain) < 8.8f,
+                      "BS170-style bias produces nonlinear drain current");
     }
 
     {
