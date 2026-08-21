@@ -2,6 +2,8 @@
 
 #include "guitardsp/circuit/TS808Circuit.h"
 #include "guitardsp/graph/AudioNode.h"
+#include "guitardsp/hq/PolyphaseOversampler.h"
+#include "guitardsp/hq/QualityPolicy.h"
 
 #include <algorithm>
 #include <array>
@@ -14,7 +16,8 @@ namespace guitardsp::hq {
 // Graph node backed by the actual component-level TS808 MNA circuit rather than
 // the earlier circuit-inspired transfer approximation. One independent circuit
 // instance is kept per channel so nonlinear device and capacitor history never
-// leaks between channels.
+// leaks between channels. The complete nonlinear circuit runs at the quality-policy
+// oversampled rate; interpolation/decimation latency is reported to graph PDC.
 class TS808CircuitNode final : public graph::AudioNode {
 public:
     std::string_view typeName() const noexcept override { return "TS808 Circuit"; }
@@ -22,19 +25,28 @@ public:
 
     void prepare(const graph::PrepareSpec& spec) override {
         sampleRate_ = std::max(1.0, spec.sampleRate);
-        const auto channels = static_cast<std::size_t>(std::max(1, spec.channels));
+        const int channelCount = std::max(1, spec.channels);
+        const auto channels = static_cast<std::size_t>(channelCount);
+        const auto quality = qualityFor(spec.quality, category());
+
+        oversampler_.prepare(channelCount, std::max(1, spec.maximumBlockSize),
+                             quality.oversamplingFactor, quality.resamplerTaps);
+        internalSampleRate_ = sampleRate_ * static_cast<double>(oversampler_.factor());
+
         circuits_.clear();
         circuits_.resize(channels);
         prepared_ = true;
         for (auto& circuit : circuits_) {
-            if (!circuit.prepare(sampleRate_)) {
+            if (!circuit.prepare(internalSampleRate_)) {
                 prepared_ = false;
                 break;
             }
         }
+        if (prepared_) oversampler_.reset();
     }
 
     void reset() noexcept override {
+        oversampler_.reset();
         for (auto& circuit : circuits_) circuit.reset();
     }
 
@@ -48,25 +60,16 @@ public:
         const float drive = drive_.load(std::memory_order_relaxed);
         const float tone = tone_.load(std::memory_order_relaxed);
         const float level = level_.load(std::memory_order_relaxed);
-        const int channels = std::min(input.channels(), output.channels());
+        for (auto& circuit : circuits_) circuit.setControls(drive, tone, level);
+
         const int samples = std::min({numSamples, input.samples(), output.samples()});
-
-        for (int ch = 0; ch < channels; ++ch) {
-            auto& circuit = circuits_[static_cast<std::size_t>(ch)];
-            circuit.setControls(drive, tone, level);
-            const float* src = input.channel(ch);
-            float* dst = output.channel(ch);
-            for (int i = 0; i < samples; ++i)
-                dst[i] = circuit.processSample(src[i]);
-        }
-
-        for (int ch = channels; ch < output.channels(); ++ch) {
-            float* dst = output.channel(ch);
-            for (int i = 0; i < samples; ++i) dst[i] = 0.0f;
-        }
+        oversampler_.process(input, output, samples, [&](int ch, float x) noexcept {
+            const auto index = static_cast<std::size_t>(ch);
+            return index < circuits_.size() ? circuits_[index].processSample(x) : 0.0f;
+        });
     }
 
-    int latencySamples() const noexcept override { return 0; }
+    int latencySamples() const noexcept override { return oversampler_.latencySamples(); }
 
     std::size_t parameterCount() const noexcept override { return descriptors_.size(); }
     graph::ParameterDescriptor parameterDescriptor(std::size_t i) const noexcept override {
@@ -92,13 +95,17 @@ public:
     }
 
     bool prepared() const noexcept { return prepared_; }
+    int oversamplingFactor() const noexcept { return oversampler_.factor(); }
+    double internalSampleRate() const noexcept { return internalSampleRate_; }
     const circuit::TS808Circuit* circuitForChannel(std::size_t channel) const noexcept {
         return channel < circuits_.size() ? &circuits_[channel] : nullptr;
     }
 
 private:
     std::vector<circuit::TS808Circuit> circuits_;
+    PolyphaseOversampler oversampler_;
     double sampleRate_ = 48000.0;
+    double internalSampleRate_ = 48000.0;
     bool prepared_ = false;
     std::atomic<float> drive_{circuit::TS808Circuit::defaultDrive};
     std::atomic<float> tone_{circuit::TS808Circuit::defaultTone};
