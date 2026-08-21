@@ -80,6 +80,33 @@ int main() {
     }
 
     {
+        circuit::CircuitNetlist netlist;
+        const auto collector = netlist.addNode("collector");
+        const auto base = netlist.addNode("base");
+        const auto drain = netlist.addNode("drain");
+        const auto gate = netlist.addNode("gate");
+        const auto mosDrain = netlist.addNode("mos_drain");
+        const auto mosGate = netlist.addNode("mos_gate");
+
+        const auto bjtId = netlist.addBjt(collector, base, circuit::circuitGround,
+                                         hq::component_presets::twoN3904());
+        const auto jfetId = netlist.addJfet(drain, gate, circuit::circuitGround,
+                                           hq::component_presets::j201());
+        const auto mosfetId = netlist.addMosfet(mosDrain, mosGate, circuit::circuitGround,
+                                               hq::component_presets::bs170());
+
+        circuit::CompiledCircuit compiled;
+        ok &= require(netlist.compile(48000.0, compiled),
+                      "netlist compiles active devices with parasitic networks");
+        ok &= require(compiled.bjtParasitic(bjtId) != nullptr,
+                      "normal BJT netlist definition owns Cbe/Cbc parasitics");
+        ok &= require(compiled.jfetParasitic(jfetId) != nullptr,
+                      "normal JFET netlist definition owns Cgs/Cgd/Cds parasitics");
+        ok &= require(compiled.mosfetParasitic(mosfetId) != nullptr,
+                      "normal MOSFET netlist definition owns parasitics and body diode");
+    }
+
+    {
         circuit::CircuitNetlist invalid;
         const auto validNode = invalid.addNode();
         hq::ResistorSpec resistor{};
