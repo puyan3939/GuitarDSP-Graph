@@ -23,3 +23,31 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  build-audio-app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install JUCE Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libasound2-dev \
+            libjack-jackd2-dev \
+            libx11-dev \
+            libxext-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxcomposite-dev \
+            libfreetype6-dev \
+            libfontconfig1-dev
+
+      - name: Configure standalone host
+        run: cmake -S . -B build-app -G Ninja -DCMAKE_BUILD_TYPE=Release -DGUITARDSP_BUILD_AUDIO_APP=ON -DGUITARDSP_FETCH_JUCE=ON
+
+      - name: Build standalone host
+        run: cmake --build build-app --target GuitarDSPApp --parallel
