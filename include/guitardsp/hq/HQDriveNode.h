@@ -1,7 +1,7 @@
 #pragma once
 #include "ADAA.h"
 #include "DiodeClipper.h"
-#include "Oversampler.h"
+#include "PolyphaseOversampler.h"
 #include "QualityPolicy.h"
 #include "guitardsp/graph/AudioNode.h"
 #include <array>
@@ -36,10 +36,11 @@ public:
         const float level = std::pow(10.0f, levelDb_.load(std::memory_order_relaxed) / 20.0f);
         const float pre = 1.0f + 19.0f * drive * drive;
         const bool adaa = adaaEnabled_.load(std::memory_order_relaxed) >= 0.5f;
+        const float mode = clipMode_.load(std::memory_order_relaxed);
 
         oversampler_.process(input, output, numSamples, [&](int ch, float x) noexcept {
             float y = x * pre;
-            if (clipMode_.load(std::memory_order_relaxed) < 0.5f)
+            if (mode < 0.5f)
                 y = diode_[static_cast<std::size_t>(ch)].process(y);
             else
                 y = adaa ? adaa_[static_cast<std::size_t>(ch)].process(y) : std::tanh(y);
@@ -63,7 +64,7 @@ public:
 
 private:
     graph::PrepareSpec spec_{};
-    Oversampler oversampler_;
+    PolyphaseOversampler oversampler_;
     std::vector<ImplicitDiodeClipper> diode_;
     std::vector<ADAATanh> adaa_;
     std::atomic<float> drive_{0.45f}, mix_{1.0f}, levelDb_{0.0f}, clipMode_{0.0f}, adaaEnabled_{1.0f};
