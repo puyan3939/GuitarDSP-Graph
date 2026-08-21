@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FixedPatternSparseSolver.h"
 #include "guitardsp/hq/ComponentCatalog.h"
 
 #include <algorithm>
@@ -26,15 +27,18 @@ using TriodeHandle = std::uint16_t;
 using ControlledSourceHandle = std::uint16_t;
 inline constexpr Node ground = 0;
 
-// Dense MNA reference engine with a compiled linear execution path.
-//
-// prepare() allocates every workspace. The static/companion matrix is then cached
-// and only rebuilt after a matrix-affecting component edit. Capacitor/inductor
-// history and independent voltage-source values update the RHS without rebuilding
-// the matrix. Purely linear circuits reuse one LU factorization across samples;
-// nonlinear circuits reuse the cached linear base for every Newton iteration.
+// MNA reference engine with cached linear execution and a prepared fixed-pattern
+// sparse backend for nonlinear Newton systems. Dense partial-pivot solving remains
+// the numerical oracle/fallback whenever the sparse no-pivot factorization meets
+// an unsafe numerical pivot.
 class MnaCircuitEngine {
 public:
+    enum class NonlinearSolverMode : std::uint8_t {
+        automatic,
+        denseReference,
+        sparseFixedPattern
+    };
+
     struct SolveStats {
         int iterations = 0;
         bool converged = true;
@@ -49,6 +53,8 @@ public:
         std::uint64_t fullFactorizations = 0;
         std::uint64_t cachedLinearSolves = 0;
         std::uint64_t generalLinearSolves = 0;
+        std::uint64_t sparseNewtonSolves = 0;
+        std::uint64_t sparseFallbackSolves = 0;
     };
 
     Node addNode() {
@@ -342,6 +348,7 @@ public:
         staticCacheDirty_ = true;
         prepared_ = true;
         rebuildStaticCache();
+        if (hasNonlinearDevices()) prepareSparseNonlinearSolver();
         reset();
         return true;
     }
@@ -404,7 +411,25 @@ public:
             stampNonlinear(candidate_);
             ++performanceStats_.nonlinearAssemblies;
 
-            if (!solveGeneralLinearSystem()) {
+            bool solved = false;
+            const bool forceSparse = nonlinearSolverMode_ == NonlinearSolverMode::sparseFixedPattern;
+            const bool autoSparse = nonlinearSolverMode_ == NonlinearSolverMode::automatic &&
+                                    sparseSolver_.available() && dimension_ >= 12U &&
+                                    sparseSolver_.factorDensity() <= 0.70f;
+            if ((forceSparse || autoSparse) && sparseSolver_.available()) {
+                solved = sparseSolver_.solve(matrix_, rhs_, solution_);
+                if (solved) {
+                    ++performanceStats_.sparseNewtonSolves;
+                } else {
+                    ++performanceStats_.sparseFallbackSolves;
+                    solved = solveGeneralLinearSystem();
+                }
+            } else {
+                if (forceSparse) ++performanceStats_.sparseFallbackSolves;
+                solved = solveGeneralLinearSystem();
+            }
+
+            if (!solved) {
                 stats.singular = true;
                 stats.converged = false;
                 stats.iterations = iteration + 1;
@@ -460,6 +485,12 @@ public:
     SolveStats lastStats() const noexcept { return lastStats_; }
     PerformanceStats performanceStats() const noexcept { return performanceStats_; }
     void resetPerformanceStats() noexcept { performanceStats_ = {}; }
+    void setNonlinearSolverMode(NonlinearSolverMode mode) noexcept { nonlinearSolverMode_ = mode; }
+    NonlinearSolverMode nonlinearSolverMode() const noexcept { return nonlinearSolverMode_; }
+    bool sparseNonlinearSolverAvailable() const noexcept { return sparseSolver_.available(); }
+    std::size_t sparseNonlinearOriginalNonZeros() const noexcept { return sparseSolver_.originalNonZeros(); }
+    std::size_t sparseNonlinearFactorNonZeros() const noexcept { return sparseSolver_.factorNonZeros(); }
+    float sparseNonlinearFactorDensity() const noexcept { return sparseSolver_.factorDensity(); }
 
 private:
     struct Resistor { Node a{}, b{}; hq::ResistorSpec spec{}; };
@@ -907,6 +938,113 @@ private:
         for (const auto& triode : triodes_) stampTriode(triode, guess);
     }
 
+    void markPattern(std::vector<std::uint8_t>& pattern, std::size_t row,
+                     std::size_t column) const noexcept {
+        if (row < dimension_ && column < dimension_)
+            pattern[row * dimension_ + column] = 1U;
+    }
+
+    void markConductancePattern(std::vector<std::uint8_t>& pattern, Node a, Node b) const noexcept {
+        if (a != ground) markPattern(pattern, nodeIndex(a), nodeIndex(a));
+        if (b != ground) markPattern(pattern, nodeIndex(b), nodeIndex(b));
+        if (a != ground && b != ground) {
+            markPattern(pattern, nodeIndex(a), nodeIndex(b));
+            markPattern(pattern, nodeIndex(b), nodeIndex(a));
+        }
+    }
+
+    void markBranchPattern(std::vector<std::uint8_t>& pattern, Node positive,
+                           Node negative, std::size_t branchIndex) const noexcept {
+        if (positive != ground) {
+            markPattern(pattern, nodeIndex(positive), branchIndex);
+            markPattern(pattern, branchIndex, nodeIndex(positive));
+        }
+        if (negative != ground) {
+            markPattern(pattern, nodeIndex(negative), branchIndex);
+            markPattern(pattern, branchIndex, nodeIndex(negative));
+        }
+    }
+
+    void markVccsPattern(std::vector<std::uint8_t>& pattern, Node outputPositive,
+                         Node outputNegative, Node controlPositive, Node controlNegative) const noexcept {
+        if (outputPositive != ground) {
+            if (controlPositive != ground) markPattern(pattern, nodeIndex(outputPositive), nodeIndex(controlPositive));
+            if (controlNegative != ground) markPattern(pattern, nodeIndex(outputPositive), nodeIndex(controlNegative));
+        }
+        if (outputNegative != ground) {
+            if (controlPositive != ground) markPattern(pattern, nodeIndex(outputNegative), nodeIndex(controlPositive));
+            if (controlNegative != ground) markPattern(pattern, nodeIndex(outputNegative), nodeIndex(controlNegative));
+        }
+    }
+
+    void markThreeTerminalPattern(std::vector<std::uint8_t>& pattern,
+                                  Node a, Node b, Node c) const noexcept {
+        const std::array<Node, 3> nodes{{a, b, c}};
+        for (const auto rowNode : nodes) {
+            if (rowNode == ground) continue;
+            for (const auto columnNode : nodes) {
+                if (columnNode != ground)
+                    markPattern(pattern, nodeIndex(rowNode), nodeIndex(columnNode));
+            }
+        }
+    }
+
+    bool prepareSparseNonlinearSolver() {
+        std::vector<std::uint8_t> pattern(dimension_ * dimension_, 0U);
+
+        for (const auto& r : resistors_) markConductancePattern(pattern, r.a, r.b);
+        for (const auto& p : potentiometers_) {
+            markConductancePattern(pattern, p.high, p.wiper);
+            markConductancePattern(pattern, p.wiper, p.low);
+        }
+        for (const auto& c : capacitors_) markConductancePattern(pattern, c.a, c.b);
+        for (const auto& source : voltageSources_)
+            markBranchPattern(pattern, source.positive, source.negative, source.branchIndex);
+        for (const auto& source : vccs_)
+            markVccsPattern(pattern, source.outputPositive, source.outputNegative,
+                            source.controlPositive, source.controlNegative);
+        for (const auto& source : vcvs_) {
+            markBranchPattern(pattern, source.outputPositive, source.outputNegative, source.branchIndex);
+            if (source.controlPositive != ground)
+                markPattern(pattern, source.branchIndex, nodeIndex(source.controlPositive));
+            if (source.controlNegative != ground)
+                markPattern(pattern, source.branchIndex, nodeIndex(source.controlNegative));
+        }
+        for (const auto& source : cccs_) {
+            const auto controlBranch = voltageSourceBranch(source.controlSource);
+            if (controlBranch >= dimension_) continue;
+            if (source.outputPositive != ground)
+                markPattern(pattern, nodeIndex(source.outputPositive), controlBranch);
+            if (source.outputNegative != ground)
+                markPattern(pattern, nodeIndex(source.outputNegative), controlBranch);
+        }
+        for (const auto& source : ccvs_) {
+            const auto controlBranch = voltageSourceBranch(source.controlSource);
+            markBranchPattern(pattern, source.outputPositive, source.outputNegative, source.branchIndex);
+            if (controlBranch < dimension_)
+                markPattern(pattern, source.branchIndex, controlBranch);
+        }
+        for (const auto& opAmp : opAmps_) {
+            markBranchPattern(pattern, opAmp.output, opAmp.reference, opAmp.branchIndex);
+            if (opAmp.nonInverting != ground)
+                markPattern(pattern, opAmp.branchIndex, nodeIndex(opAmp.nonInverting));
+            if (opAmp.inverting != ground)
+                markPattern(pattern, opAmp.branchIndex, nodeIndex(opAmp.inverting));
+        }
+        for (const auto& l : inductors_) {
+            markBranchPattern(pattern, l.a, l.b, l.branchIndex);
+            markPattern(pattern, l.branchIndex, l.branchIndex);
+        }
+
+        for (const auto& d : diodes_) markConductancePattern(pattern, d.anode, d.cathode);
+        for (const auto& bjt : bjts_) markThreeTerminalPattern(pattern, bjt.collector, bjt.base, bjt.emitter);
+        for (const auto& jfet : jfets_) markThreeTerminalPattern(pattern, jfet.drain, jfet.gate, jfet.source);
+        for (const auto& mosfet : mosfets_) markThreeTerminalPattern(pattern, mosfet.drain, mosfet.gate, mosfet.source);
+        for (const auto& triode : triodes_) markThreeTerminalPattern(pattern, triode.plate, triode.grid, triode.cathode);
+
+        return sparseSolver_.prepare(dimension_, pattern, staticMatrix_);
+    }
+
     bool factorizeStaticLinearSystem() noexcept {
         linearLu_ = staticMatrix_;
         constexpr float pivotFloor = 1.0e-14f;
@@ -1026,6 +1164,7 @@ private:
     bool prepared_ = false;
     bool staticCacheDirty_ = true;
     bool linearFactorValid_ = false;
+    NonlinearSolverMode nonlinearSolverMode_ = NonlinearSolverMode::automatic;
     SolveStats lastStats_{};
     PerformanceStats performanceStats_{};
 
@@ -1056,6 +1195,7 @@ private:
     std::vector<float> workRhs_;
     std::vector<float> linearLu_;
     std::vector<std::size_t> linearPivots_;
+    FixedPatternSparseSolver sparseSolver_;
 };
 
 } // namespace guitardsp::circuit
