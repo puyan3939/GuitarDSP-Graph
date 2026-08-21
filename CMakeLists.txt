@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.11.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.12.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,3 +70,6 @@ add_test(NAME ts808_topology COMMAND GuitarDSPTS808TopologyTests)
 add_executable(GuitarDSPTopologyExpansionTests tests/TopologyExpansionTests.cpp)
 target_link_libraries(GuitarDSPTopologyExpansionTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME topology_expansion COMMAND GuitarDSPTopologyExpansionTests)
+add_executable(GuitarDSPMeasuredFitHarnessTests tests/MeasuredFitHarnessTests.cpp)
+target_link_libraries(GuitarDSPMeasuredFitHarnessTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME measured_fit_harness COMMAND GuitarDSPMeasuredFitHarnessTests)
