@@ -8,6 +8,7 @@
 #include "guitardsp/graph/IONodes.h"
 #include "guitardsp/hq/AmpFamilyNodes.h"
 #include "guitardsp/hq/BD2TopologyNode.h"
+#include "guitardsp/hq/CabinetChainNode.h"
 #include "guitardsp/hq/DS1TopologyNode.h"
 #include "guitardsp/hq/PartitionedCabNode.h"
 #include "guitardsp/hq/ReferenceAmpTopologyNode.h"
@@ -41,6 +42,7 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("cab.fir", [] { return std::make_unique<dsp::ConvolutionNode>(); });
     r.registerType("cab.partitioned_hq", [] { return std::make_unique<hq::PartitionedCabNode>(); });
     r.registerType("cab.speaker_dynamics_hq", [] { return std::make_unique<hq::SpeakerDynamicsNode>(); });
+    r.registerType("cab.chain_hq", [] { return std::make_unique<hq::CabinetChainNode>(); });
     r.registerType("route.crossover", [] { return std::make_unique<CrossoverSplitNode>(); });
     r.registerType("io.output", [] { return std::make_unique<OutputBusNode>(); });
     return r;
