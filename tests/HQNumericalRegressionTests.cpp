@@ -1,5 +1,6 @@
 #include "guitardsp/graph/AudioBuffer.h"
 #include "guitardsp/hq/FFT.h"
+#include "guitardsp/hq/PartitionedCabNode.h"
 #include "guitardsp/hq/PartitionedConvolver.h"
 #include "guitardsp/hq/PolyphaseOversampler.h"
 #include "guitardsp/hq/StreamingConvolver.h"
@@ -94,6 +95,30 @@ int main() {
         for (int i = 0; i < total; ++i) maxError = std::max(maxError, std::abs(output[static_cast<std::size_t>(i)] - expected[static_cast<std::size_t>(i)]));
         ok &= require(c.latencySamples() == partition, "streaming convolver reports deterministic partition latency");
         ok &= require(maxError < 2.0e-4f, "streaming convolver accepts arbitrary host block sizes");
+    }
+
+    {
+        constexpr int samples = 64;
+        graph::AudioBuffer input(2, samples), output(2, samples);
+        input.clear(); output.clear();
+        input.channel(0)[0] = 1.0f;
+        input.channel(1)[0] = 1.0f;
+
+        hq::PartitionedCabNode cab;
+        cab.setPartitionSize(16);
+        cab.setImpulseResponse({1.0f, 0.5f, -0.25f});
+        graph::PrepareSpec spec;
+        spec.sampleRate = 48000.0;
+        spec.maximumBlockSize = samples;
+        spec.channels = 2;
+        cab.prepare(spec);
+        cab.process(input, output, samples);
+
+        ok &= require(cab.latencySamples() == 16, "partitioned cab node reports graph PDC latency");
+        ok &= require(std::abs(output.channel(0)[16] - 1.0f) < 2.0e-4f &&
+                      std::abs(output.channel(0)[17] - 0.5f) < 2.0e-4f &&
+                      std::abs(output.channel(1)[18] + 0.25f) < 2.0e-4f,
+                      "graph-ready partitioned cab reproduces stereo IR after deterministic latency");
     }
 
     {
