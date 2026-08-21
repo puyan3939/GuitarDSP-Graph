@@ -32,7 +32,9 @@ enum class ComponentCategory : std::uint8_t {
     triode,
     powerTube,
     transformer,
-    optocoupler
+    optocoupler,
+    switchComponent,
+    relay
 };
 
 enum class CapacitorTechnology : std::uint8_t {
@@ -60,6 +62,18 @@ enum class PotTaper : std::uint8_t {
     linear,
     audio,
     reverseAudio
+};
+
+enum class SwitchContactForm : std::uint8_t {
+    spst,
+    spdt,
+    dpdt
+};
+
+enum class RelayContactForm : std::uint8_t {
+    spstNormallyOpen,
+    spdt,
+    dpdt
 };
 
 struct ResistorSpec {
@@ -184,6 +198,7 @@ struct OpAmpSpec {
     float outputCurrentLimitAmps = 0.025f;
     float positiveRailHeadroomVolts = 1.5f;
     float negativeRailHeadroomVolts = 1.5f;
+    float outputResistanceOhms = 50.0f;
 };
 
 struct TriodeSpec {
@@ -193,6 +208,11 @@ struct TriodeSpec {
     float nominalPlateVoltage = 250.0f;
     float maxPlateVoltage = 300.0f;
     float maxPlateDissipationWatts = 1.0f;
+    float gridPlateCapacitanceFarads = 1.7e-12f;
+    float gridCathodeCapacitanceFarads = 1.6e-12f;
+    float plateCathodeCapacitanceFarads = 0.5e-12f;
+    float gridCurrentSaturationAmps = 1.0e-12f;
+    float gridCurrentEmissionCoefficient = 1.6f;
 };
 
 struct PowerTubeSpec {
@@ -215,6 +235,9 @@ struct TransformerSpec {
     float turnsRatio = 25.0f;
     float interwindingCapacitanceFarads = 1.0e-9f;
     float saturationFluxNormalized = 1.0f;
+    float magnetizingSaturationCurrentAmps = 0.08f;
+    float coreSaturationExponent = 2.0f;
+    float minimumMagnetizingInductanceRatio = 0.08f;
 };
 
 struct OptocouplerSpec {
@@ -225,6 +248,31 @@ struct OptocouplerSpec {
     float attackMs = 8.0f;
     float releaseMs = 80.0f;
     float gamma = 0.7f;
+};
+
+struct SwitchSpec {
+    std::string_view name = "Generic Toggle Switch";
+    SwitchContactForm form = SwitchContactForm::spst;
+    float closedResistanceOhms = 0.05f;
+    float openResistanceOhms = 1.0e9f;
+    float bounceMilliseconds = 1.5f;
+    std::uint8_t bounceTransitions = 4;
+};
+
+struct RelaySpec {
+    std::string_view name = "Generic 9V Signal Relay";
+    RelayContactForm form = RelayContactForm::dpdt;
+    float coilRatedVoltage = 9.0f;
+    float coilResistanceOhms = 405.0f;
+    float coilInductanceHenries = 55.0e-3f;
+    float pickupVoltage = 6.3f;
+    float dropoutVoltage = 1.8f;
+    float operateMilliseconds = 5.0f;
+    float releaseMilliseconds = 3.0f;
+    float closedContactResistanceOhms = 0.08f;
+    float openContactResistanceOhms = 1.0e9f;
+    float bounceMilliseconds = 1.5f;
+    std::uint8_t bounceTransitions = 4;
 };
 
 namespace component_presets {
@@ -278,17 +326,31 @@ inline constexpr MOSFETSpec bs170() noexcept {
 }
 
 inline constexpr OpAmpSpec jrc4558() noexcept {
-    return {"JRC4558-style", 100.0f, 3.0e6f, 1.0e6f, 100.0e-9f, 2.0e-3f, 18.0e-9f, 0.025f, 1.5f, 1.5f};
+    return {"JRC4558-style", 100.0f, 3.0e6f, 1.0e6f, 100.0e-9f, 2.0e-3f,
+            18.0e-9f, 0.025f, 1.5f, 1.5f, 70.0f};
 }
 inline constexpr OpAmpSpec tl072() noexcept {
-    return {"TL072-style", 106.0f, 3.0e6f, 13.0e6f, 65.0e-12f, 3.0e-3f, 18.0e-9f, 0.010f, 1.5f, 1.5f};
+    return {"TL072-style", 106.0f, 3.0e6f, 13.0e6f, 65.0e-12f, 3.0e-3f,
+            18.0e-9f, 0.010f, 1.5f, 1.5f, 100.0f};
 }
 
 inline TriodeSpec twelveAX7() noexcept {
-    return {"12AX7", TriodeModel::twelveAX7(), 6.3f, 250.0f, 300.0f, 1.0f};
+    TriodeSpec spec{"12AX7", TriodeModel::twelveAX7(), 6.3f, 250.0f, 300.0f, 1.0f};
+    spec.gridPlateCapacitanceFarads = 1.7e-12f;
+    spec.gridCathodeCapacitanceFarads = 1.6e-12f;
+    spec.plateCathodeCapacitanceFarads = 0.5e-12f;
+    spec.gridCurrentSaturationAmps = 8.0e-13f;
+    spec.gridCurrentEmissionCoefficient = 1.6f;
+    return spec;
 }
 inline TriodeSpec twelveAT7() noexcept {
-    return {"12AT7", TriodeModel::twelveAT7(), 6.3f, 250.0f, 300.0f, 2.5f};
+    TriodeSpec spec{"12AT7", TriodeModel::twelveAT7(), 6.3f, 250.0f, 300.0f, 2.5f};
+    spec.gridPlateCapacitanceFarads = 1.5e-12f;
+    spec.gridCathodeCapacitanceFarads = 2.3e-12f;
+    spec.plateCathodeCapacitanceFarads = 0.4e-12f;
+    spec.gridCurrentSaturationAmps = 1.0e-12f;
+    spec.gridCurrentEmissionCoefficient = 1.6f;
+    return spec;
 }
 
 inline constexpr PowerTubeSpec el34() noexcept {
@@ -299,6 +361,15 @@ inline constexpr PowerTubeSpec sixL6GC() noexcept {
 }
 inline constexpr PowerTubeSpec kt88() noexcept {
     return {"KT88", PowerTubeType::kt88, 6.3f, 500.0f, 800.0f, 42.0f};
+}
+
+inline constexpr SwitchSpec toggleSwitch() noexcept {
+    return {"Generic Toggle Switch", SwitchContactForm::spdt, 0.05f, 1.0e9f, 1.5f, 4};
+}
+
+inline constexpr RelaySpec signalRelay9V() noexcept {
+    return {"Generic 9V Signal Relay", RelayContactForm::dpdt, 9.0f, 405.0f, 55.0e-3f,
+            6.3f, 1.8f, 5.0f, 3.0f, 0.08f, 1.0e9f, 1.5f, 4};
 }
 
 } // namespace component_presets
