@@ -69,6 +69,12 @@ int main() {
         ok &= require(ts.engine().sparseNonlinearSolverAvailable(),
                       "TS808 prepares a sparse nonlinear pattern");
 
+        // Dense partial-pivot mode is the numerical oracle while the first full
+        // pedal is being brought up. If this also fails, the problem is the device/
+        // topology model rather than fixed-pattern sparse factorization.
+        ts.engine().setNonlinearSolverMode(
+            circuit::MnaCircuitEngine::NonlinearSolverMode::denseReference);
+
         for (int i = 0; i < 4096; ++i) ts.processSample(0.0f);
 
         constexpr double pi = 3.14159265358979323846;
@@ -86,10 +92,11 @@ int main() {
             minimum = std::min(minimum, output);
             maximum = std::max(maximum, output);
         }
-        std::cout << "DIAG ts808 min=" << minimum << " max=" << maximum
+        std::cout << "DIAG dense-ts808 min=" << minimum << " max=" << maximum
                   << " unconverged=" << unconverged
                   << " sparse=" << ts.engine().performanceStats().sparseNewtonSolves
-                  << " fallback=" << ts.engine().performanceStats().sparseFallbackSolves << '\n';
+                  << " fallback=" << ts.engine().performanceStats().sparseFallbackSolves
+                  << " dense=" << ts.engine().performanceStats().generalLinearSolves << '\n';
         ok &= require(healthy, "TS808 circuit stays finite and nonsingular under guitar-level drive");
         ok &= require(maximum - minimum > 0.01f,
                       "TS808 circuit produces a driven AC output");
