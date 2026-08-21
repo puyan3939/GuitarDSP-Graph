@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.22.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.23.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -100,3 +100,6 @@ add_test(NAME transformer_subcircuit COMMAND GuitarDSPTransformerSubcircuitTests
 add_executable(GuitarDSPCircuitNetlistTests tests/CircuitNetlistTests.cpp)
 target_link_libraries(GuitarDSPCircuitNetlistTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME circuit_netlist COMMAND GuitarDSPCircuitNetlistTests)
+add_executable(GuitarDSPCircuitElectromechanicalTests tests/CircuitElectromechanicalTests.cpp)
+target_link_libraries(GuitarDSPCircuitElectromechanicalTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME circuit_electromechanical COMMAND GuitarDSPCircuitElectromechanicalTests)
