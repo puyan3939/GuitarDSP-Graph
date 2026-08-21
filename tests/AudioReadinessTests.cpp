@@ -12,7 +12,6 @@
 #include <memory>
 #include <new>
 #include <utility>
-#include <vector>
 
 namespace {
 std::atomic<bool> trackAllocations{false};
@@ -62,6 +61,21 @@ public:
                  int numSamples) noexcept override {
         output.copyFrom(input, numSamples);
     }
+};
+
+class PreparedStateNode final : public graph::AudioNode {
+public:
+    std::string_view typeName() const noexcept override { return "Prepared State"; }
+    void prepare(const graph::PrepareSpec&) override { state_ = 1.0f; }
+    void reset() noexcept override { state_ = 0.0f; }
+    void process(const graph::AudioBuffer&, graph::AudioBuffer& output,
+                 int numSamples) noexcept override {
+        const int n = std::min(numSamples, output.samples());
+        for (int ch = 0; ch < output.channels(); ++ch)
+            std::fill_n(output.channel(ch), n, state_);
+    }
+private:
+    float state_ = 0.0f;
 };
 
 class OversampledIdentityNode final : public graph::AudioNode {
@@ -125,11 +139,16 @@ int main() {
                                                              {vrefSource, 4.5f}};
         const circuit::Node probes[]{base, emitter};
         circuit::OperatingPointOptions options{};
-        options.maximumSettleSamples = 4096;
-        options.requiredStableSamples = 16;
-        options.steadyStateVoltageTolerance = 5.0e-6f;
+        options.maximumSettleSamples = 8192;
+        options.settleWindowSamples = 32;
+        options.requiredStableWindows = 8;
+        options.steadyStateVoltageTolerance = 1.0e-5f;
         const auto result = circuit::establishOperatingPoint(engine, targets, probes, options);
         const float emitterVoltage = engine.voltage(emitter);
+        std::cout << "DIAG operating-point emitter=" << emitterVoltage
+                  << " settle=" << result.settleSolves
+                  << " windowDelta=" << result.maximumProbeDelta
+                  << " unconvergedNewton=" << result.unconvergedNewtonSolves << '\n';
         ok &= require(result.converged && !result.singular,
                       "operating-point continuation reaches a stable nonlinear bias");
         ok &= require(emitterVoltage > 2.5f && emitterVoltage < 4.5f,
@@ -155,6 +174,21 @@ int main() {
             ok &= require(peakIndex(output, 128) == oversampler.latencySamples(),
                           "oversampler impulse peak matches reported latency");
         }
+    }
+
+    // A prepared nonlinear node is allowed to establish meaningful initial state.
+    // CompiledAudioGraph::build must not erase it with an unconditional reset after
+    // prepare; explicit reset remains a separate control-thread operation.
+    {
+        graph::Graph graph;
+        graph.addNode(std::make_unique<PreparedStateNode>());
+        graph::CompiledAudioGraph compiled;
+        ok &= require(compiled.build(graph, 48000.0, 16, 1, graph::ProcessingQuality::high),
+                      "prepared-state graph builds");
+        graph::AudioBuffer input(1, 16), output(1, 16);
+        compiled.process(input, output, 16);
+        ok &= require(std::abs(output.channel(0)[0] - 1.0f) < 1.0e-6f,
+                      "graph build preserves state established by node prepare");
     }
 
     // PDC must use latency *after* node preparation. Two roots see the same impulse;
@@ -186,15 +220,15 @@ int main() {
     }
 
     // Realtime audit: after prepare, both the nonlinear MNA sample path and the
-    // graph's very first callback must run without heap allocation. The graph test
-    // intentionally does not perform a warm-up callback, catching unreserved
-    // callback pointer tables.
+    // graph's very first callback must run without heap allocation. Matrix-affecting
+    // coefficient edits are included at a block-like cadence to ensure cache rebuilds
+    // also reuse prepared storage.
     {
         circuit::MnaCircuitEngine engine;
         const auto input = engine.addNode();
         const auto clipped = engine.addNode();
         const auto source = engine.addVoltageSource(input, circuit::ground, 0.0f);
-        engine.addResistor(input, clipped, resistor(10000.0f));
+        const auto series = engine.addResistor(input, clipped, resistor(10000.0f));
         engine.addDiode(clipped, circuit::ground, hq::component_presets::oneN4148());
         ok &= require(engine.prepare(48000.0), "realtime MNA fixture prepares");
         for (int i = 0; i < 32; ++i) engine.processSample(24, 1.0e-6f);
@@ -202,13 +236,15 @@ int main() {
         allocationCount.store(0, std::memory_order_relaxed);
         trackAllocations.store(true, std::memory_order_relaxed);
         for (int i = 0; i < 512; ++i) {
+            if ((i % 64) == 0)
+                engine.setResistance(series, (i & 64) == 0 ? 10000.0f : 12000.0f);
             engine.setVoltageSource(source, 0.2f * std::sin(0.03f * static_cast<float>(i)));
             engine.processSample(24, 1.0e-6f);
         }
         trackAllocations.store(false, std::memory_order_relaxed);
         const auto mnaAllocations = allocationCount.load(std::memory_order_relaxed);
         ok &= require(mnaAllocations == 0,
-                      "prepared nonlinear MNA processing performs zero heap allocations");
+                      "prepared nonlinear MNA processing and coefficient rebuilds allocate zero heap memory");
 
         graph::Graph graph;
         const auto a = graph.addNode(std::make_unique<PassNode>());
