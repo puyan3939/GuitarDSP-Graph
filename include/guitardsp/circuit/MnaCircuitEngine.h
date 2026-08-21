@@ -13,7 +13,16 @@ namespace guitardsp::circuit {
 
 using Node = std::uint16_t;
 using SourceHandle = std::uint16_t;
+using ResistorHandle = std::uint16_t;
+using CapacitorHandle = std::uint16_t;
+using InductorHandle = std::uint16_t;
 using PotHandle = std::uint16_t;
+using DiodeHandle = std::uint16_t;
+using BjtHandle = std::uint16_t;
+using JfetHandle = std::uint16_t;
+using MosfetHandle = std::uint16_t;
+using OpAmpHandle = std::uint16_t;
+using TriodeHandle = std::uint16_t;
 using ControlledSourceHandle = std::uint16_t;
 inline constexpr Node ground = 0;
 
@@ -25,14 +34,19 @@ inline constexpr Node ground = 0;
 // fixed-pattern/sparse backend can preserve the same netlist contract.
 //
 // Supported stamps:
-// - R / C / L and ideal current/voltage sources
+// - editable R / C / L and ideal current/voltage sources
 // - three-terminal potentiometers with editable taper/position
 // - VCCS and VCVS controlled sources
 // - Shockley diodes with series resistance
 // - engineering BJT, JFET and MOSFET nonlinear three-terminal stamps
+// - finite-open-loop-gain op-amp macro stamps
+// - nonlinear plate/grid/cathode triode stamps
 //
 // Capacitors and inductors use trapezoidal companion models. Nonlinear devices
 // are linearized into the complete MNA system and solved by Newton iteration.
+// Component setters do not rebuild topology, but callers must serialize writes
+// against processSample(); a lock-free block-boundary command queue is a separate
+// graph/runtime responsibility.
 class MnaCircuitEngine {
 public:
     struct SolveStats {
@@ -46,19 +60,22 @@ public:
         return static_cast<Node>(++nodeCount_);
     }
 
-    void addResistor(Node a, Node b, hq::ResistorSpec spec) {
+    ResistorHandle addResistor(Node a, Node b, hq::ResistorSpec spec) {
         prepared_ = false;
         resistors_.push_back({a, b, spec});
+        return static_cast<ResistorHandle>(resistors_.size() - 1U);
     }
 
-    void addCapacitor(Node a, Node b, hq::CapacitorSpec spec) {
+    CapacitorHandle addCapacitor(Node a, Node b, hq::CapacitorSpec spec) {
         prepared_ = false;
         capacitors_.push_back({a, b, spec, 0.0f, 0.0f});
+        return static_cast<CapacitorHandle>(capacitors_.size() - 1U);
     }
 
-    void addInductor(Node a, Node b, hq::InductorSpec spec) {
+    InductorHandle addInductor(Node a, Node b, hq::InductorSpec spec) {
         prepared_ = false;
         inductors_.push_back({a, b, spec, 0.0f, 0.0f, 0});
+        return static_cast<InductorHandle>(inductors_.size() - 1U);
     }
 
     PotHandle addPotentiometer(Node high, Node wiper, Node low, hq::PotentiometerSpec spec) {
@@ -100,24 +117,44 @@ public:
         return static_cast<ControlledSourceHandle>(vcvs_.size() - 1U);
     }
 
-    void addDiode(Node anode, Node cathode, hq::DiodeSpec spec) {
+    DiodeHandle addDiode(Node anode, Node cathode, hq::DiodeSpec spec) {
         prepared_ = false;
         diodes_.push_back({anode, cathode, spec});
+        return static_cast<DiodeHandle>(diodes_.size() - 1U);
     }
 
-    void addBjt(Node collector, Node base, Node emitter, hq::BJTSpec spec) {
+    BjtHandle addBjt(Node collector, Node base, Node emitter, hq::BJTSpec spec) {
         prepared_ = false;
         bjts_.push_back({collector, base, emitter, spec});
+        return static_cast<BjtHandle>(bjts_.size() - 1U);
     }
 
-    void addJfet(Node drain, Node gate, Node source, hq::JFETSpec spec) {
+    JfetHandle addJfet(Node drain, Node gate, Node source, hq::JFETSpec spec) {
         prepared_ = false;
         jfets_.push_back({drain, gate, source, spec});
+        return static_cast<JfetHandle>(jfets_.size() - 1U);
     }
 
-    void addMosfet(Node drain, Node gate, Node source, hq::MOSFETSpec spec) {
+    MosfetHandle addMosfet(Node drain, Node gate, Node source, hq::MOSFETSpec spec) {
         prepared_ = false;
         mosfets_.push_back({drain, gate, source, spec});
+        return static_cast<MosfetHandle>(mosfets_.size() - 1U);
+    }
+
+    OpAmpHandle addOpAmp(Node output,
+                         Node nonInverting,
+                         Node inverting,
+                         Node reference,
+                         hq::OpAmpSpec spec) {
+        prepared_ = false;
+        opAmps_.push_back({output, nonInverting, inverting, reference, spec, 0});
+        return static_cast<OpAmpHandle>(opAmps_.size() - 1U);
+    }
+
+    TriodeHandle addTriode(Node plate, Node grid, Node cathode, hq::TriodeSpec spec) {
+        prepared_ = false;
+        triodes_.push_back({plate, grid, cathode, spec});
+        return static_cast<TriodeHandle>(triodes_.size() - 1U);
     }
 
     bool setVoltageSource(SourceHandle handle, float volts) noexcept {
@@ -127,10 +164,59 @@ public:
         return true;
     }
 
+    bool setResistorSpec(ResistorHandle handle, hq::ResistorSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= resistors_.size()) return false;
+        resistors_[i].spec = spec;
+        return true;
+    }
+
+    bool setResistance(ResistorHandle handle, float ohms) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= resistors_.size()) return false;
+        resistors_[i].spec.resistanceOhms = std::max(1.0e-6f, ohms);
+        return true;
+    }
+
+    bool setCapacitorSpec(CapacitorHandle handle, hq::CapacitorSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= capacitors_.size()) return false;
+        capacitors_[i].spec = spec;
+        return true;
+    }
+
+    bool setCapacitance(CapacitorHandle handle, float farads) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= capacitors_.size()) return false;
+        capacitors_[i].spec.capacitanceFarads = std::max(0.0f, farads);
+        return true;
+    }
+
+    bool setInductorSpec(InductorHandle handle, hq::InductorSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= inductors_.size()) return false;
+        inductors_[i].spec = spec;
+        return true;
+    }
+
+    bool setInductance(InductorHandle handle, float henries) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= inductors_.size()) return false;
+        inductors_[i].spec.inductanceHenries = std::max(0.0f, henries);
+        return true;
+    }
+
     bool setPotentiometerPosition(PotHandle handle, float position) noexcept {
         const auto i = static_cast<std::size_t>(handle);
         if (i >= potentiometers_.size()) return false;
         potentiometers_[i].spec.position = std::clamp(position, 0.0f, 1.0f);
+        return true;
+    }
+
+    bool setPotentiometerSpec(PotHandle handle, hq::PotentiometerSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= potentiometers_.size()) return false;
+        potentiometers_[i].spec = spec;
         return true;
     }
 
@@ -148,12 +234,55 @@ public:
         return true;
     }
 
+    bool setDiodeSpec(DiodeHandle handle, hq::DiodeSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= diodes_.size()) return false;
+        diodes_[i].spec = spec;
+        return true;
+    }
+
+    bool setBjtSpec(BjtHandle handle, hq::BJTSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= bjts_.size()) return false;
+        bjts_[i].spec = spec;
+        return true;
+    }
+
+    bool setJfetSpec(JfetHandle handle, hq::JFETSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= jfets_.size()) return false;
+        jfets_[i].spec = spec;
+        return true;
+    }
+
+    bool setMosfetSpec(MosfetHandle handle, hq::MOSFETSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= mosfets_.size()) return false;
+        mosfets_[i].spec = spec;
+        return true;
+    }
+
+    bool setOpAmpSpec(OpAmpHandle handle, hq::OpAmpSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= opAmps_.size()) return false;
+        opAmps_[i].spec = spec;
+        return true;
+    }
+
+    bool setTriodeSpec(TriodeHandle handle, hq::TriodeSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= triodes_.size()) return false;
+        triodes_[i].spec = spec;
+        return true;
+    }
+
     bool prepare(double sampleRate) {
         sampleRate_ = std::max(1.0, sampleRate);
         const std::size_t nodeUnknowns = nodeCount_;
         std::size_t branch = nodeUnknowns;
         for (auto& source : voltageSources_) source.branchIndex = branch++;
         for (auto& source : vcvs_) source.branchIndex = branch++;
+        for (auto& opAmp : opAmps_) opAmp.branchIndex = branch++;
         for (auto& inductor : inductors_) inductor.branchIndex = branch++;
         dimension_ = branch;
         if (dimension_ == 0U) return false;
@@ -212,8 +341,6 @@ public:
             for (std::size_t i = 0; i < dimension_; ++i)
                 maxDelta = std::max(maxDelta, std::abs(solution_[i] - candidate_[i]));
 
-            // Mild damping substantially improves active-device startup without
-            // changing the converged solution. Linear circuits still finish in one pass.
             if (nonlinear && iteration < 3) {
                 constexpr float damping = 0.65f;
                 for (std::size_t i = 0; i < dimension_; ++i)
@@ -230,8 +357,6 @@ public:
             }
         }
 
-        // Keep the published state equal to the latest Newton candidate when the
-        // iteration budget is exhausted. Callers can inspect converged=false.
         if (!stats.converged) solution_ = candidate_;
         updateDynamicState();
         lastStats_ = stats;
@@ -290,6 +415,12 @@ private:
     struct Bjt { Node collector{}, base{}, emitter{}; hq::BJTSpec spec{}; };
     struct Jfet { Node drain{}, gate{}, source{}; hq::JFETSpec spec{}; };
     struct Mosfet { Node drain{}, gate{}, source{}; hq::MOSFETSpec spec{}; };
+    struct OpAmp {
+        Node output{}, nonInverting{}, inverting{}, reference{};
+        hq::OpAmpSpec spec{};
+        std::size_t branchIndex = 0;
+    };
+    struct Triode { Node plate{}, grid{}, cathode{}; hq::TriodeSpec spec{}; };
 
     struct JacobianTerm { Node node{}; float derivative = 0.0f; };
     struct DiodeLinearization { float current = 0.0f; float conductance = 0.0f; };
@@ -305,7 +436,7 @@ private:
     }
 
     bool hasNonlinearDevices() const noexcept {
-        return !diodes_.empty() || !bjts_.empty() || !jfets_.empty() || !mosfets_.empty();
+        return !diodes_.empty() || !bjts_.empty() || !jfets_.empty() || !mosfets_.empty() || !triodes_.empty();
     }
 
     void addMatrix(std::size_t row, std::size_t col, float value) noexcept {
@@ -372,6 +503,30 @@ private:
             addMatrix(branch, nodeIndex(source.controlPositive), -source.gain);
         if (source.controlNegative != ground)
             addMatrix(branch, nodeIndex(source.controlNegative), source.gain);
+    }
+
+    void stampOpAmp(const OpAmp& device) noexcept {
+        const auto branch = device.branchIndex;
+        const float gainDb = std::clamp(device.spec.openLoopGainDb, 0.0f, 120.0f);
+        const float gain = std::pow(10.0f, gainDb / 20.0f);
+
+        if (device.output != ground) {
+            addMatrix(nodeIndex(device.output), branch, 1.0f);
+            addMatrix(branch, nodeIndex(device.output), 1.0f);
+        }
+        if (device.reference != ground) {
+            addMatrix(nodeIndex(device.reference), branch, -1.0f);
+            addMatrix(branch, nodeIndex(device.reference), -1.0f);
+        }
+        if (device.nonInverting != ground)
+            addMatrix(branch, nodeIndex(device.nonInverting), -gain);
+        if (device.inverting != ground)
+            addMatrix(branch, nodeIndex(device.inverting), gain);
+
+        // inputOffsetVoltage is input-referred, so the corresponding output term
+        // is multiplied by open-loop gain. GBW, slew and rail limiting are not yet
+        // part of this algebraic macro stamp and remain explicit model boundaries.
+        rhs_[branch] += gain * device.spec.inputOffsetVoltage;
     }
 
     template <std::size_t N>
@@ -542,6 +697,36 @@ private:
         stampLinearizedCurrent(device.drain, device.source, current, guess, jac);
     }
 
+    void stampTriode(const Triode& device, const std::vector<float>& guess) noexcept {
+        const float vp = nodeVoltage(guess, device.plate);
+        const float vg = nodeVoltage(guess, device.grid);
+        const float vk = nodeVoltage(guess, device.cathode);
+        const float vpk = vp - vk;
+        const float vgk = vg - vk;
+
+        const auto currentFor = [&](float gridToCathode, float plateToCathode) noexcept {
+            return std::clamp(device.spec.model.plateCurrent(gridToCathode, plateToCathode),
+                              0.0f, 0.20f);
+        };
+
+        const float current = currentFor(vgk, vpk);
+        constexpr float gridStep = 1.0e-3f;
+        const float plateStep = std::max(0.05f, std::abs(vpk) * 1.0e-4f);
+        const float gm = (currentFor(vgk + gridStep, vpk) -
+                          currentFor(vgk - gridStep, vpk)) / (2.0f * gridStep);
+        const float gp = (currentFor(vgk, vpk + plateStep) -
+                          currentFor(vgk, vpk - plateStep)) / (2.0f * plateStep);
+
+        const float safeGm = std::clamp(gm, -1.0f, 1.0f);
+        const float safeGp = std::clamp(gp, -1.0f, 1.0f);
+        const std::array<JacobianTerm, 3> jac{{
+            {device.plate, safeGp},
+            {device.grid, safeGm},
+            {device.cathode, -(safeGp + safeGm)}
+        }};
+        stampLinearizedCurrent(device.plate, device.cathode, current, guess, jac);
+    }
+
     void assemble(const std::vector<float>& guess) noexcept {
         std::fill(matrix_.begin(), matrix_.end(), 0.0f);
         std::fill(rhs_.begin(), rhs_.end(), 0.0f);
@@ -571,8 +756,6 @@ private:
             stampCurrentSource(c.a, c.b, historyCurrent);
             if (c.spec.leakageResistanceOhms > 0.0f && std::isfinite(c.spec.leakageResistanceOhms))
                 stampConductance(c.a, c.b, 1.0f / std::max(1.0f, c.spec.leakageResistanceOhms));
-            // ESR is intentionally left explicit in the netlist for now. Folding
-            // ESR into a two-terminal companion would change the state contract.
         }
 
         for (const auto& source : currentSources_)
@@ -588,6 +771,9 @@ private:
 
         for (const auto& source : vcvs_)
             stampVcvs(source);
+
+        for (const auto& opAmp : opAmps_)
+            stampOpAmp(opAmp);
 
         for (const auto& l : inductors_) {
             const float inductance = std::max(1.0e-12f, l.spec.inductanceHenries);
@@ -608,6 +794,7 @@ private:
         for (const auto& bjt : bjts_) stampBjt(bjt, guess);
         for (const auto& jfet : jfets_) stampJfet(jfet, guess);
         for (const auto& mosfet : mosfets_) stampMosfet(mosfet, guess);
+        for (const auto& triode : triodes_) stampTriode(triode, guess);
     }
 
     bool solveLinearSystem() noexcept {
@@ -688,6 +875,8 @@ private:
     std::vector<Bjt> bjts_;
     std::vector<Jfet> jfets_;
     std::vector<Mosfet> mosfets_;
+    std::vector<OpAmp> opAmps_;
+    std::vector<Triode> triodes_;
 
     std::vector<float> matrix_;
     std::vector<float> rhs_;
