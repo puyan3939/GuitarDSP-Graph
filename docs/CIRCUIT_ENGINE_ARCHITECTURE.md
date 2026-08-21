@@ -1,77 +1,76 @@
 # Circuit engine architecture
 
-The circuit engine is the layer that turns editable electronic component values into an audio-rate solver. It is intentionally separate from named pedal/amp nodes so the same resistor, capacitor, diode or active-device model can be reused across circuits.
+The circuit engine turns editable electronic component values into an audio-rate solver. It is intentionally separate from named pedal/amp nodes so the same resistor, capacitor, diode, transistor, tube, transformer, switch or relay can be reused across circuits.
 
 ## Current execution model
 
 Topology construction and component selection happen on the control thread. `MnaCircuitEngine::prepare()` allocates the dense MNA matrix, right-hand side, solution vectors and branch unknowns. Audio-rate `processSample()` reuses that storage and performs no intentional heap allocation.
 
-The engine currently supports:
+The engine/subcircuit layer currently supports:
 
-- resistors with stable handles for prepared value/spec replacement
-- capacitors using trapezoidal companion models, with stable handles for capacitance/spec replacement
-- inductors using trapezoidal branch companion models, with stable handles for inductance/spec replacement
-- three-terminal potentiometers with linear/audio/reverse-audio taper and prepared position/spec updates
-- ideal current sources
-- ideal voltage sources with prepared value updates and branch-current probing
-- voltage-controlled current sources (VCCS)
-- voltage-controlled voltage sources (VCVS) with an MNA branch unknown
-- current-controlled current sources (CCCS) driven from a voltage-source branch current
-- current-controlled voltage sources (CCVS) with transresistance and their own MNA branch unknown
-- Shockley diodes with junction series resistance, Newton iteration and replaceable device specs
-- first-generation BJT nonlinear three-terminal stamps with replaceable device specs
-- first-generation JFET nonlinear three-terminal stamps with replaceable device specs
-- first-generation MOSFET nonlinear three-terminal stamps with replaceable device specs
-- a finite-open-loop-gain op-amp macro stamp with replaceable `OpAmpSpec`
-- a nonlinear plate/grid/cathode triode stamp using the shared 12AX7/12AT7 model family
-- a transformer subcircuit compiled from leakage/magnetizing inductors, winding resistance, VCVS/CCCS ratio constraints, secondary current sensing and inter-winding capacitance
+- resistors, capacitors and inductors with stable prepared handles
+- trapezoidal capacitor and inductor companion models
+- three-terminal potentiometers with linear/audio/reverse-audio taper
+- ideal current/voltage sources and voltage-source branch-current probing
+- VCCS, VCVS, CCCS and CCVS controlled sources
+- Shockley diodes with series resistance and Newton iteration
+- first-generation BJT, JFET and MOSFET nonlinear three-terminal stamps
+- a finite-open-loop-gain algebraic op-amp stamp
+- a dynamic op-amp subcircuit with dominant pole/GBW, input offset/bias and output resistance
+- nonlinear plate/grid/cathode triode stamps
+- triode Cgp/Cgk/Cpk parasitics and a positive-grid-current branch
+- transformer subcircuits with leakage/winding resistance, magnetizing L, ratio constraints, secondary-current sensing and inter-winding capacitance
+- a smooth current-dependent transformer magnetizing-inductance collapse for engineering core saturation
+- SPST, SPDT and DPDT switch subcircuits implemented with stable contact-resistance handles
+- electromechanical relay subcircuits with an R-L coil in the MNA system, physical coil-current sensing, pickup/dropout hysteresis, operate/release delay and deterministic contact bounce
 - arbitrary node graphs with ground node 0
-- partial-pivot Gaussian elimination
-- convergence/singular statistics for analyzer and test reporting
+- partial-pivot Gaussian elimination and convergence/singular statistics
 - mild startup damping for nonlinear Newton solves
 
-The component values come from `ComponentCatalog.h`, so nominal value, rating/tolerance metadata and nonlinear DSP parameters remain distinct. The active-device stamps consume those same component specs rather than embedding pedal- or amplifier-specific constants in the solver.
+The component values come from `ComponentCatalog.h`, so nominal value, rating/tolerance metadata and nonlinear DSP parameters remain distinct.
 
-## What the current active stamps mean
+## Component catalog boundary
 
-The current BJT/JFET/MOSFET/op-amp/triode implementations are engineering device stamps, not full SPICE-equivalent manufacturer models.
+The catalog now includes resistor, capacitor, inductor, potentiometer, diode, BJT, JFET, MOSFET, op-amp, triode, power tube, transformer, optocoupler, switch and relay categories.
 
-- BJT: exponential base-emitter current, beta-derived base current and a collector-emitter saturation factor.
+Switch specs include contact form, open/closed resistance and bounce parameters. Relay specs include contact form, coil voltage/resistance/inductance, pickup/dropout voltage, operate/release timing, contact resistance and bounce parameters. The included presets are engineering starting points, not manufacturer-identical models.
+
+## What the current active models mean
+
+The current BJT/JFET/MOSFET/op-amp/triode/transformer/relay implementations are engineering models, not full manufacturer SPICE or measured unit models.
+
+- BJT: exponential base-emitter current, beta-derived base current and collector-emitter saturation factor.
 - JFET: Shockley-style gate/source control, drain/source direction term and channel-length modulation.
 - MOSFET: square-law triode/saturation regions with channel-length modulation.
-- Op-amp: algebraic finite open-loop gain and input offset in the common MNA solve. `gainBandwidthHz`, slew rate, rail headroom, output current limit and noise are catalogued but not yet enforced by this MNA macro.
-- Triode: the shared nonlinear plate-current model is stamped directly as a plate-to-cathode current controlled by grid-to-cathode and plate-to-cathode voltage. Numerical derivatives form the Newton Jacobian. Grid current and inter-electrode capacitances are not yet modeled.
-- Transformer: the current subcircuit models turns ratio, magnetizing inductance, referred leakage, primary/secondary winding resistance and one inter-winding capacitance. Core saturation/hysteresis metadata is not yet enforced.
+- Dynamic op-amp: finite DC open-loop gain, dominant pole derived from GBW, input offset/bias and finite output resistance. Rail limiting, slew-rate limiting and output-current limiting are intentionally **not** claimed yet. A first diode-rail experiment was removed after overdrive regression exposed Newton divergence; a bounded-source/output-stage stamp is required before this is promoted.
+- Triode: nonlinear plate current plus editable inter-electrode capacitances and an engineering positive-grid-current branch.
+- Transformer: linear leakage/winding/parasitic network plus smooth current-dependent magnetizing-inductance collapse. Hysteresis, remanence and measured B-H fitting remain future work.
+- Relay: physical R-L coil current determines pickup/dropout state with timing and deterministic contact bounce. Magnetic hysteresis/contact arcing are not yet measured physical models.
 
-They are sufficient to build and validate active circuit topologies in the common MNA system. Named hardware claims still require better parameter provenance and, where justified, higher-order models or measured device fitting.
+Named hardware claims still require parameter provenance and measured fitting.
 
-## Prepared component handles
+## Prepared component handles and realtime edits
 
-R/C/L, potentiometers, diodes, BJT/JFET/MOSFET, op-amps and triodes return stable handles when added to a topology. A handle allows the numerical component spec to be changed without changing node connectivity or resizing the MNA system. Transformer subcircuits expose the handles of their internal leakage, magnetizing, ratio and parasitic elements so a `TransformerSpec` can also be reapplied without rebuilding topology.
+R/C/L, potentiometers, diodes, BJT/JFET/MOSFET, op-amps and triodes return stable handles when added to a topology. Transformer, switch and relay subcircuits expose stable handles for their internal elements. Topology-preserving numerical edits therefore do not require resizing the MNA system.
 
-This is the basis for circuit-level editing such as:
+`CircuitUpdateQueue` is the realtime handoff for normal component edits. It is a fixed-capacity SPSC queue: the UI/control thread writes commands and the audio thread drains them at a block boundary. Overflow is rejected rather than allocating or blocking.
 
-```text
-C8: 47 nF -> 22 nF
-R12: 4.7 kOhm -> 2.2 kOhm
-Q1: 2N3904-style -> 2N5088-style
-D1: 1N4148-style -> 1N34A-style
-IC1: JRC4558-style -> edited op-amp spec
-V1: 12AX7 -> 12AT7
-T1 turns ratio: 10:1 -> 5:1
-```
-
-`CircuitUpdateQueue` is the realtime handoff for those edits. It is a fixed-capacity SPSC queue: the control/UI thread writes commands, and the audio thread drains them at a block boundary before processing samples. The queue stores scalar edits and complete component specs without growing or allocating storage. Overflow is rejected rather than allocating or blocking.
-
-Direct setter calls still do not claim lock-free concurrent mutation. The audio thread reads component structs while solving, so callers should either use `CircuitUpdateQueue`, otherwise serialize direct writes at a block boundary, or submit an inactive/prepared circuit and swap it through the graph host.
+Switch/relay contact transitions are also topology-preserving: routing is represented by changing pre-existing contact resistances rather than adding/removing graph nodes during audio processing.
 
 ## Stable-ID schematic/netlist layer
 
-`CircuitNetlist` is the control-thread schematic layer above MNA. User-facing node IDs and component IDs are stable and separate from solver node indexes/branch indexes. It can currently describe and compile R/C/L, pots, independent voltage sources, all four controlled-source families, diode/BJT/JFET/MOSFET, op-amp, triode and transformer definitions.
+`CircuitNetlist` is the schematic-facing layer above MNA. User-facing node IDs and component IDs are stable and separate from solver indexes. The in-memory netlist can currently compile:
 
-Compilation resolves stable IDs, expands transformer subcircuits, creates the MNA topology, assigns component-ID-to-handle bindings and prepares the solver. Current-controlled sources are resolved in a later compile pass so they can refer to an independent voltage source by stable component ID. Invalid node/control references are rejected before the compiled circuit is used.
+- R/C/L and potentiometers
+- independent voltage sources and all four controlled-source families
+- diode/BJT/JFET/MOSFET
+- algebraic and dynamic op-amp definitions
+- basic and parasitic-aware triodes
+- transformer subcircuits
+- SPST/SPDT/DPDT switches
+- electromechanical relays
 
-This layer is intentionally not JSON yet. It is the in-memory contract a future Circuit Mode UI, schematic importer and project serialization format can target without exposing MNA's internal matrix layout.
+`CompiledCircuit` retains component-ID-to-handle/subcircuit bindings, including switch handles, relay subcircuits and relay runtime state. That is the contract intended for a future Circuit Mode UI and serialization layer.
 
 ```text
 Circuit Mode / schematic UI
@@ -82,16 +81,40 @@ Circuit Mode / schematic UI
        compile
           |
    CompiledCircuit
-(component ID -> handle binding)
+(ID -> component/subcircuit binding)
           |
     MnaCircuitEngine
+          |
+R/C/L + nonlinear devices + switches/relays
 ```
+
+## Relay execution model
+
+A relay is intentionally not a magic boolean router.
+
+```text
+coil supply
+   |
+coil R + L
+   |
+0 V current sensor
+   |
+MNA ground
+
+measured coil current
+   -> pickup/dropout hysteresis
+   -> operate/release timer
+   -> deterministic contact bounce
+   -> SPST/SPDT/DPDT contact resistances
+```
+
+This means a relay can react to the electrical coil drive rather than a hidden UI state. A flyback diode is deliberately **not** baked into the relay; if a circuit needs one it should be wired explicitly as a real diode, which keeps the schematic behavior visible and editable.
 
 ## Why MNA first
 
-Modified Nodal Analysis is the most useful general foundation for pedal and amplifier schematics because arbitrary R/C/L networks, independent sources, all four controlled-source families and nonlinear devices can share one topology. It also gives a direct path to importing component-value schematics rather than rewriting each filter as a hand-derived transfer function.
+Modified Nodal Analysis is the most useful general foundation for pedal and amplifier schematics because arbitrary R/C/L networks, independent sources, all controlled-source families, nonlinear devices and electromechanical subcircuits can share one topology.
 
-A future WDF layer can still be added for circuit regions where tree decomposition gives a large realtime performance advantage. The intended architecture is hybrid rather than forcing every circuit into one solver:
+A future WDF layer can still be added for circuit regions where tree decomposition gives a large realtime performance advantage. The intended architecture is hybrid:
 
 ```text
 Component catalog
@@ -102,59 +125,28 @@ Circuit/netlist description
       |
       +--> WDF solver          efficient passive/tree-like subcircuits
       |
-      +--> specialized stage   measured/optimized device blocks when justified
+      +--> specialized stage   measured/optimized blocks when justified
 ```
 
 ## Realtime boundary
 
-The audio callback must not:
+The audio callback must not allocate memory, parse files/JSON, rebuild topology, resize solver storage, acquire locks or race with control-thread spec writes. Topology-preserving edits should use prepared handles/block-boundary queues. Topology edits require compiling a new circuit and swapping it through the graph host.
 
-- allocate memory
-- change topology
-- parse files/JSON
-- rebuild matrices/vectors
-- acquire locks
-- race with direct component-spec writes from another thread
+## Next engine work
 
-Topology-preserving edits should arrive through the fixed-capacity block-boundary update queue. Topology edits require compiling a new `CircuitNetlist` into a new circuit instance and swapping it through the graph host.
+With switch/relay coverage in place, the next high-value work is:
 
-## Next device/engine work
-
-The next high-value work is:
-
-1. op-amp dominant-pole/GBW behavior, output impedance, current limiting, rail limiting and slew-rate dynamics
-2. triode grid-current onset and inter-electrode capacitances
-3. nonlinear transformer magnetizing branch for saturation/hysteresis plus more detailed parasitics
-4. switches and relays for pedal bypass/channel topology compilation
-5. BJT junction capacitances and a stronger Ebers-Moll/Gummel-Poon-inspired model
-6. MOSFET body diode/capacitances and JFET gate-junction behavior
-7. typed branch-current probes beyond independent voltage sources where a circuit needs them
-8. serialization/import around `CircuitNetlist` once the in-memory component contract stops moving rapidly
-
-## Numerical roadmap
-
-The current dense Gaussian solver is a correctness/reference engine. It is appropriate for small pedal/amp subcircuits and CI regression but should not be the final performance path for large circuits.
-
-Planned upgrades:
-
-- compile constant matrix structure once
-- separate static and dynamic stamps
-- sparse/fixed-pattern factorization for linear sections
-- stronger Newton residual damping, voltage limiting and continuation for difficult nonlinear networks
-- per-device convergence diagnostics
-- optional backward Euler fallback after non-convergence
-- subcircuit partitioning so only nonlinear regions iterate
-- oversampled circuit islands chosen by the graph quality policy
-- exact measured latency accounting when circuit islands include resampling
-- optional WDF compilation for suitable passive/tree regions
+1. a numerically bounded op-amp output-stage stamp with rail and output-current limiting, then slew-rate dynamics
+2. stronger active-device parasitics: BJT junction capacitances, MOSFET body diode/capacitances and JFET gate-junction behavior
+3. transformer hysteresis/remanence and measured B-H fitting
+4. relay flyback/arcing examples as explicit schematic components rather than hidden behavior
+5. static/dynamic matrix separation and fixed-pattern/sparse acceleration
+6. stronger Newton continuation/voltage limiting and backward-Euler fallback
+7. CircuitNetlist serialization/import after the component contract stabilizes
+8. migration of named pedals/amps from specialized nodes toward schematic-backed implementations where performance permits
 
 ## Validation policy
 
-A circuit implementation is not called hardware-equivalent solely because the schematic topology is represented. Each named model should distinguish:
+A circuit implementation is not called hardware-equivalent solely because the schematic topology is represented. Each named model should distinguish topology correctness, datasheet/SPICE parameter provenance, measured component/circuit data and whole-device measured audio fitting.
 
-- topology correctness
-- datasheet/SPICE parameter provenance
-- measured component/circuit data
-- whole-device measured audio fitting
-
-Regression tests should cover DC operating points, AC/frequency response, transient response, nonlinear transfer curves, harmonic content, convergence and block/sample continuity before a circuit is promoted into a production named model.
+Regression coverage now includes DC operating points, R/C/L transients, nonlinear diode/transistor biasing, controlled sources, prepared component edits, transformer ratio behavior, transformer saturation-law behavior, triode parasitic stability, switch routing, relay coil pickup/dropout/timing/contact transfer, graph behavior and the existing pedal/amp/cab DSP tests.
