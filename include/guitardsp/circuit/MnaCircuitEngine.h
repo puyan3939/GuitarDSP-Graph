@@ -36,7 +36,7 @@ inline constexpr Node ground = 0;
 // Supported stamps:
 // - editable R / C / L and ideal current/voltage sources
 // - three-terminal potentiometers with editable taper/position
-// - VCCS and VCVS controlled sources
+// - VCCS / VCVS / CCCS / CCVS controlled sources
 // - Shockley diodes with series resistance
 // - engineering BJT, JFET and MOSFET nonlinear three-terminal stamps
 // - finite-open-loop-gain op-amp macro stamps
@@ -117,6 +117,25 @@ public:
         return static_cast<ControlledSourceHandle>(vcvs_.size() - 1U);
     }
 
+    ControlledSourceHandle addCccs(Node outputPositive,
+                                   Node outputNegative,
+                                   SourceHandle controlVoltageSource,
+                                   float currentGain) {
+        prepared_ = false;
+        cccs_.push_back({outputPositive, outputNegative, controlVoltageSource, currentGain});
+        return static_cast<ControlledSourceHandle>(cccs_.size() - 1U);
+    }
+
+    ControlledSourceHandle addCcvs(Node outputPositive,
+                                   Node outputNegative,
+                                   SourceHandle controlVoltageSource,
+                                   float transresistanceOhms) {
+        prepared_ = false;
+        ccvs_.push_back({outputPositive, outputNegative, controlVoltageSource,
+                         transresistanceOhms, 0});
+        return static_cast<ControlledSourceHandle>(ccvs_.size() - 1U);
+    }
+
     DiodeHandle addDiode(Node anode, Node cathode, hq::DiodeSpec spec) {
         prepared_ = false;
         diodes_.push_back({anode, cathode, spec});
@@ -162,6 +181,13 @@ public:
         if (i >= voltageSources_.size()) return false;
         voltageSources_[i].volts = volts;
         return true;
+    }
+
+    float currentThroughVoltageSource(SourceHandle handle) const noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= voltageSources_.size()) return 0.0f;
+        const auto branch = voltageSources_[i].branchIndex;
+        return branch < solution_.size() ? solution_[branch] : 0.0f;
     }
 
     bool setResistorSpec(ResistorHandle handle, hq::ResistorSpec spec) noexcept {
@@ -234,6 +260,20 @@ public:
         return true;
     }
 
+    bool setCccsGain(ControlledSourceHandle handle, float gain) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= cccs_.size()) return false;
+        cccs_[i].gain = gain;
+        return true;
+    }
+
+    bool setCcvsTransresistance(ControlledSourceHandle handle, float ohms) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= ccvs_.size()) return false;
+        ccvs_[i].transresistanceOhms = ohms;
+        return true;
+    }
+
     bool setDiodeSpec(DiodeHandle handle, hq::DiodeSpec spec) noexcept {
         const auto i = static_cast<std::size_t>(handle);
         if (i >= diodes_.size()) return false;
@@ -282,6 +322,7 @@ public:
         std::size_t branch = nodeUnknowns;
         for (auto& source : voltageSources_) source.branchIndex = branch++;
         for (auto& source : vcvs_) source.branchIndex = branch++;
+        for (auto& source : ccvs_) source.branchIndex = branch++;
         for (auto& opAmp : opAmps_) opAmp.branchIndex = branch++;
         for (auto& inductor : inductors_) inductor.branchIndex = branch++;
         dimension_ = branch;
@@ -411,6 +452,17 @@ private:
         float gain = 1.0f;
         std::size_t branchIndex = 0;
     };
+    struct Cccs {
+        Node outputPositive{}, outputNegative{};
+        SourceHandle controlSource{};
+        float gain = 1.0f;
+    };
+    struct Ccvs {
+        Node outputPositive{}, outputNegative{};
+        SourceHandle controlSource{};
+        float transresistanceOhms = 1.0f;
+        std::size_t branchIndex = 0;
+    };
     struct Diode { Node anode{}, cathode{}; hq::DiodeSpec spec{}; };
     struct Bjt { Node collector{}, base{}, emitter{}; hq::BJTSpec spec{}; };
     struct Jfet { Node drain{}, gate{}, source{}; hq::JFETSpec spec{}; };
@@ -437,6 +489,12 @@ private:
 
     bool hasNonlinearDevices() const noexcept {
         return !diodes_.empty() || !bjts_.empty() || !jfets_.empty() || !mosfets_.empty() || !triodes_.empty();
+    }
+
+    std::size_t voltageSourceBranch(SourceHandle handle) const noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= voltageSources_.size()) return dimension_;
+        return voltageSources_[i].branchIndex;
     }
 
     void addMatrix(std::size_t row, std::size_t col, float value) noexcept {
@@ -505,6 +563,30 @@ private:
             addMatrix(branch, nodeIndex(source.controlNegative), source.gain);
     }
 
+    void stampCccs(const Cccs& source) noexcept {
+        const auto controlBranch = voltageSourceBranch(source.controlSource);
+        if (controlBranch >= dimension_) return;
+        if (source.outputPositive != ground)
+            addMatrix(nodeIndex(source.outputPositive), controlBranch, source.gain);
+        if (source.outputNegative != ground)
+            addMatrix(nodeIndex(source.outputNegative), controlBranch, -source.gain);
+    }
+
+    void stampCcvs(const Ccvs& source) noexcept {
+        const auto controlBranch = voltageSourceBranch(source.controlSource);
+        const auto branch = source.branchIndex;
+        if (source.outputPositive != ground) {
+            addMatrix(nodeIndex(source.outputPositive), branch, 1.0f);
+            addMatrix(branch, nodeIndex(source.outputPositive), 1.0f);
+        }
+        if (source.outputNegative != ground) {
+            addMatrix(nodeIndex(source.outputNegative), branch, -1.0f);
+            addMatrix(branch, nodeIndex(source.outputNegative), -1.0f);
+        }
+        if (controlBranch < dimension_)
+            addMatrix(branch, controlBranch, -source.transresistanceOhms);
+    }
+
     void stampOpAmp(const OpAmp& device) noexcept {
         const auto branch = device.branchIndex;
         const float gainDb = std::clamp(device.spec.openLoopGainDb, 0.0f, 120.0f);
@@ -523,9 +605,6 @@ private:
         if (device.inverting != ground)
             addMatrix(branch, nodeIndex(device.inverting), gain);
 
-        // inputOffsetVoltage is input-referred, so the corresponding output term
-        // is multiplied by open-loop gain. GBW, slew and rail limiting are not yet
-        // part of this algebraic macro stamp and remain explicit model boundaries.
         rhs_[branch] += gain * device.spec.inputOffsetVoltage;
     }
 
@@ -772,6 +851,12 @@ private:
         for (const auto& source : vcvs_)
             stampVcvs(source);
 
+        for (const auto& source : cccs_)
+            stampCccs(source);
+
+        for (const auto& source : ccvs_)
+            stampCcvs(source);
+
         for (const auto& opAmp : opAmps_)
             stampOpAmp(opAmp);
 
@@ -871,6 +956,8 @@ private:
     std::vector<VoltageSource> voltageSources_;
     std::vector<Vccs> vccs_;
     std::vector<Vcvs> vcvs_;
+    std::vector<Cccs> cccs_;
+    std::vector<Ccvs> ccvs_;
     std::vector<Diode> diodes_;
     std::vector<Bjt> bjts_;
     std::vector<Jfet> jfets_;
