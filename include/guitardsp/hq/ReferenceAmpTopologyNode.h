@@ -4,6 +4,7 @@
 #include "DeviceStages.h"
 #include "PolyphaseOversampler.h"
 #include "QualityPolicy.h"
+#include "ToneStackFamilies.h"
 #include "guitardsp/graph/AudioNode.h"
 
 #include <algorithm>
@@ -15,8 +16,7 @@
 namespace guitardsp::hq {
 
 // Generic high-quality amplifier topology used to validate the reusable amp blocks.
-// It is intentionally unnamed: measured Marshall/Fender/Ampeg models will supply
-// device values and topology-specific networks on top of the same contracts.
+// It remains an engineering reference: named hardware claims require measured fits.
 class ReferenceAmpTopologyNode final : public graph::AudioNode {
 public:
     std::string_view typeName() const noexcept override { return "Reference Amp Topology"; }
@@ -57,7 +57,7 @@ public:
             interCoupling_[i].prepare(highRate, 55.0f);
             v1_[i].prepare(highRate, first);
             v2_[i].prepare(highRate, second);
-            tone_[i].prepare(highRate);
+            tone_[i].prepare(highRate, ToneStackFamily::reference);
             phaseInverter_[i].prepare(highRate);
             feedback_[i].prepare(highRate, 7200.0f);
             power_[i].prepare(highRate);
@@ -89,8 +89,15 @@ public:
         const auto tubeType = tubeSelector < 0.5f ? PowerTubeType::el34
                            : tubeSelector < 1.5f ? PowerTubeType::sixL6GC
                                                 : PowerTubeType::kt88;
+        const float stackSelector = toneStack_.load(std::memory_order_relaxed);
+        const auto stackFamily = stackSelector < 0.5f ? ToneStackFamily::reference
+                               : stackSelector < 1.5f ? ToneStackFamily::british
+                                                     : ToneStackFamily::american;
 
-        for (auto& t : tone_) t.setControls(bass, mid, treble);
+        for (auto& t : tone_) {
+            t.setFamily(stackFamily);
+            t.setControls(bass, mid, treble);
+        }
         for (auto& p : phaseInverter_) {
             p.setDrive(1.1f + 2.8f * master);
             p.setImbalance(0.02f + 0.05f * gain);
@@ -138,6 +145,7 @@ public:
             case 5: return presence_.load(std::memory_order_relaxed);
             case 6: return outputDb_.load(std::memory_order_relaxed);
             case 7: return powerTube_.load(std::memory_order_relaxed);
+            case 8: return toneStack_.load(std::memory_order_relaxed);
             default: return 0.0f;
         }
     }
@@ -153,6 +161,7 @@ public:
             case 5: presence_.store(v, std::memory_order_relaxed); break;
             case 6: outputDb_.store(v, std::memory_order_relaxed); break;
             case 7: powerTube_.store(std::round(v), std::memory_order_relaxed); break;
+            case 8: toneStack_.store(std::round(v), std::memory_order_relaxed); break;
             default: return false;
         }
         return true;
@@ -162,7 +171,7 @@ private:
     PolyphaseOversampler oversampler_;
     std::vector<CouplingHighpass> inputCoupling_, interCoupling_;
     std::vector<TriodeCommonCathodeStage> v1_, v2_;
-    std::vector<ThreeBandToneStack> tone_;
+    std::vector<InteractiveToneStack> tone_;
     std::vector<LongTailPairPhaseInverter> phaseInverter_;
     std::vector<NegativeFeedbackLoop> feedback_;
     std::vector<PushPullPowerStage> power_;
@@ -175,8 +184,9 @@ private:
     std::atomic<float> presence_{0.50f};
     std::atomic<float> outputDb_{-10.0f};
     std::atomic<float> powerTube_{0.0f};
+    std::atomic<float> toneStack_{0.0f};
 
-    static constexpr std::array<graph::ParameterDescriptor, 8> descriptors_{{
+    static constexpr std::array<graph::ParameterDescriptor, 9> descriptors_{{
         {"gain", "Gain", 0.0f, 1.0f, 0.35f, graph::ParameterUnit::percent, 1.0f},
         {"bass", "Bass", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
         {"mid", "Mid", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
@@ -184,7 +194,8 @@ private:
         {"master", "Master", 0.0f, 1.0f, 0.45f, graph::ParameterUnit::percent, 1.0f},
         {"presence", "Presence", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
         {"output", "Output", -30.0f, 6.0f, -10.0f, graph::ParameterUnit::decibels, 1.0f},
-        {"power_tube", "Power Tube (0=EL34, 1=6L6GC, 2=KT88)", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f}
+        {"power_tube", "Power Tube (0=EL34, 1=6L6GC, 2=KT88)", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f},
+        {"tone_stack", "Tone Stack (0=Reference, 1=British, 2=American)", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f}
     }};
 };
 
