@@ -2,6 +2,7 @@
 #include "guitardsp/hq/BD2TopologyNode.h"
 #include "guitardsp/hq/MeasuredFit.h"
 #include "guitardsp/hq/ReferenceAmpTopologyNode.h"
+#include "guitardsp/hq/ToneStackFamilies.h"
 #include "guitardsp/hq/TwoTransistorFuzzNode.h"
 
 #include <algorithm>
@@ -112,6 +113,34 @@ int main() {
     }
 
     {
+        hq::InteractiveToneStack british;
+        hq::InteractiveToneStack american;
+        british.prepare(sr, hq::ToneStackFamily::british);
+        american.prepare(sr, hq::ToneStackFamily::american);
+        british.setControls(0.55f, 0.55f, 0.55f);
+        american.setControls(0.55f, 0.55f, 0.55f);
+        std::vector<float> b(samples), a(samples);
+        for (int i = 0; i < samples; ++i) {
+            const float x = input.channel(0)[i];
+            b[static_cast<std::size_t>(i)] = british.process(x);
+            a[static_cast<std::size_t>(i)] = american.process(x);
+        }
+        ok &= require(differenceRms(b, a, samples / 2) > 1.0e-5f,
+                      "British and American tone-stack families produce different responses");
+
+        british.reset();
+        british.setControls(0.55f, 0.15f, 0.55f);
+        std::vector<float> lowMid(samples);
+        for (int i = 0; i < samples; ++i) lowMid[static_cast<std::size_t>(i)] = british.process(input.channel(0)[i]);
+        british.reset();
+        british.setControls(0.55f, 0.85f, 0.55f);
+        std::vector<float> highMid(samples);
+        for (int i = 0; i < samples; ++i) highMid[static_cast<std::size_t>(i)] = british.process(input.channel(0)[i]);
+        ok &= require(differenceRms(lowMid, highMid, samples / 2) > 1.0e-5f,
+                      "interactive tone stack responds to mid control");
+    }
+
+    {
         hq::ReferenceAmpTopologyNode node;
         node.prepare(spec);
         node.process(input, output, samples);
@@ -139,6 +168,14 @@ int main() {
                       "reference amp EL34 and 6L6 voicings differ");
         ok &= require(differenceRms(sixl6, kt88, samples / 2) > 1.0e-9f,
                       "reference amp 6L6 and KT88 voicings differ");
+
+        std::vector<float> british(samples), american(samples);
+        node.reset(); node.setParameterValue(8, 1.0f); node.process(input, output, samples);
+        std::copy(output.channel(0), output.channel(0) + samples, british.begin());
+        node.reset(); node.setParameterValue(8, 2.0f); node.process(input, output, samples);
+        std::copy(output.channel(0), output.channel(0) + samples, american.begin());
+        ok &= require(differenceRms(british, american, samples / 2) > 1.0e-9f,
+                      "reference amp tone-stack family changes steady waveform");
     }
 
     return ok ? 0 : 1;
