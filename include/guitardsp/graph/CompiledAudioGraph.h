@@ -3,6 +3,7 @@
 #include "AudioBuffer.h"
 #include "DelayCompensator.h"
 #include "Graph.h"
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -19,11 +20,12 @@ public:
         std::vector<const AudioBuffer*> inputPointers;
         std::vector<AudioBuffer*> outputPointers;
     };
-    struct SinkRuntime { NodeId source=0; int sourcePort=0; DelayCompensator compensation; };
+    struct SinkRuntime { NodeId source=0; int sourcePort=0; int busIndex=0; DelayCompensator compensation; };
 
     bool build(Graph& graph,double sampleRate,int maxBlockSize,int channels,ProcessingQuality quality=ProcessingQuality::high);
     void reset() noexcept;
     void process(const AudioBuffer& externalInput,AudioBuffer& externalOutput,int numSamples) noexcept;
+    void processMultiOutput(const AudioBuffer& externalInput,std::span<AudioBuffer* const> outputBuses,int numSamples) noexcept;
     [[nodiscard]] int totalLatencySamples()const noexcept{return totalLatencySamples_;}
     [[nodiscard]] const std::vector<NodeId>& order()const noexcept{return order_;}
 private:

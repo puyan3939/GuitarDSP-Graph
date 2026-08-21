@@ -38,7 +38,7 @@ bool CompiledAudioGraph::build(Graph& graph,double sampleRate,int maxBlockSize,i
         const auto* node=graph.node(id);if(!node)continue;
         for(int port=0;port<node->outputPortCount();++port){
             if(connectedOutputs.contains({id,port}))continue;
-            SinkRuntime sink;sink.source=id;sink.sourcePort=port;sink.compensation.prepare(channels,totalLatencySamples_,maxBlockSize);sink.compensation.setDelaySamples(totalLatencySamples_-graph.cumulativeLatencySamples(id).value_or(0));sinks_.push_back(std::move(sink));
+            SinkRuntime sink;sink.source=id;sink.sourcePort=port;sink.busIndex=std::max(0,node->physicalOutputBusIndex());sink.compensation.prepare(channels,totalLatencySamples_,maxBlockSize);sink.compensation.setDelaySamples(totalLatencySamples_-graph.cumulativeLatencySamples(id).value_or(0));sinks_.push_back(std::move(sink));
         }
     }
     reset();return !nodes_.empty()&&!sinks_.empty();
@@ -50,8 +50,13 @@ void CompiledAudioGraph::reset()noexcept{
 }
 
 void CompiledAudioGraph::process(const AudioBuffer& externalInput,AudioBuffer& externalOutput,int numSamples)noexcept{
+    AudioBuffer* buses[]={&externalOutput};
+    processMultiOutput(externalInput,std::span<AudioBuffer* const>(buses,1),numSamples);
+}
+
+void CompiledAudioGraph::processMultiOutput(const AudioBuffer& externalInput,std::span<AudioBuffer* const> outputBuses,int numSamples)noexcept{
     if(numSamples<=0||numSamples>maxBlockSize_)return;
-    externalOutput.clear(numSamples);
+    for(auto* bus:outputBuses)if(bus)bus->clear(numSamples);
     for(auto&r:nodes_){
         r.inputPointers.clear();r.outputPointers.clear();
         for(std::size_t port=0;port<r.inputs.size();++port){
@@ -72,7 +77,11 @@ void CompiledAudioGraph::process(const AudioBuffer& externalInput,AudioBuffer& e
         const ProcessPorts ports{std::span<const AudioBuffer* const>(r.inputPointers.data(),r.inputPointers.size()),std::span<AudioBuffer* const>(r.outputPointers.data(),r.outputPointers.size())};
         r.node->processPorts(ports,numSamples);
     }
-    for(auto&s:sinks_){const auto*r=runtime(s.source);if(!r||s.sourcePort<0||s.sourcePort>=static_cast<int>(r->outputs.size()))continue;s.compensation.processAdd(r->outputs[static_cast<std::size_t>(s.sourcePort)],externalOutput,numSamples);}
+    for(auto&s:sinks_){
+        if(s.busIndex<0||s.busIndex>=static_cast<int>(outputBuses.size())||outputBuses[static_cast<std::size_t>(s.busIndex)]==nullptr)continue;
+        const auto*r=runtime(s.source);if(!r||s.sourcePort<0||s.sourcePort>=static_cast<int>(r->outputs.size()))continue;
+        s.compensation.processAdd(r->outputs[static_cast<std::size_t>(s.sourcePort)],*outputBuses[static_cast<std::size_t>(s.busIndex)],numSamples);
+    }
 }
 
 } // namespace guitardsp::graph

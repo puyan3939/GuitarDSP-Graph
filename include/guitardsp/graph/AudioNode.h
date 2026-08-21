@@ -43,6 +43,7 @@ public:
 
     [[nodiscard]] virtual int latencySamples() const noexcept { return 0; }
     [[nodiscard]] virtual int tailSamples() const noexcept { return 0; }
+    [[nodiscard]] virtual int physicalOutputBusIndex() const noexcept { return -1; }
     [[nodiscard]] virtual std::size_t parameterCount() const noexcept { return 0; }
     [[nodiscard]] virtual ParameterDescriptor parameterDescriptor(std::size_t) const noexcept { return {}; }
     [[nodiscard]] virtual float parameterValue(std::size_t) const noexcept { return 0.0f; }

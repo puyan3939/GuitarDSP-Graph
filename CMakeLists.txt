@@ -1,10 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.5.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
 option(GUITARDSP_GRAPH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 add_library(GuitarDSPGraphCore
@@ -16,7 +15,6 @@ add_library(GuitarDSPGraphCore
 )
 target_include_directories(GuitarDSPGraphCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(GuitarDSPGraphCore PUBLIC cxx_std_20)
-
 if (MSVC)
     target_compile_options(GuitarDSPGraphCore PRIVATE /W4)
     if (GUITARDSP_GRAPH_WARNINGS_AS_ERRORS)
@@ -51,3 +49,6 @@ add_test(NAME advanced_nodes COMMAND GuitarDSPAdvancedNodeTests)
 add_executable(GuitarDSPRealtimeHostTests tests/RealtimeGraphHostTests.cpp)
 target_link_libraries(GuitarDSPRealtimeHostTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME realtime_host COMMAND GuitarDSPRealtimeHostTests)
+add_executable(GuitarDSPMultiOutputTests tests/MultiOutputTests.cpp)
+target_link_libraries(GuitarDSPMultiOutputTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME multi_output COMMAND GuitarDSPMultiOutputTests)
