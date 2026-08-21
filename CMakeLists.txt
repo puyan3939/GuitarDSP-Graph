@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.24.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.25.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -112,3 +112,6 @@ add_test(NAME circuit_electromechanical COMMAND GuitarDSPCircuitElectromechanica
 add_executable(GuitarDSPMnaAccelerationTests tests/MnaAccelerationTests.cpp)
 target_link_libraries(GuitarDSPMnaAccelerationTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME mna_acceleration COMMAND GuitarDSPMnaAccelerationTests)
+add_executable(GuitarDSPActiveDeviceFidelityTests tests/ActiveDeviceFidelityTests.cpp)
+target_link_libraries(GuitarDSPActiveDeviceFidelityTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME active_device_fidelity COMMAND GuitarDSPActiveDeviceFidelityTests)
