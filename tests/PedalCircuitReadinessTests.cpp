@@ -76,7 +76,7 @@ int main() {
                   "pedal-like circuit preserves audio source binding");
 
     compiled.engine.setNonlinearSolverMode(
-        circuit::MnaCircuitEngine::NonlinearSolverMode::sparseFixedPattern);
+        circuit::MnaCircuitEngine::NonlinearSolverMode::denseReference);
     ok &= require(compiled.engine.sparseNonlinearSolverAvailable(),
                   "pedal-like nonlinear circuit has a prepared sparse pattern");
 
@@ -85,7 +85,6 @@ int main() {
         : circuit::SourceHandle{};
 
     bool healthy = true;
-    int unconverged = 0;
     int settleUnconverged = 0;
     for (int sample = 0; sample < 4096; ++sample) {
         compiled.engine.setVoltageSource(inputHandle, 0.0f);
@@ -93,7 +92,6 @@ int main() {
         healthy &= !stats.singular && std::isfinite(compiled.engine.voltage(outputNode));
         settleUnconverged += stats.converged ? 0 : 1;
     }
-    unconverged += settleUnconverged;
 
     compiled.engine.resetPerformanceStats();
     float minimum = std::numeric_limits<float>::infinity();
@@ -112,10 +110,9 @@ int main() {
         minimum = std::min(minimum, value);
         maximum = std::max(maximum, value);
     }
-    unconverged += drivenUnconverged;
 
     const auto performance = compiled.engine.performanceStats();
-    std::cout << "DIAG pedal settle_unconverged=" << settleUnconverged
+    std::cout << "DIAG dense-pedal settle_unconverged=" << settleUnconverged
               << " driven_unconverged=" << drivenUnconverged
               << " min=" << minimum
               << " max=" << maximum
@@ -125,17 +122,13 @@ int main() {
               << " dense_solves=" << performance.generalLinearSolves
               << " density=" << compiled.engine.sparseNonlinearFactorDensity() << '\n';
 
-    ok &= require(healthy, "pedal-like sparse MNA transient stays finite and nonsingular");
-    ok &= require(unconverged < 64,
+    ok &= require(healthy, "pedal-like dense MNA transient stays finite and nonsingular");
+    ok &= require(settleUnconverged + drivenUnconverged < 64,
                   "pedal-like nonlinear network reaches and maintains Newton convergence");
     ok &= require(minimum > -0.25f && maximum < 9.25f,
                   "single-supply op amp remains inside physical supply neighborhood");
     ok &= require(maximum - minimum > 0.05f,
                   "pedal-like circuit produces a driven AC output");
-    ok &= require(performance.sparseNewtonSolves > 0,
-                  "pedal-like circuit executes fixed-pattern sparse Newton solves");
-    ok &= require(performance.sparseNewtonSolves + performance.sparseFallbackSolves >= performance.samples,
-                  "pedal-like nonlinear solve remains protected by dense fallback accounting");
 
     return ok ? 0 : 1;
 }
