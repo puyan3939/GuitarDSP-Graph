@@ -1,3 +1,4 @@
+#include "guitardsp/circuit/BjtForwardActiveSubcircuit.h"
 #include "guitardsp/circuit/DiodeParasiticSubcircuit.h"
 #include "guitardsp/circuit/TS808Circuit.h"
 #include "guitardsp/hq/TS808CircuitNode.h"
@@ -62,6 +63,44 @@ int main() {
         const float large = diodeTransient(10.0e-9f);
         ok &= require(std::isfinite(small) && std::isfinite(large) && large < small * 0.5f,
                       "diode junction capacitance participates in the MNA transient");
+    }
+
+    {
+        // Isolate the exact bias arrangement used by the TS808 emitter followers.
+        // This tells us whether a failure belongs to the BJT macro itself or only
+        // appears after the op-amp/clipping network is connected.
+        circuit::MnaCircuitEngine c;
+        const auto supply = c.addNode();
+        const auto vref = c.addNode();
+        const auto base = c.addNode();
+        const auto emitter = c.addNode();
+        c.addVoltageSource(supply, circuit::ground, 9.0f);
+        c.addVoltageSource(vref, circuit::ground, 4.5f);
+        c.addResistor(vref, base, resistor(510000.0f));
+        c.addResistor(emitter, circuit::ground, resistor(10000.0f));
+
+        auto transistor = hq::component_presets::twoN3904();
+        transistor.name = "2SC1815-style diagnostic";
+        transistor.beta = 350.0f;
+        transistor.nominalVbe = 0.62f;
+        transistor.saturationVoltage = 0.15f;
+        transistor.maxCollectorVoltage = 50.0f;
+        transistor.maxCollectorCurrentAmps = 0.15f;
+        transistor.inputCapacitanceFarads = 8.0e-12f;
+        const auto q = circuit::addBjtForwardActiveSubcircuit(c, supply, base, emitter, transistor);
+
+        ok &= require(c.prepare(48000.0), "isolated TS808 BJT buffer prepares");
+        c.setNonlinearSolverMode(circuit::MnaCircuitEngine::NonlinearSolverMode::denseReference);
+        const auto stats = c.processSample(40, 1.0e-7f);
+        const float vb = c.voltage(base);
+        const float ve = c.voltage(emitter);
+        const float ib = c.currentThroughVoltageSource(q.baseCurrentSense);
+        std::cout << "DIAG isolated-bjt vb=" << vb << " ve=" << ve << " ib=" << ib
+                  << " iter=" << stats.iterations << " converged=" << stats.converged
+                  << " singular=" << stats.singular << '\n';
+        ok &= require(!stats.singular && stats.converged && std::isfinite(ve) &&
+                      ve > 2.5f && ve < 4.5f,
+                      "isolated TS808 forward-active BJT settles as emitter follower");
     }
 
     {
