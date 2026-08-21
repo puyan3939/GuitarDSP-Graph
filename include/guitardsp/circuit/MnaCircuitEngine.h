@@ -3,23 +3,36 @@
 #include "guitardsp/hq/ComponentCatalog.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <vector>
 
 namespace guitardsp::circuit {
 
 using Node = std::uint16_t;
 using SourceHandle = std::uint16_t;
+using PotHandle = std::uint16_t;
+using ControlledSourceHandle = std::uint16_t;
 inline constexpr Node ground = 0;
 
 // Realtime-oriented Modified Nodal Analysis core.
+//
 // Topology is built/prepared on the control thread. processSample() performs no
-// allocation and supports R/C/L, ideal voltage/current sources and Shockley diodes.
-// Capacitors and inductors use trapezoidal companion models. Diodes are solved by
-// Newton iteration on the complete MNA system.
+// allocation and reuses fixed matrix/vector storage. The engine is deliberately a
+// dense correctness/reference solver for small circuit islands; a later compiled
+// fixed-pattern/sparse backend can preserve the same netlist contract.
+//
+// Supported stamps:
+// - R / C / L and ideal current/voltage sources
+// - three-terminal potentiometers with editable taper/position
+// - VCCS and VCVS controlled sources
+// - Shockley diodes with series resistance
+// - engineering BJT, JFET and MOSFET nonlinear three-terminal stamps
+//
+// Capacitors and inductors use trapezoidal companion models. Nonlinear devices
+// are linearized into the complete MNA system and solved by Newton iteration.
 class MnaCircuitEngine {
 public:
     struct SolveStats {
@@ -48,6 +61,12 @@ public:
         inductors_.push_back({a, b, spec, 0.0f, 0.0f, 0});
     }
 
+    PotHandle addPotentiometer(Node high, Node wiper, Node low, hq::PotentiometerSpec spec) {
+        prepared_ = false;
+        potentiometers_.push_back({high, wiper, low, spec});
+        return static_cast<PotHandle>(potentiometers_.size() - 1U);
+    }
+
     void addCurrentSource(Node positive, Node negative, float amps) {
         prepared_ = false;
         currentSources_.push_back({positive, negative, amps});
@@ -59,9 +78,46 @@ public:
         return static_cast<SourceHandle>(voltageSources_.size() - 1U);
     }
 
+    ControlledSourceHandle addVccs(Node outputPositive,
+                                   Node outputNegative,
+                                   Node controlPositive,
+                                   Node controlNegative,
+                                   float transconductanceSiemens) {
+        prepared_ = false;
+        vccs_.push_back({outputPositive, outputNegative, controlPositive, controlNegative,
+                         transconductanceSiemens});
+        return static_cast<ControlledSourceHandle>(vccs_.size() - 1U);
+    }
+
+    ControlledSourceHandle addVcvs(Node outputPositive,
+                                   Node outputNegative,
+                                   Node controlPositive,
+                                   Node controlNegative,
+                                   float voltageGain) {
+        prepared_ = false;
+        vcvs_.push_back({outputPositive, outputNegative, controlPositive, controlNegative,
+                         voltageGain, 0});
+        return static_cast<ControlledSourceHandle>(vcvs_.size() - 1U);
+    }
+
     void addDiode(Node anode, Node cathode, hq::DiodeSpec spec) {
         prepared_ = false;
         diodes_.push_back({anode, cathode, spec});
+    }
+
+    void addBjt(Node collector, Node base, Node emitter, hq::BJTSpec spec) {
+        prepared_ = false;
+        bjts_.push_back({collector, base, emitter, spec});
+    }
+
+    void addJfet(Node drain, Node gate, Node source, hq::JFETSpec spec) {
+        prepared_ = false;
+        jfets_.push_back({drain, gate, source, spec});
+    }
+
+    void addMosfet(Node drain, Node gate, Node source, hq::MOSFETSpec spec) {
+        prepared_ = false;
+        mosfets_.push_back({drain, gate, source, spec});
     }
 
     bool setVoltageSource(SourceHandle handle, float volts) noexcept {
@@ -71,11 +127,33 @@ public:
         return true;
     }
 
+    bool setPotentiometerPosition(PotHandle handle, float position) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= potentiometers_.size()) return false;
+        potentiometers_[i].spec.position = std::clamp(position, 0.0f, 1.0f);
+        return true;
+    }
+
+    bool setVccsTransconductance(ControlledSourceHandle handle, float siemens) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= vccs_.size()) return false;
+        vccs_[i].transconductance = siemens;
+        return true;
+    }
+
+    bool setVcvsGain(ControlledSourceHandle handle, float gain) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= vcvs_.size()) return false;
+        vcvs_[i].gain = gain;
+        return true;
+    }
+
     bool prepare(double sampleRate) {
         sampleRate_ = std::max(1.0, sampleRate);
         const std::size_t nodeUnknowns = nodeCount_;
         std::size_t branch = nodeUnknowns;
         for (auto& source : voltageSources_) source.branchIndex = branch++;
+        for (auto& source : vcvs_) source.branchIndex = branch++;
         for (auto& inductor : inductors_) inductor.branchIndex = branch++;
         dimension_ = branch;
         if (dimension_ == 0U) return false;
@@ -105,7 +183,7 @@ public:
         lastStats_ = {};
     }
 
-    SolveStats processSample(int maximumNewtonIterations = 10, float tolerance = 1.0e-6f) noexcept {
+    SolveStats processSample(int maximumNewtonIterations = 12, float tolerance = 1.0e-6f) noexcept {
         SolveStats stats{};
         if (!prepared_) {
             stats.converged = false;
@@ -114,10 +192,11 @@ public:
             return stats;
         }
 
-        maximumNewtonIterations = std::clamp(maximumNewtonIterations, 1, 32);
+        maximumNewtonIterations = std::clamp(maximumNewtonIterations, 1, 40);
         tolerance = std::max(1.0e-9f, tolerance);
         candidate_ = solution_;
-        stats.converged = diodes_.empty();
+        const bool nonlinear = hasNonlinearDevices();
+        stats.converged = !nonlinear;
 
         for (int iteration = 0; iteration < maximumNewtonIterations; ++iteration) {
             assemble(candidate_);
@@ -132,14 +211,28 @@ public:
             float maxDelta = 0.0f;
             for (std::size_t i = 0; i < dimension_; ++i)
                 maxDelta = std::max(maxDelta, std::abs(solution_[i] - candidate_[i]));
-            candidate_ = solution_;
+
+            // Mild damping substantially improves active-device startup without
+            // changing the converged solution. Linear circuits still finish in one pass.
+            if (nonlinear && iteration < 3) {
+                constexpr float damping = 0.65f;
+                for (std::size_t i = 0; i < dimension_; ++i)
+                    candidate_[i] += damping * (solution_[i] - candidate_[i]);
+            } else {
+                candidate_ = solution_;
+            }
+
             stats.iterations = iteration + 1;
-            if (diodes_.empty() || maxDelta <= tolerance) {
+            if (!nonlinear || maxDelta <= tolerance) {
                 stats.converged = true;
+                candidate_ = solution_;
                 break;
             }
         }
 
+        // Keep the published state equal to the latest Newton candidate when the
+        // iteration budget is exhausted. Callers can inspect converged=false.
+        if (!stats.converged) solution_ = candidate_;
         updateDynamicState();
         lastStats_ = stats;
         return stats;
@@ -181,9 +274,25 @@ private:
         float previousCurrent = 0.0f;
         std::size_t branchIndex = 0;
     };
+    struct Potentiometer { Node high{}, wiper{}, low{}; hq::PotentiometerSpec spec{}; };
     struct CurrentSource { Node positive{}, negative{}; float amps = 0.0f; };
     struct VoltageSource { Node positive{}, negative{}; float volts = 0.0f; std::size_t branchIndex = 0; };
+    struct Vccs {
+        Node outputPositive{}, outputNegative{}, controlPositive{}, controlNegative{};
+        float transconductance = 0.0f;
+    };
+    struct Vcvs {
+        Node outputPositive{}, outputNegative{}, controlPositive{}, controlNegative{};
+        float gain = 1.0f;
+        std::size_t branchIndex = 0;
+    };
     struct Diode { Node anode{}, cathode{}; hq::DiodeSpec spec{}; };
+    struct Bjt { Node collector{}, base{}, emitter{}; hq::BJTSpec spec{}; };
+    struct Jfet { Node drain{}, gate{}, source{}; hq::JFETSpec spec{}; };
+    struct Mosfet { Node drain{}, gate{}, source{}; hq::MOSFETSpec spec{}; };
+
+    struct JacobianTerm { Node node{}; float derivative = 0.0f; };
+    struct DiodeLinearization { float current = 0.0f; float conductance = 0.0f; };
 
     static std::size_t nodeIndex(Node node) noexcept {
         return static_cast<std::size_t>(node - 1U);
@@ -193,6 +302,10 @@ private:
         if (node == ground) return 0.0f;
         const auto i = nodeIndex(node);
         return i < x.size() ? x[i] : 0.0f;
+    }
+
+    bool hasNonlinearDevices() const noexcept {
+        return !diodes_.empty() || !bjts_.empty() || !jfets_.empty() || !mosfets_.empty();
     }
 
     void addMatrix(std::size_t row, std::size_t col, float value) noexcept {
@@ -226,7 +339,63 @@ private:
         rhs_[branchIndex] += value;
     }
 
-    struct DiodeLinearization { float current = 0.0f; float conductance = 0.0f; };
+    void stampVccs(Node outputPositive,
+                   Node outputNegative,
+                   Node controlPositive,
+                   Node controlNegative,
+                   float transconductance) noexcept {
+        if (outputPositive != ground) {
+            if (controlPositive != ground)
+                addMatrix(nodeIndex(outputPositive), nodeIndex(controlPositive), transconductance);
+            if (controlNegative != ground)
+                addMatrix(nodeIndex(outputPositive), nodeIndex(controlNegative), -transconductance);
+        }
+        if (outputNegative != ground) {
+            if (controlPositive != ground)
+                addMatrix(nodeIndex(outputNegative), nodeIndex(controlPositive), -transconductance);
+            if (controlNegative != ground)
+                addMatrix(nodeIndex(outputNegative), nodeIndex(controlNegative), transconductance);
+        }
+    }
+
+    void stampVcvs(const Vcvs& source) noexcept {
+        const auto branch = source.branchIndex;
+        if (source.outputPositive != ground) {
+            addMatrix(nodeIndex(source.outputPositive), branch, 1.0f);
+            addMatrix(branch, nodeIndex(source.outputPositive), 1.0f);
+        }
+        if (source.outputNegative != ground) {
+            addMatrix(nodeIndex(source.outputNegative), branch, -1.0f);
+            addMatrix(branch, nodeIndex(source.outputNegative), -1.0f);
+        }
+        if (source.controlPositive != ground)
+            addMatrix(branch, nodeIndex(source.controlPositive), -source.gain);
+        if (source.controlNegative != ground)
+            addMatrix(branch, nodeIndex(source.controlNegative), source.gain);
+    }
+
+    template <std::size_t N>
+    void stampLinearizedCurrent(Node positive,
+                                Node negative,
+                                float currentAtGuess,
+                                const std::vector<float>& guess,
+                                const std::array<JacobianTerm, N>& jacobian) noexcept {
+        float equivalentCurrent = currentAtGuess;
+        for (const auto& term : jacobian)
+            equivalentCurrent -= term.derivative * nodeVoltage(guess, term.node);
+
+        if (positive != ground) {
+            const auto row = nodeIndex(positive);
+            for (const auto& term : jacobian)
+                if (term.node != ground) addMatrix(row, nodeIndex(term.node), term.derivative);
+        }
+        if (negative != ground) {
+            const auto row = nodeIndex(negative);
+            for (const auto& term : jacobian)
+                if (term.node != ground) addMatrix(row, nodeIndex(term.node), -term.derivative);
+        }
+        stampCurrentSource(positive, negative, equivalentCurrent);
+    }
 
     static DiodeLinearization linearizeDiode(const hq::DiodeSpec& spec, float terminalVoltage) noexcept {
         const auto junction = spec.toModel();
@@ -246,6 +415,133 @@ private:
         return {current, gj / std::max(1.0e-12f, 1.0f + rs * gj)};
     }
 
+    void stampBjt(const Bjt& device, const std::vector<float>& guess) noexcept {
+        const float polarity = device.spec.polarity == hq::TransistorPolarity::pnp ? -1.0f : 1.0f;
+        const float vc = nodeVoltage(guess, device.collector);
+        const float vb = nodeVoltage(guess, device.base);
+        const float ve = nodeVoltage(guess, device.emitter);
+        const float vbe = polarity * (vb - ve);
+        const float vce = polarity * (vc - ve);
+
+        const float vt = std::max(1.0e-4f, device.spec.thermalVoltage);
+        constexpr float saturationCurrent = 1.0e-14f;
+        const float exponent = std::clamp(vbe / vt, -40.0f, 28.0f);
+        const float exponential = std::exp(exponent);
+        float idealCollector = std::max(0.0f, saturationCurrent * (exponential - 1.0f));
+        float dIdealDvbe = idealCollector > 0.0f ? saturationCurrent * exponential / vt : 0.0f;
+
+        const float vSat = std::max(0.02f, device.spec.saturationVoltage);
+        const float positiveVce = std::max(0.0f, vce);
+        const float saturationFactor = 1.0f - std::exp(-positiveVce / vSat);
+        const float dSaturationDvce = vce > 0.0f ? std::exp(-positiveVce / vSat) / vSat : 0.0f;
+
+        const float currentLimit = std::max(1.0e-6f, device.spec.maxCollectorCurrentAmps);
+        float collectorMagnitude = idealCollector * saturationFactor;
+        float dCollectorDvbe = dIdealDvbe * saturationFactor;
+        float dCollectorDvce = idealCollector * dSaturationDvce;
+        if (collectorMagnitude > currentLimit) {
+            collectorMagnitude = currentLimit;
+            dCollectorDvbe = 0.0f;
+            dCollectorDvce = 0.0f;
+        }
+
+        const float collectorCurrent = polarity * collectorMagnitude;
+        const std::array<JacobianTerm, 3> collectorJac{{
+            {device.collector, dCollectorDvce},
+            {device.base, dCollectorDvbe},
+            {device.emitter, -(dCollectorDvce + dCollectorDvbe)}
+        }};
+        stampLinearizedCurrent(device.collector, device.emitter,
+                               collectorCurrent, guess, collectorJac);
+
+        const float beta = std::max(1.0f, device.spec.beta);
+        const float baseCurrent = collectorCurrent / beta;
+        const std::array<JacobianTerm, 3> baseJac{{
+            {device.collector, dCollectorDvce / beta},
+            {device.base, dCollectorDvbe / beta},
+            {device.emitter, -(dCollectorDvce + dCollectorDvbe) / beta}
+        }};
+        stampLinearizedCurrent(device.base, device.emitter, baseCurrent, guess, baseJac);
+    }
+
+    void stampJfet(const Jfet& device, const std::vector<float>& guess) noexcept {
+        const float polarity = device.spec.polarity == hq::TransistorPolarity::pChannel ? -1.0f : 1.0f;
+        const float vd = nodeVoltage(guess, device.drain);
+        const float vg = nodeVoltage(guess, device.gate);
+        const float vs = nodeVoltage(guess, device.source);
+        const float vgs = polarity * (vg - vs);
+        const float vds = polarity * (vd - vs);
+
+        const float vp = std::min(-1.0e-3f, device.spec.pinchOffVoltage);
+        float channel = 0.0f;
+        float dChannelDvgs = 0.0f;
+        if (vgs > vp) {
+            const float ratio = 1.0f - vgs / vp;
+            channel = std::max(0.0f, device.spec.idssAmps) * ratio * ratio;
+            dChannelDvgs = -2.0f * std::max(0.0f, device.spec.idssAmps) * ratio / vp;
+        }
+
+        constexpr float kneeVolts = 0.20f;
+        const float normalizedVds = vds / kneeVolts;
+        const float direction = std::tanh(normalizedVds);
+        const float dDirectionDvds = (1.0f - direction * direction) / kneeVolts;
+        const float modulation = 1.0f + std::max(0.0f, device.spec.lambda) * std::abs(vds);
+        const float dModulationDvds = vds > 0.0f ? std::max(0.0f, device.spec.lambda)
+                                     : vds < 0.0f ? -std::max(0.0f, device.spec.lambda)
+                                                  : 0.0f;
+
+        const float effectiveCurrent = channel * direction * modulation;
+        const float dIdDvgs = dChannelDvgs * direction * modulation;
+        const float dIdDvds = channel * (dDirectionDvds * modulation + direction * dModulationDvds);
+        const float current = polarity * effectiveCurrent;
+
+        const std::array<JacobianTerm, 3> jac{{
+            {device.drain, dIdDvds},
+            {device.gate, dIdDvgs},
+            {device.source, -(dIdDvds + dIdDvgs)}
+        }};
+        stampLinearizedCurrent(device.drain, device.source, current, guess, jac);
+    }
+
+    void stampMosfet(const Mosfet& device, const std::vector<float>& guess) noexcept {
+        const float polarity = device.spec.polarity == hq::TransistorPolarity::pChannel ? -1.0f : 1.0f;
+        const float vd = nodeVoltage(guess, device.drain);
+        const float vg = nodeVoltage(guess, device.gate);
+        const float vs = nodeVoltage(guess, device.source);
+        const float vgs = polarity * (vg - vs);
+        const float vds = polarity * (vd - vs);
+        const float threshold = std::max(0.0f, device.spec.thresholdVoltage);
+        const float overdrive = vgs - threshold;
+        const float k = std::max(0.0f, device.spec.transconductance);
+        const float lambda = std::max(0.0f, device.spec.lambda);
+
+        float effectiveCurrent = 0.0f;
+        float dIdDvgs = 0.0f;
+        float dIdDvds = 0.0f;
+        if (overdrive > 0.0f && vds > 0.0f) {
+            const float modulation = 1.0f + lambda * vds;
+            if (vds < overdrive) {
+                const float base = k * (overdrive * vds - 0.5f * vds * vds);
+                effectiveCurrent = base * modulation;
+                dIdDvgs = k * vds * modulation;
+                dIdDvds = k * (overdrive - vds) * modulation + base * lambda;
+            } else {
+                const float base = 0.5f * k * overdrive * overdrive;
+                effectiveCurrent = base * modulation;
+                dIdDvgs = k * overdrive * modulation;
+                dIdDvds = base * lambda;
+            }
+        }
+
+        const float current = polarity * effectiveCurrent;
+        const std::array<JacobianTerm, 3> jac{{
+            {device.drain, dIdDvds},
+            {device.gate, dIdDvgs},
+            {device.source, -(dIdDvds + dIdDvgs)}
+        }};
+        stampLinearizedCurrent(device.drain, device.source, current, guess, jac);
+    }
+
     void assemble(const std::vector<float>& guess) noexcept {
         std::fill(matrix_.begin(), matrix_.end(), 0.0f);
         std::fill(rhs_.begin(), rhs_.end(), 0.0f);
@@ -253,6 +549,16 @@ private:
         for (const auto& r : resistors_) {
             const float resistance = std::max(1.0e-6f, r.spec.resistanceOhms);
             stampConductance(r.a, r.b, 1.0f / resistance);
+        }
+
+        for (const auto& p : potentiometers_) {
+            constexpr float contactFloorOhms = 1.0e-3f;
+            const float total = std::max(2.0f * contactFloorOhms, p.spec.totalResistanceOhms);
+            const float position = std::clamp(p.spec.normalizedElectricalPosition(), 0.0f, 1.0f);
+            const float lowResistance = std::max(contactFloorOhms, total * position);
+            const float highResistance = std::max(contactFloorOhms, total * (1.0f - position));
+            stampConductance(p.high, p.wiper, 1.0f / highResistance);
+            stampConductance(p.wiper, p.low, 1.0f / lowResistance);
         }
 
         const float dt = 1.0f / static_cast<float>(sampleRate_);
@@ -265,10 +571,8 @@ private:
             stampCurrentSource(c.a, c.b, historyCurrent);
             if (c.spec.leakageResistanceOhms > 0.0f && std::isfinite(c.spec.leakageResistanceOhms))
                 stampConductance(c.a, c.b, 1.0f / std::max(1.0f, c.spec.leakageResistanceOhms));
-            if (c.spec.esrOhms > 0.0f) {
-                // ESR is deliberately not folded into this two-terminal companion yet;
-                // model it as an explicit resistor when topology accuracy matters.
-            }
+            // ESR is intentionally left explicit in the netlist for now. Folding
+            // ESR into a two-terminal companion would change the state contract.
         }
 
         for (const auto& source : currentSources_)
@@ -276,6 +580,14 @@ private:
 
         for (const auto& source : voltageSources_)
             stampBranch(source.positive, source.negative, source.branchIndex, 0.0f, source.volts);
+
+        for (const auto& source : vccs_)
+            stampVccs(source.outputPositive, source.outputNegative,
+                      source.controlPositive, source.controlNegative,
+                      source.transconductance);
+
+        for (const auto& source : vcvs_)
+            stampVcvs(source);
 
         for (const auto& l : inductors_) {
             const float inductance = std::max(1.0e-12f, l.spec.inductanceHenries);
@@ -292,6 +604,10 @@ private:
             stampConductance(d.anode, d.cathode, g);
             stampCurrentSource(d.anode, d.cathode, iEq);
         }
+
+        for (const auto& bjt : bjts_) stampBjt(bjt, guess);
+        for (const auto& jfet : jfets_) stampJfet(jfet, guess);
+        for (const auto& mosfet : mosfets_) stampMosfet(mosfet, guess);
     }
 
     bool solveLinearSystem() noexcept {
@@ -363,9 +679,15 @@ private:
     std::vector<Resistor> resistors_;
     std::vector<Capacitor> capacitors_;
     std::vector<Inductor> inductors_;
+    std::vector<Potentiometer> potentiometers_;
     std::vector<CurrentSource> currentSources_;
     std::vector<VoltageSource> voltageSources_;
+    std::vector<Vccs> vccs_;
+    std::vector<Vcvs> vcvs_;
     std::vector<Diode> diodes_;
+    std::vector<Bjt> bjts_;
+    std::vector<Jfet> jfets_;
+    std::vector<Mosfet> mosfets_;
 
     std::vector<float> matrix_;
     std::vector<float> rhs_;
