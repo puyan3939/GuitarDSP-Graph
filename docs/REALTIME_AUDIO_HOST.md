@@ -78,10 +78,21 @@ The executable is generated in the JUCE product output directory under `build-ap
 
 ## First-listen procedure
 
-For hardware bring-up, start with output trim at -12 dB or lower, mute downstream amplification while selecting the audio device, select one input and the intended stereo/mono outputs, then unmute at low monitor volume. Start in `High` or `Live` quality to confirm stable streaming, then move to `Studio` and watch callback/dropout behaviour on the actual machine.
+The Phase 5 host starts muted in Safe dry monitor with -12 dB output trim. Select
+the interface, inspect both physical input meters, confirm the automatically
+selected guitar jack, and then unmute at low monitor volume. Disable Safe dry
+monitor after direct monitoring is verified. Start in `High` or `Live` quality
+to confirm stable streaming, then move to `Studio` while watching callback peak,
+deadline misses and driver XRUNs on the actual machine.
 
 Load a measured cabinet IR before making cabinet-fidelity judgments. The synthetic reference fallback exists only so the full signal path can be tested immediately.
 
+See `HARDWARE_BRINGUP.md` for input-routing policy, saved device state, realtime
+CPU/XRUN telemetry, latency accounting and atomic live pedal/amplifier controls.
+
 ## What is deliberately not done yet
 
-The first host does not mutate circuit topology from the audio thread and does not perform live in-place IR replacement. It also does not yet expose every pedal and amp component parameter in the GUI. Those controls should be added through bounded control-rate parameter/update paths after real-device CPU and dropout measurements are collected.
+The host does not mutate circuit topology from the audio thread and does not
+perform live in-place IR replacement. The main pedal and amplifier tone controls
+use atomic parameters updated at a bounded UI/control rate, but arbitrary
+component-by-component Circuit Mode editing remains future work.

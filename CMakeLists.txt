@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.31.0 LANGUAGES C CXX)
+project(GuitarDSPGraph VERSION 0.32.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -183,3 +183,6 @@ add_test(NAME live_rig COMMAND GuitarDSPLiveRigTests)
 add_executable(GuitarDSPRealtimeAudioEngineTests tests/RealtimeAudioEngineTests.cpp)
 target_link_libraries(GuitarDSPRealtimeAudioEngineTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME realtime_audio_engine COMMAND GuitarDSPRealtimeAudioEngineTests)
+add_executable(GuitarDSPHardwareBringupTests tests/HardwareBringupTests.cpp)
+target_link_libraries(GuitarDSPHardwareBringupTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hardware_bringup COMMAND GuitarDSPHardwareBringupTests)
