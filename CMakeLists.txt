@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(GUITARDSP_GRAPH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(GUITARDSP_BUILD_BENCHMARKS "Build local benchmark executables" OFF)
 
 add_library(GuitarDSPGraphCore
     src/graph/Graph.cpp
@@ -25,6 +26,11 @@ else()
     if (GUITARDSP_GRAPH_WARNINGS_AS_ERRORS)
         target_compile_options(GuitarDSPGraphCore PRIVATE -Werror)
     endif()
+endif()
+
+if (GUITARDSP_BUILD_BENCHMARKS)
+    add_executable(GuitarDSPMnaBenchmark bench/MnaBenchmark.cpp)
+    target_link_libraries(GuitarDSPMnaBenchmark PRIVATE GuitarDSPGraphCore)
 endif()
 
 enable_testing()
