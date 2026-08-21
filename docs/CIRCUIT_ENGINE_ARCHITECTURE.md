@@ -24,6 +24,7 @@ The engine currently supports:
 - first-generation MOSFET nonlinear three-terminal stamps with replaceable device specs
 - a finite-open-loop-gain op-amp macro stamp with replaceable `OpAmpSpec`
 - a nonlinear plate/grid/cathode triode stamp using the shared 12AX7/12AT7 model family
+- a transformer subcircuit compiled from leakage/magnetizing inductors, winding resistance, VCVS/CCCS ratio constraints, secondary current sensing and inter-winding capacitance
 - arbitrary node graphs with ground node 0
 - partial-pivot Gaussian elimination
 - convergence/singular statistics for analyzer and test reporting
@@ -40,12 +41,15 @@ The current BJT/JFET/MOSFET/op-amp/triode implementations are engineering device
 - MOSFET: square-law triode/saturation regions with channel-length modulation.
 - Op-amp: algebraic finite open-loop gain and input offset in the common MNA solve. `gainBandwidthHz`, slew rate, rail headroom, output current limit and noise are catalogued but not yet enforced by this MNA macro.
 - Triode: the shared nonlinear plate-current model is stamped directly as a plate-to-cathode current controlled by grid-to-cathode and plate-to-cathode voltage. Numerical derivatives form the Newton Jacobian. Grid current and inter-electrode capacitances are not yet modeled.
+- Transformer: the current subcircuit models turns ratio, magnetizing inductance, referred leakage, primary/secondary winding resistance and one inter-winding capacitance. Core saturation/hysteresis metadata is not yet enforced.
 
 They are sufficient to build and validate active circuit topologies in the common MNA system. Named hardware claims still require better parameter provenance and, where justified, higher-order models or measured device fitting.
 
 ## Prepared component handles
 
-R/C/L, potentiometers, diodes, BJT/JFET/MOSFET, op-amps and triodes return stable handles when added to a topology. A handle allows the numerical component spec to be changed without changing node connectivity or resizing the MNA system. This is the basis for circuit-level editing such as:
+R/C/L, potentiometers, diodes, BJT/JFET/MOSFET, op-amps and triodes return stable handles when added to a topology. A handle allows the numerical component spec to be changed without changing node connectivity or resizing the MNA system. Transformer subcircuits expose the handles of their internal leakage, magnetizing, ratio and parasitic elements so a `TransformerSpec` can also be reapplied without rebuilding topology.
+
+This is the basis for circuit-level editing such as:
 
 ```text
 C8: 47 nF -> 22 nF
@@ -54,11 +58,34 @@ Q1: 2N3904-style -> 2N5088-style
 D1: 1N4148-style -> 1N34A-style
 IC1: JRC4558-style -> edited op-amp spec
 V1: 12AX7 -> 12AT7
+T1 turns ratio: 10:1 -> 5:1
 ```
 
 `CircuitUpdateQueue` is the realtime handoff for those edits. It is a fixed-capacity SPSC queue: the control/UI thread writes commands, and the audio thread drains them at a block boundary before processing samples. The queue stores scalar edits and complete component specs without growing or allocating storage. Overflow is rejected rather than allocating or blocking.
 
 Direct setter calls still do not claim lock-free concurrent mutation. The audio thread reads component structs while solving, so callers should either use `CircuitUpdateQueue`, otherwise serialize direct writes at a block boundary, or submit an inactive/prepared circuit and swap it through the graph host.
+
+## Stable-ID schematic/netlist layer
+
+`CircuitNetlist` is the control-thread schematic layer above MNA. User-facing node IDs and component IDs are stable and separate from solver node indexes/branch indexes. It can currently describe and compile R/C/L, pots, independent voltage sources, all four controlled-source families, diode/BJT/JFET/MOSFET, op-amp, triode and transformer definitions.
+
+Compilation resolves stable IDs, expands transformer subcircuits, creates the MNA topology, assigns component-ID-to-handle bindings and prepares the solver. Current-controlled sources are resolved in a later compile pass so they can refer to an independent voltage source by stable component ID. Invalid node/control references are rejected before the compiled circuit is used.
+
+This layer is intentionally not JSON yet. It is the in-memory contract a future Circuit Mode UI, schematic importer and project serialization format can target without exposing MNA's internal matrix layout.
+
+```text
+Circuit Mode / schematic UI
+          |
+     CircuitNetlist
+(stable component + node IDs)
+          |
+       compile
+          |
+   CompiledCircuit
+(component ID -> handle binding)
+          |
+    MnaCircuitEngine
+```
 
 ## Why MNA first
 
@@ -89,20 +116,20 @@ The audio callback must not:
 - acquire locks
 - race with direct component-spec writes from another thread
 
-Topology-preserving edits should arrive through the fixed-capacity block-boundary update queue. Topology edits require compiling a new circuit instance and swapping it through the graph host.
+Topology-preserving edits should arrive through the fixed-capacity block-boundary update queue. Topology edits require compiling a new `CircuitNetlist` into a new circuit instance and swapping it through the graph host.
 
 ## Next device/engine work
 
 The next high-value work is:
 
-1. transformer/coupled-inductor stamp including winding resistance and leakage, followed later by core saturation and parasitic capacitance
-2. op-amp dominant-pole/GBW behavior, output impedance, current limiting, rail limiting and slew-rate dynamics
-3. triode grid-current onset and inter-electrode capacitances
+1. op-amp dominant-pole/GBW behavior, output impedance, current limiting, rail limiting and slew-rate dynamics
+2. triode grid-current onset and inter-electrode capacitances
+3. nonlinear transformer magnetizing branch for saturation/hysteresis plus more detailed parasitics
 4. switches and relays for pedal bypass/channel topology compilation
 5. BJT junction capacitances and a stronger Ebers-Moll/Gummel-Poon-inspired model
 6. MOSFET body diode/capacitances and JFET gate-junction behavior
 7. typed branch-current probes beyond independent voltage sources where a circuit needs them
-8. netlist/subcircuit descriptions that can compile schematic-like component graphs into prepared MNA islands
+8. serialization/import around `CircuitNetlist` once the in-memory component contract stops moving rapidly
 
 ## Numerical roadmap
 
