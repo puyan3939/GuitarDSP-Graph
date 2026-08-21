@@ -1,7 +1,10 @@
 #pragma once
 
+#include "DynamicOpAmpSubcircuit.h"
 #include "MnaCircuitEngine.h"
+#include "SwitchRelaySubcircuit.h"
 #include "TransformerSubcircuit.h"
+#include "TriodeParasiticSubcircuit.h"
 
 #include <cstdint>
 #include <string>
@@ -32,8 +35,12 @@ enum class CircuitComponentKind : std::uint8_t {
     jfet,
     mosfet,
     opAmp,
+    dynamicOpAmp,
     triode,
-    transformer
+    triodeParasitic,
+    transformer,
+    switchComponent,
+    relay
 };
 
 struct CircuitComponentBinding {
@@ -55,8 +62,26 @@ struct BjtDefinition { CircuitComponentId id{}; CircuitNodeId collector{}, base{
 struct JfetDefinition { CircuitComponentId id{}; CircuitNodeId drain{}, gate{}, source{}; hq::JFETSpec spec{}; };
 struct MosfetDefinition { CircuitComponentId id{}; CircuitNodeId drain{}, gate{}, source{}; hq::MOSFETSpec spec{}; };
 struct OpAmpDefinition { CircuitComponentId id{}; CircuitNodeId output{}, nonInverting{}, inverting{}, reference{}; hq::OpAmpSpec spec{}; };
+struct DynamicOpAmpDefinition {
+    CircuitComponentId id{};
+    CircuitNodeId output{}, nonInverting{}, inverting{}, positiveRail{}, negativeRail{}, reference{};
+    hq::OpAmpSpec spec{};
+};
 struct TriodeDefinition { CircuitComponentId id{}; CircuitNodeId plate{}, grid{}, cathode{}; hq::TriodeSpec spec{}; };
+struct TriodeParasiticDefinition { CircuitComponentId id{}; CircuitNodeId plate{}, grid{}, cathode{}; hq::TriodeSpec spec{}; };
 struct TransformerDefinition { CircuitComponentId id{}; CircuitNodeId primaryP{}, primaryN{}, secondaryP{}, secondaryN{}; hq::TransformerSpec spec{}; };
+struct SwitchDefinition {
+    CircuitComponentId id{};
+    CircuitNodeId common1{}, throwA1{}, throwB1{}, common2{}, throwA2{}, throwB2{};
+    hq::SwitchSpec spec{};
+    bool thrown = false;
+};
+struct RelayDefinition {
+    CircuitComponentId id{};
+    CircuitNodeId coilPositive{}, coilNegative{};
+    CircuitNodeId common1{}, throwA1{}, throwB1{}, common2{}, throwA2{}, throwB2{};
+    hq::RelaySpec spec{};
+};
 
 using CircuitComponentDefinition = std::variant<
     ResistorDefinition,
@@ -73,14 +98,23 @@ using CircuitComponentDefinition = std::variant<
     JfetDefinition,
     MosfetDefinition,
     OpAmpDefinition,
+    DynamicOpAmpDefinition,
     TriodeDefinition,
-    TransformerDefinition>;
+    TriodeParasiticDefinition,
+    TransformerDefinition,
+    SwitchDefinition,
+    RelayDefinition>;
 
 struct CompiledCircuit {
     MnaCircuitEngine engine;
     std::unordered_map<CircuitNodeId, Node> nodes;
     std::unordered_map<CircuitComponentId, CircuitComponentBinding> bindings;
+    std::unordered_map<CircuitComponentId, DynamicOpAmpSubcircuit> dynamicOpAmps;
+    std::unordered_map<CircuitComponentId, TriodeParasiticSubcircuit> triodeParasitics;
     std::unordered_map<CircuitComponentId, TransformerSubcircuit> transformers;
+    std::unordered_map<CircuitComponentId, SwitchSubcircuit> switches;
+    std::unordered_map<CircuitComponentId, RelaySubcircuit> relays;
+    std::unordered_map<CircuitComponentId, RelayRuntimeState> relayStates;
 
     bool findNode(CircuitNodeId id, Node& node) const noexcept {
         if (id == circuitGround) {
@@ -101,6 +135,21 @@ struct CompiledCircuit {
     const TransformerSubcircuit* transformer(CircuitComponentId id) const noexcept {
         const auto it = transformers.find(id);
         return it == transformers.end() ? nullptr : &it->second;
+    }
+
+    SwitchSubcircuit* switchSubcircuit(CircuitComponentId id) noexcept {
+        const auto it = switches.find(id);
+        return it == switches.end() ? nullptr : &it->second;
+    }
+
+    RelaySubcircuit* relay(CircuitComponentId id) noexcept {
+        const auto it = relays.find(id);
+        return it == relays.end() ? nullptr : &it->second;
+    }
+
+    RelayRuntimeState* relayState(CircuitComponentId id) noexcept {
+        const auto it = relayStates.find(id);
+        return it == relayStates.end() ? nullptr : &it->second;
     }
 };
 
@@ -168,15 +217,42 @@ public:
         return addDefinition(OpAmpDefinition{nextComponentId_, output, nonInverting, inverting,
                                              reference, spec});
     }
+    CircuitComponentId addDynamicOpAmp(CircuitNodeId output, CircuitNodeId nonInverting,
+                                       CircuitNodeId inverting, CircuitNodeId positiveRail,
+                                       CircuitNodeId negativeRail, CircuitNodeId reference,
+                                       hq::OpAmpSpec spec) {
+        return addDefinition(DynamicOpAmpDefinition{nextComponentId_, output, nonInverting, inverting,
+                                                    positiveRail, negativeRail, reference, spec});
+    }
     CircuitComponentId addTriode(CircuitNodeId plate, CircuitNodeId grid, CircuitNodeId cathode,
                                  hq::TriodeSpec spec) {
         return addDefinition(TriodeDefinition{nextComponentId_, plate, grid, cathode, spec});
+    }
+    CircuitComponentId addTriodeParasitic(CircuitNodeId plate, CircuitNodeId grid,
+                                          CircuitNodeId cathode, hq::TriodeSpec spec) {
+        return addDefinition(TriodeParasiticDefinition{nextComponentId_, plate, grid, cathode, spec});
     }
     CircuitComponentId addTransformer(CircuitNodeId primaryP, CircuitNodeId primaryN,
                                       CircuitNodeId secondaryP, CircuitNodeId secondaryN,
                                       hq::TransformerSpec spec) {
         return addDefinition(TransformerDefinition{nextComponentId_, primaryP, primaryN,
                                                     secondaryP, secondaryN, spec});
+    }
+    CircuitComponentId addSwitch(CircuitNodeId common1, CircuitNodeId throwA1,
+                                 CircuitNodeId throwB1, CircuitNodeId common2,
+                                 CircuitNodeId throwA2, CircuitNodeId throwB2,
+                                 hq::SwitchSpec spec, bool thrown = false) {
+        return addDefinition(SwitchDefinition{nextComponentId_, common1, throwA1, throwB1,
+                                              common2, throwA2, throwB2, spec, thrown});
+    }
+    CircuitComponentId addRelay(CircuitNodeId coilPositive, CircuitNodeId coilNegative,
+                                CircuitNodeId common1, CircuitNodeId throwA1,
+                                CircuitNodeId throwB1, CircuitNodeId common2,
+                                CircuitNodeId throwA2, CircuitNodeId throwB2,
+                                hq::RelaySpec spec) {
+        return addDefinition(RelayDefinition{nextComponentId_, coilPositive, coilNegative,
+                                             common1, throwA1, throwB1,
+                                             common2, throwA2, throwB2, spec});
     }
 
     const std::vector<CircuitComponentDefinition>& components() const noexcept { return components_; }
@@ -214,7 +290,7 @@ public:
             bool componentOk = true;
             std::visit([&](const auto& definition) {
                 using T = std::decay_t<decltype(definition)>;
-                Node a{}, b{}, c{}, d{};
+                Node a{}, b{}, c{}, d{}, e{}, f{}, g{}, h{};
                 if constexpr (std::is_same_v<T, ResistorDefinition>) {
                     componentOk = resolve(definition.a, a) && resolve(definition.b, b);
                     if (componentOk) built.bindings.emplace(definition.id,
@@ -277,12 +353,31 @@ public:
                     if (componentOk) built.bindings.emplace(definition.id,
                         CircuitComponentBinding{CircuitComponentKind::opAmp,
                             built.engine.addOpAmp(a, b, c, d, definition.spec)});
+                } else if constexpr (std::is_same_v<T, DynamicOpAmpDefinition>) {
+                    componentOk = resolve(definition.output, a) && resolve(definition.nonInverting, b) &&
+                                  resolve(definition.inverting, c) && resolve(definition.positiveRail, d) &&
+                                  resolve(definition.negativeRail, e) && resolve(definition.reference, f);
+                    if (componentOk) {
+                        built.dynamicOpAmps.emplace(definition.id,
+                            addDynamicOpAmpSubcircuit(built.engine, a, b, c, d, e, f, definition.spec));
+                        built.bindings.emplace(definition.id,
+                            CircuitComponentBinding{CircuitComponentKind::dynamicOpAmp, 0});
+                    }
                 } else if constexpr (std::is_same_v<T, TriodeDefinition>) {
                     componentOk = resolve(definition.plate, a) && resolve(definition.grid, b) &&
                                   resolve(definition.cathode, c);
                     if (componentOk) built.bindings.emplace(definition.id,
                         CircuitComponentBinding{CircuitComponentKind::triode,
                             built.engine.addTriode(a, b, c, definition.spec)});
+                } else if constexpr (std::is_same_v<T, TriodeParasiticDefinition>) {
+                    componentOk = resolve(definition.plate, a) && resolve(definition.grid, b) &&
+                                  resolve(definition.cathode, c);
+                    if (componentOk) {
+                        built.triodeParasitics.emplace(definition.id,
+                            addTriodeParasiticSubcircuit(built.engine, a, b, c, definition.spec));
+                        built.bindings.emplace(definition.id,
+                            CircuitComponentBinding{CircuitComponentKind::triodeParasitic, 0});
+                    }
                 } else if constexpr (std::is_same_v<T, TransformerDefinition>) {
                     componentOk = resolve(definition.primaryP, a) && resolve(definition.primaryN, b) &&
                                   resolve(definition.secondaryP, c) && resolve(definition.secondaryN, d);
@@ -291,6 +386,29 @@ public:
                             addTransformerSubcircuit(built.engine, a, b, c, d, definition.spec));
                         built.bindings.emplace(definition.id,
                             CircuitComponentBinding{CircuitComponentKind::transformer, 0});
+                    }
+                } else if constexpr (std::is_same_v<T, SwitchDefinition>) {
+                    componentOk = resolve(definition.common1, a) && resolve(definition.throwA1, b) &&
+                                  resolve(definition.throwB1, c) && resolve(definition.common2, d) &&
+                                  resolve(definition.throwA2, e) && resolve(definition.throwB2, f);
+                    if (componentOk) {
+                        built.switches.emplace(definition.id,
+                            addSwitchSubcircuit(built.engine, a, b, c, d, e, f,
+                                                definition.spec, definition.thrown));
+                        built.bindings.emplace(definition.id,
+                            CircuitComponentBinding{CircuitComponentKind::switchComponent, 0});
+                    }
+                } else if constexpr (std::is_same_v<T, RelayDefinition>) {
+                    componentOk = resolve(definition.coilPositive, a) && resolve(definition.coilNegative, b) &&
+                                  resolve(definition.common1, c) && resolve(definition.throwA1, d) &&
+                                  resolve(definition.throwB1, e) && resolve(definition.common2, f) &&
+                                  resolve(definition.throwA2, g) && resolve(definition.throwB2, h);
+                    if (componentOk) {
+                        built.relays.emplace(definition.id,
+                            addRelaySubcircuit(built.engine, a, b, c, d, e, f, g, h, definition.spec));
+                        built.relayStates.emplace(definition.id, RelayRuntimeState{});
+                        built.bindings.emplace(definition.id,
+                            CircuitComponentBinding{CircuitComponentKind::relay, 0});
                     }
                 }
             }, component);
