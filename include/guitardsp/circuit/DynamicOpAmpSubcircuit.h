@@ -20,9 +20,12 @@ namespace guitardsp::circuit {
 // The large-signal stage deliberately keeps high-gain, slew and load-current
 // responsibilities separated. The dominant-pole command is buffered before the
 // slew limiter, and the slew node is buffered again before the load-current path.
+// Both the internal slew state and the externally visible output are constrained
+// to supply-relative headroom. The second rail clamp matters when the current-
+// limiter is feeding a high-impedance/nonlinear feedback network: a real output
+// pin cannot drift beyond its supply rails merely because load current is small.
 // Rail shunts use the engine's bounded square-law MOSFET stamp rather than an
-// exponential Shockley clamp so a grossly overdriven internal command does not
-// require a diode junction solver to recover from hundreds of volts of error.
+// exponential Shockley clamp so gross internal errors remain recoverable by Newton.
 struct DynamicOpAmpSubcircuit {
     Node dominantPole = ground;
     Node slewCommand = ground;
@@ -50,6 +53,8 @@ struct DynamicOpAmpSubcircuit {
     ControlledSourceHandle outputFollower{};
     ResistorHandle outputResistance{};
     JfetHandle outputCurrentLimiter{};
+    MosfetHandle outputPositiveRailShunt{};
+    MosfetHandle outputNegativeRailShunt{};
     ResistorHandle outputLeakResistance{};
 };
 
@@ -199,7 +204,6 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
         engine.addCurrentSource(inverting, reference, spec.inputBiasCurrentAmps);
     }
 
-    // Dominant-pole node -> ideal buffer -> bounded-current slew capacitor.
     handles.slewCommandFollower = engine.addVcvs(handles.slewCommand, reference,
                                                   handles.dominantPole, reference, 1.0f);
     handles.slewLimiter = engine.addJfet(handles.slewCommand, handles.outputDrive,
@@ -208,10 +212,6 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
     handles.slewCapacitance = engine.addCapacitor(handles.outputDrive, reference,
         detail::genericCircuitCapacitor(detail::opAmpSlewCapacitanceFarads()));
 
-    // Clamp reference nodes are offset inward from the actual rails. Enhancement
-    // MOSFETs are diode-connected (gate=drain=outputDrive), so they conduct only
-    // when the slew node crosses the respective threshold. This gives a smooth,
-    // polynomial shunt without an exponential junction recovery problem.
     handles.positiveClampOffset = engine.addVoltageSource(positiveRail,
         handles.positiveClamp, detail::positiveClampOffset(spec));
     handles.negativeClampOffset = engine.addVoltageSource(handles.negativeClamp,
@@ -223,9 +223,6 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
         handles.outputDrive, handles.negativeClamp,
         detail::opAmpRailShunt(hq::TransistorPolarity::pChannel));
 
-    // The load-current path is buffered from the slew capacitor. The JFET model is
-    // intentionally used as a smooth, bidirectional current limiter: with gate tied
-    // to source its channel asymptotically approaches +/-Idss as |Vds| increases.
     handles.outputFollower = engine.addVcvs(handles.outputBufferDrive, reference,
                                              handles.outputDrive, reference, 1.0f);
     handles.outputResistance = engine.addResistor(handles.outputBufferDrive,
@@ -234,6 +231,14 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
     handles.outputCurrentLimiter = engine.addJfet(handles.outputCurrentNode, output,
                                                    output,
                                                    detail::opAmpOutputCurrentLimiter(spec));
+
+    // A separate pair of rail shunts constrains the external output pin. Without
+    // these, the intentionally current-limited connection can leave a lightly loaded
+    // output node free to reach non-physical voltages inside nonlinear feedback loops.
+    handles.outputPositiveRailShunt = engine.addMosfet(output, output,
+        handles.positiveClamp, detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
+    handles.outputNegativeRailShunt = engine.addMosfet(output, output,
+        handles.negativeClamp, detail::opAmpRailShunt(hq::TransistorPolarity::pChannel));
     handles.outputLeakResistance = engine.addResistor(output, reference,
                                                        detail::opAmpOutputLeak());
     return handles;
@@ -262,6 +267,10 @@ inline bool updateDynamicOpAmpSubcircuit(MnaCircuitEngine& engine,
                                   detail::opAmpOutputResistance(spec));
     ok &= engine.setJfetSpec(handles.outputCurrentLimiter,
                               detail::opAmpOutputCurrentLimiter(spec));
+    ok &= engine.setMosfetSpec(handles.outputPositiveRailShunt,
+        detail::opAmpRailShunt(hq::TransistorPolarity::nChannel));
+    ok &= engine.setMosfetSpec(handles.outputNegativeRailShunt,
+        detail::opAmpRailShunt(hq::TransistorPolarity::pChannel));
     return ok;
 }
 
