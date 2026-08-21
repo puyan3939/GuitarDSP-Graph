@@ -20,7 +20,8 @@ public:
         float sourceMemoryMs = 4.0f;
     };
 
-    void prepare(double sampleRate, const Config& config = {}) noexcept {
+    void prepare(double sampleRate) noexcept { prepare(sampleRate, Config{}); }
+    void prepare(double sampleRate, const Config& config) noexcept {
         config_ = config;
         source_.setTimeConstant(sampleRate, config_.sourceMemoryMs);
         reset();
@@ -69,7 +70,8 @@ public:
         float sourceMemoryMs = 3.0f;
     };
 
-    void prepare(double sampleRate, const Config& config = {}) noexcept {
+    void prepare(double sampleRate) noexcept { prepare(sampleRate, Config{}); }
+    void prepare(double sampleRate, const Config& config) noexcept {
         config_ = config;
         source_.setTimeConstant(sampleRate, config_.sourceMemoryMs);
         reset();
@@ -113,7 +115,8 @@ public:
         float closedLoopGain = 1.0f;
     };
 
-    void prepare(double sampleRate, const Config& config = {}) noexcept {
+    void prepare(double sampleRate) noexcept { prepare(sampleRate, Config{}); }
+    void prepare(double sampleRate, const Config& config) noexcept {
         sampleRate_ = std::max(1.0, sampleRate);
         config_ = config;
         updatePole();
