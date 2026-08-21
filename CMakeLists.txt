@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.1.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,6 +9,7 @@ option(GUITARDSP_GRAPH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 add_library(GuitarDSPGraphCore
     src/graph/Graph.cpp
+    src/graph/CompiledAudioGraph.cpp
 )
 
 target_include_directories(GuitarDSPGraphCore
@@ -37,3 +38,9 @@ add_executable(GuitarDSPGraphTests
 )
 target_link_libraries(GuitarDSPGraphTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME graph_core COMMAND GuitarDSPGraphTests)
+
+add_executable(GuitarDSPAudioRuntimeTests
+    tests/AudioRuntimeTests.cpp
+)
+target_link_libraries(GuitarDSPAudioRuntimeTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME audio_runtime COMMAND GuitarDSPAudioRuntimeTests)
