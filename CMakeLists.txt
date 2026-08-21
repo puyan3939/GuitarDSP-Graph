@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.6.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -52,3 +52,6 @@ add_test(NAME realtime_host COMMAND GuitarDSPRealtimeHostTests)
 add_executable(GuitarDSPMultiOutputTests tests/MultiOutputTests.cpp)
 target_link_libraries(GuitarDSPMultiOutputTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME multi_output COMMAND GuitarDSPMultiOutputTests)
+add_executable(GuitarDSPHQDSPTests tests/HQDSPTests.cpp)
+target_link_libraries(GuitarDSPHQDSPTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hq_dsp COMMAND GuitarDSPHQDSPTests)
