@@ -1,6 +1,6 @@
 #pragma once
 
-#include "BjtForwardActiveSubcircuit.h"
+#include "BjtEbersMollSubcircuit.h"
 #include "DiodeParasiticSubcircuit.h"
 #include "DynamicOpAmpSubcircuit.h"
 
@@ -71,12 +71,14 @@ public:
         engine_.addVoltageSource(vref_, ground, 4.5f);
         inputSource_ = engine_.addVoltageSource(inputJack_, ground, 0.0f);
 
-        // Input emitter follower.
+        // Input emitter follower. The two-junction Ebers-Moll macro preserves B-E
+        // and B-C conduction explicitly, so this same device model can later be used
+        // in transistor gain stages that enter saturation rather than only buffers.
         engine_.addCapacitor(inputJack_, inputCoupled,
                              capacitor(22.0e-9f, 50.0f, hq::CapacitorTechnology::film));
         engine_.addResistor(inputCoupled, q1Base, resistor(1000.0f));
         engine_.addResistor(vref_, q1Base, resistor(510000.0f));
-        inputBuffer_ = addBjtForwardActiveSubcircuit(
+        inputBuffer_ = addBjtEbersMollSubcircuit(
             engine_, supply_, q1Base, q1Emitter_, twoSC1815Style());
         engine_.addResistor(q1Emitter_, ground, resistor(10000.0f));
         engine_.addCapacitor(q1Emitter_, clipNonInv_,
@@ -133,7 +135,7 @@ public:
         engine_.addCapacitor(levelWiper_, q3Base,
                              capacitor(100.0e-9f, 50.0f, hq::CapacitorTechnology::film));
         engine_.addResistor(vref_, q3Base, resistor(510000.0f));
-        outputBuffer_ = addBjtForwardActiveSubcircuit(
+        outputBuffer_ = addBjtEbersMollSubcircuit(
             engine_, supply_, q3Base, q3Emitter_, twoSC1815Style());
         engine_.addResistor(q3Emitter_, ground, resistor(10000.0f));
         engine_.addResistor(q3Emitter_, outputCouplingInput, resistor(100.0f));
@@ -291,8 +293,8 @@ private:
     PotHandle drivePot_{};
     PotHandle tonePot_{};
     PotHandle levelPot_{};
-    BjtForwardActiveSubcircuit inputBuffer_{};
-    BjtForwardActiveSubcircuit outputBuffer_{};
+    BjtEbersMollSubcircuit inputBuffer_{};
+    BjtEbersMollSubcircuit outputBuffer_{};
     DynamicOpAmpSubcircuit clipOpAmp_{};
     DiodeParasiticSubcircuit clippingDiodePositive_{};
     DiodeParasiticSubcircuit clippingDiodeNegative_{};
