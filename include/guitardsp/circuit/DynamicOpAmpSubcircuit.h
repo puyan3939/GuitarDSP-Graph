@@ -15,23 +15,21 @@ namespace guitardsp::circuit {
 // - input offset and input bias current
 // - rail headroom limiting through bounded clamp nodes
 // - slew-rate limiting through a current-limited JFET / capacitor stage
-// - complementary BJT output stage with finite output resistance/current limit
+// - finite output resistance and smooth bidirectional output-current limiting
 //
-// The large-signal stage intentionally avoids an ideal hard-clamped dependent
-// voltage source. The earlier diode-on-high-gain-node experiment could diverge
-// under severe overdrive. Here the dominant-pole command is buffered, then passed
-// through a bounded-current element before rail clamps and the output pair. That
-// keeps the internal command finite and gives the Newton solver a smooth path.
+// The large-signal stage deliberately keeps high-gain, slew and load-current
+// responsibilities separated. The dominant-pole command is buffered before the
+// slew limiter, and the slew node is buffered again before the load-current path.
+// This prevents a heavy external load from stealing current from the slew capacitor
+// and avoids the unstable hard-clamp feedback topology that was rejected earlier.
 struct DynamicOpAmpSubcircuit {
     Node dominantPole = ground;
     Node slewCommand = ground;
     Node outputDrive = ground;
     Node positiveClamp = ground;
     Node negativeClamp = ground;
-    Node sourceBase = ground;
-    Node sinkBase = ground;
-    Node sourceEmitter = ground;
-    Node sinkEmitter = ground;
+    Node outputBufferDrive = ground;
+    Node outputCurrentNode = ground;
     Node offsetNode = ground;
 
     ResistorHandle dominantResistance{};
@@ -39,7 +37,7 @@ struct DynamicOpAmpSubcircuit {
     ControlledSourceHandle differentialGm{};
     ControlledSourceHandle offsetGm{};
     SourceHandle offsetVoltage{};
-    ControlledSourceHandle outputFollower{};
+    ControlledSourceHandle slewCommandFollower{};
 
     JfetHandle slewLimiter{};
     CapacitorHandle slewCapacitance{};
@@ -48,12 +46,9 @@ struct DynamicOpAmpSubcircuit {
     DiodeHandle positiveClampDiode{};
     DiodeHandle negativeClampDiode{};
 
-    SourceHandle sourceBias{};
-    SourceHandle sinkBias{};
-    BjtHandle sourceTransistor{};
-    BjtHandle sinkTransistor{};
-    ResistorHandle sourceOutputResistance{};
-    ResistorHandle sinkOutputResistance{};
+    ControlledSourceHandle outputFollower{};
+    ResistorHandle outputResistance{};
+    JfetHandle outputCurrentLimiter{};
     ResistorHandle outputLeakResistance{};
 };
 
@@ -96,22 +91,31 @@ inline float opAmpInputTransconductance(const hq::OpAmpSpec& spec) noexcept {
 }
 
 inline constexpr float opAmpSlewCapacitanceFarads() noexcept {
-    // A small fixed integration capacitor lets Idss = C * slew-rate map directly
-    // to the requested large-signal dV/dt while keeping currents pedal-scale.
     return 100.0e-12f;
 }
 
-inline hq::JFETSpec opAmpSlewLimiter(const hq::OpAmpSpec& spec) noexcept {
+inline hq::JFETSpec currentLimiterJfet(float currentLimitAmps,
+                                       const char* name) noexcept {
     hq::JFETSpec j{};
-    j.name = "OpAmp slew current limiter";
+    j.name = name;
     j.polarity = hq::TransistorPolarity::nChannel;
-    j.idssAmps = std::max(1.0e-8f,
-        std::max(1.0f, spec.slewRateVoltsPerSecond) * opAmpSlewCapacitanceFarads());
+    j.idssAmps = std::max(1.0e-8f, currentLimitAmps);
     j.pinchOffVoltage = -1.0f;
     j.lambda = 0.0f;
     j.gateSourceCapacitanceFarads = 0.0f;
     j.maxDrainSourceVoltage = 1000.0f;
     return j;
+}
+
+inline hq::JFETSpec opAmpSlewLimiter(const hq::OpAmpSpec& spec) noexcept {
+    const float current = std::max(1.0f, spec.slewRateVoltsPerSecond) *
+                          opAmpSlewCapacitanceFarads();
+    return currentLimiterJfet(current, "OpAmp slew current limiter");
+}
+
+inline hq::JFETSpec opAmpOutputCurrentLimiter(const hq::OpAmpSpec& spec) noexcept {
+    return currentLimiterJfet(std::max(1.0e-5f, spec.outputCurrentLimitAmps),
+                              "OpAmp output current limiter");
 }
 
 inline hq::DiodeSpec opAmpRailClampDiode() noexcept {
@@ -130,7 +134,6 @@ inline hq::DiodeSpec opAmpRailClampDiode() noexcept {
 }
 
 inline constexpr float opAmpClampForwardEstimate() noexcept { return 0.025f; }
-inline constexpr float opAmpOutputBiasVoltage() noexcept { return 0.62f; }
 
 inline float positiveClampOffset(const hq::OpAmpSpec& spec) noexcept {
     return std::max(0.0f, spec.positiveRailHeadroomVolts) + opAmpClampForwardEstimate();
@@ -138,22 +141,6 @@ inline float positiveClampOffset(const hq::OpAmpSpec& spec) noexcept {
 
 inline float negativeClampOffset(const hq::OpAmpSpec& spec) noexcept {
     return std::max(0.0f, spec.negativeRailHeadroomVolts) + opAmpClampForwardEstimate();
-}
-
-inline hq::BJTSpec opAmpOutputTransistor(const hq::OpAmpSpec& spec,
-                                         hq::TransistorPolarity polarity) noexcept {
-    hq::BJTSpec b{};
-    b.name = polarity == hq::TransistorPolarity::pnp
-        ? "OpAmp PNP output device" : "OpAmp NPN output device";
-    b.polarity = polarity;
-    b.beta = 220.0f;
-    b.nominalVbe = opAmpOutputBiasVoltage();
-    b.saturationVoltage = 0.10f;
-    b.thermalVoltage = 0.02585f;
-    b.maxCollectorVoltage = 1000.0f;
-    b.maxCollectorCurrentAmps = std::max(1.0e-5f, spec.outputCurrentLimitAmps);
-    b.inputCapacitanceFarads = 0.0f;
-    return b;
 }
 
 inline hq::ResistorSpec opAmpOutputResistance(const hq::OpAmpSpec& spec) noexcept {
@@ -187,10 +174,8 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
     handles.outputDrive = engine.addNode();
     handles.positiveClamp = engine.addNode();
     handles.negativeClamp = engine.addNode();
-    handles.sourceBase = engine.addNode();
-    handles.sinkBase = engine.addNode();
-    handles.sourceEmitter = engine.addNode();
-    handles.sinkEmitter = engine.addNode();
+    handles.outputBufferDrive = engine.addNode();
+    handles.outputCurrentNode = engine.addNode();
     handles.offsetNode = engine.addNode();
 
     handles.dominantResistance = engine.addResistor(handles.dominantPole, reference,
@@ -212,20 +197,15 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
         engine.addCurrentSource(inverting, reference, spec.inputBiasCurrentAmps);
     }
 
-    // Buffer the dominant-pole command so the slew limiter cannot load the high
-    // impedance compensation node. A JFET with gate tied to source behaves as a
-    // smooth bidirectional current limiter in this engineering device model.
-    handles.outputFollower = engine.addVcvs(handles.slewCommand, reference,
-                                             handles.dominantPole, reference, 1.0f);
+    // Dominant-pole node -> ideal buffer -> bounded-current slew capacitor.
+    handles.slewCommandFollower = engine.addVcvs(handles.slewCommand, reference,
+                                                  handles.dominantPole, reference, 1.0f);
     handles.slewLimiter = engine.addJfet(handles.slewCommand, handles.outputDrive,
                                           handles.outputDrive,
                                           detail::opAmpSlewLimiter(spec));
     handles.slewCapacitance = engine.addCapacitor(handles.outputDrive, reference,
         detail::genericCircuitCapacitor(detail::opAmpSlewCapacitanceFarads()));
 
-    // Clamp nodes follow the supply rails with the requested headroom. The clamp
-    // diodes are intentionally low-Vf smooth junctions; the offset compensates
-    // their nominal drop so the output-drive node approaches the specified limit.
     handles.positiveClampOffset = engine.addVoltageSource(positiveRail,
         handles.positiveClamp, detail::positiveClampOffset(spec));
     handles.negativeClampOffset = engine.addVoltageSource(handles.negativeClamp,
@@ -235,24 +215,17 @@ inline DynamicOpAmpSubcircuit addDynamicOpAmpSubcircuit(MnaCircuitEngine& engine
     handles.negativeClampDiode = engine.addDiode(handles.negativeClamp,
         handles.outputDrive, detail::opAmpRailClampDiode());
 
-    // Class-AB-like complementary emitter followers. Bias sources compensate the
-    // model Vbe so the external feedback loop sees an output centered on the slew
-    // node. The BJT collector-current cap supplies the explicit output-current
-    // limit; emitter resistors provide the requested finite output resistance.
-    handles.sourceBias = engine.addVoltageSource(handles.sourceBase, handles.outputDrive,
-                                                  detail::opAmpOutputBiasVoltage());
-    handles.sinkBias = engine.addVoltageSource(handles.outputDrive, handles.sinkBase,
-                                                detail::opAmpOutputBiasVoltage());
-    handles.sourceTransistor = engine.addBjt(positiveRail, handles.sourceBase,
-        handles.sourceEmitter,
-        detail::opAmpOutputTransistor(spec, hq::TransistorPolarity::npn));
-    handles.sinkTransistor = engine.addBjt(negativeRail, handles.sinkBase,
-        handles.sinkEmitter,
-        detail::opAmpOutputTransistor(spec, hq::TransistorPolarity::pnp));
-    handles.sourceOutputResistance = engine.addResistor(handles.sourceEmitter, output,
-                                                         detail::opAmpOutputResistance(spec));
-    handles.sinkOutputResistance = engine.addResistor(handles.sinkEmitter, output,
-                                                       detail::opAmpOutputResistance(spec));
+    // The load-current path is buffered from the slew capacitor. The JFET model is
+    // intentionally used as a smooth, bidirectional current limiter: with gate tied
+    // to source its channel asymptotically approaches +/-Idss as |Vds| increases.
+    handles.outputFollower = engine.addVcvs(handles.outputBufferDrive, reference,
+                                             handles.outputDrive, reference, 1.0f);
+    handles.outputResistance = engine.addResistor(handles.outputBufferDrive,
+                                                   handles.outputCurrentNode,
+                                                   detail::opAmpOutputResistance(spec));
+    handles.outputCurrentLimiter = engine.addJfet(handles.outputCurrentNode, output,
+                                                   output,
+                                                   detail::opAmpOutputCurrentLimiter(spec));
     handles.outputLeakResistance = engine.addResistor(output, reference,
                                                        detail::opAmpOutputLeak());
     return handles;
@@ -273,14 +246,10 @@ inline bool updateDynamicOpAmpSubcircuit(MnaCircuitEngine& engine,
                                   detail::positiveClampOffset(spec));
     ok &= engine.setVoltageSource(handles.negativeClampOffset,
                                   detail::negativeClampOffset(spec));
-    ok &= engine.setBjtSpec(handles.sourceTransistor,
-        detail::opAmpOutputTransistor(spec, hq::TransistorPolarity::npn));
-    ok &= engine.setBjtSpec(handles.sinkTransistor,
-        detail::opAmpOutputTransistor(spec, hq::TransistorPolarity::pnp));
-    ok &= engine.setResistorSpec(handles.sourceOutputResistance,
+    ok &= engine.setResistorSpec(handles.outputResistance,
                                   detail::opAmpOutputResistance(spec));
-    ok &= engine.setResistorSpec(handles.sinkOutputResistance,
-                                  detail::opAmpOutputResistance(spec));
+    ok &= engine.setJfetSpec(handles.outputCurrentLimiter,
+                              detail::opAmpOutputCurrentLimiter(spec));
     return ok;
 }
 
