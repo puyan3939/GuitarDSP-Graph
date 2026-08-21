@@ -8,34 +8,53 @@ Topology construction and component selection happen on the control thread. `Mna
 
 The engine currently supports:
 
-- resistors
-- capacitors using trapezoidal companion models
-- inductors using trapezoidal branch companion models
-- three-terminal potentiometers with linear/audio/reverse-audio taper and realtime position updates
+- resistors with stable handles for prepared value/spec replacement
+- capacitors using trapezoidal companion models, with stable handles for capacitance/spec replacement
+- inductors using trapezoidal branch companion models, with stable handles for inductance/spec replacement
+- three-terminal potentiometers with linear/audio/reverse-audio taper and prepared position/spec updates
 - ideal current sources
-- ideal voltage sources with realtime value updates
+- ideal voltage sources with prepared value updates
 - voltage-controlled current sources (VCCS)
 - voltage-controlled voltage sources (VCVS) with an MNA branch unknown
-- Shockley diodes with junction series resistance and Newton iteration
-- first-generation BJT nonlinear three-terminal stamps
-- first-generation JFET nonlinear three-terminal stamps
-- first-generation MOSFET nonlinear three-terminal stamps
+- Shockley diodes with junction series resistance, Newton iteration and replaceable device specs
+- first-generation BJT nonlinear three-terminal stamps with replaceable device specs
+- first-generation JFET nonlinear three-terminal stamps with replaceable device specs
+- first-generation MOSFET nonlinear three-terminal stamps with replaceable device specs
+- a finite-open-loop-gain op-amp macro stamp with replaceable `OpAmpSpec`
+- a nonlinear plate/grid/cathode triode stamp using the shared 12AX7/12AT7 model family
 - arbitrary node graphs with ground node 0
 - partial-pivot Gaussian elimination
 - convergence/singular statistics for analyzer and test reporting
 - mild startup damping for nonlinear Newton solves
 
-The component values come from `ComponentCatalog.h`, so nominal value, rating/tolerance metadata and nonlinear DSP parameters remain distinct. The active-device stamps consume those same BJT/JFET/MOSFET specs rather than embedding pedal-specific constants in the solver.
+The component values come from `ComponentCatalog.h`, so nominal value, rating/tolerance metadata and nonlinear DSP parameters remain distinct. The active-device stamps consume those same component specs rather than embedding pedal- or amplifier-specific constants in the solver.
 
 ## What the current active stamps mean
 
-The current BJT/JFET/MOSFET implementations are engineering device stamps, not full SPICE-equivalent manufacturer models.
+The current BJT/JFET/MOSFET/op-amp/triode implementations are engineering device stamps, not full SPICE-equivalent manufacturer models.
 
 - BJT: exponential base-emitter current, beta-derived base current and a collector-emitter saturation factor.
 - JFET: Shockley-style gate/source control, drain/source direction term and channel-length modulation.
 - MOSFET: square-law triode/saturation regions with channel-length modulation.
+- Op-amp: algebraic finite open-loop gain and input offset in the common MNA solve. `gainBandwidthHz`, slew rate, rail headroom, output current limit and noise are catalogued but not yet enforced by this MNA macro.
+- Triode: the shared nonlinear plate-current model is stamped directly as a plate-to-cathode current controlled by grid-to-cathode and plate-to-cathode voltage. Numerical derivatives form the Newton Jacobian. Grid current and inter-electrode capacitances are not yet modeled.
 
-They are sufficient to build and validate transistor-biased circuit topologies in the common MNA system. Named hardware claims still require better parameter provenance and, where justified, higher-order models such as Ebers-Moll/Gummel-Poon or measured device fitting.
+They are sufficient to build and validate active circuit topologies in the common MNA system. Named hardware claims still require better parameter provenance and, where justified, higher-order models or measured device fitting.
+
+## Prepared component handles
+
+R/C/L, potentiometers, diodes, BJT/JFET/MOSFET, op-amps and triodes return stable handles when added to a topology. A handle allows the numerical component spec to be changed without changing node connectivity or resizing the MNA system. This is the basis for circuit-level editing such as:
+
+```text
+C8: 47 nF -> 22 nF
+R12: 4.7 kOhm -> 2.2 kOhm
+Q1: 2N3904-style -> 2N5088-style
+D1: 1N4148-style -> 1N34A-style
+IC1: JRC4558-style -> edited op-amp spec
+V1: 12AX7 -> 12AT7
+```
+
+These setters deliberately do not claim lock-free concurrent mutation. The audio thread reads the component structs while solving, so a UI/control thread must not write them concurrently. Production UI automation should send changes through a block-boundary command/update path, or submit a newly prepared immutable circuit when a change requires state migration. The handle API solves topology stability; the graph runtime owns synchronization.
 
 ## Why MNA first
 
@@ -64,17 +83,18 @@ The audio callback must not:
 - parse files/JSON
 - rebuild matrices/vectors
 - acquire locks
+- race with direct component-spec writes from another thread
 
-Changing a voltage source, controlled-source coefficient or potentiometer position is allowed because it only updates pre-existing scalar values. Component-value editing that changes numerical coefficients but not topology is intended to use the same prepared-control path. Topology edits require compiling a new circuit instance and swapping it through the graph host.
+Prepared scalar/spec edits are topology-preserving, but they must be serialized at a block boundary or applied to an inactive/prepared circuit before swap. Topology edits require compiling a new circuit instance and swapping it through the graph host.
 
 ## Next device/engine stamps
 
 The next high-value work is:
 
-1. generic prepared component handles so R/C/L/device specs can be edited without topology rebuild
-2. current-controlled sources (CCCS/CCVS) and explicit branch-current handles
-3. op-amp macro-model using finite open-loop gain, dominant pole/GBW, output impedance and later slew/rail limiting
-4. triode plate/grid/cathode nonlinear stamp using the existing 12AX7/12AT7 models
+1. current-controlled sources (CCCS/CCVS) and explicit branch-current handles
+2. block-boundary component-update commands so UI automation can safely drive prepared component handles
+3. op-amp dominant-pole/GBW behavior, output impedance, current limiting, rail limiting and slew-rate dynamics
+4. triode grid-current onset and inter-electrode capacitances
 5. transformer coupled-inductor model including leakage, winding resistance and core saturation
 6. switches and relays for pedal bypass/channel topology compilation
 7. BJT junction capacitances and a stronger Ebers-Moll/Gummel-Poon-inspired model
