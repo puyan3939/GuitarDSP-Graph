@@ -13,9 +13,11 @@ The engine currently supports:
 - inductors using trapezoidal branch companion models, with stable handles for inductance/spec replacement
 - three-terminal potentiometers with linear/audio/reverse-audio taper and prepared position/spec updates
 - ideal current sources
-- ideal voltage sources with prepared value updates
+- ideal voltage sources with prepared value updates and branch-current probing
 - voltage-controlled current sources (VCCS)
 - voltage-controlled voltage sources (VCVS) with an MNA branch unknown
+- current-controlled current sources (CCCS) driven from a voltage-source branch current
+- current-controlled voltage sources (CCVS) with transresistance and their own MNA branch unknown
 - Shockley diodes with junction series resistance, Newton iteration and replaceable device specs
 - first-generation BJT nonlinear three-terminal stamps with replaceable device specs
 - first-generation JFET nonlinear three-terminal stamps with replaceable device specs
@@ -54,11 +56,13 @@ IC1: JRC4558-style -> edited op-amp spec
 V1: 12AX7 -> 12AT7
 ```
 
-These setters deliberately do not claim lock-free concurrent mutation. The audio thread reads the component structs while solving, so a UI/control thread must not write them concurrently. Production UI automation should send changes through a block-boundary command/update path, or submit a newly prepared immutable circuit when a change requires state migration. The handle API solves topology stability; the graph runtime owns synchronization.
+`CircuitUpdateQueue` is the realtime handoff for those edits. It is a fixed-capacity SPSC queue: the control/UI thread writes commands, and the audio thread drains them at a block boundary before processing samples. The queue stores scalar edits and complete component specs without growing or allocating storage. Overflow is rejected rather than allocating or blocking.
+
+Direct setter calls still do not claim lock-free concurrent mutation. The audio thread reads component structs while solving, so callers should either use `CircuitUpdateQueue`, otherwise serialize direct writes at a block boundary, or submit an inactive/prepared circuit and swap it through the graph host.
 
 ## Why MNA first
 
-Modified Nodal Analysis is the most useful general foundation for pedal and amplifier schematics because arbitrary R/C/L networks, voltage sources, controlled sources and nonlinear devices can share one topology. It also gives a direct path to importing component-value schematics rather than rewriting each filter as a hand-derived transfer function.
+Modified Nodal Analysis is the most useful general foundation for pedal and amplifier schematics because arbitrary R/C/L networks, independent sources, all four controlled-source families and nonlinear devices can share one topology. It also gives a direct path to importing component-value schematics rather than rewriting each filter as a hand-derived transfer function.
 
 A future WDF layer can still be added for circuit regions where tree decomposition gives a large realtime performance advantage. The intended architecture is hybrid rather than forcing every circuit into one solver:
 
@@ -85,20 +89,20 @@ The audio callback must not:
 - acquire locks
 - race with direct component-spec writes from another thread
 
-Prepared scalar/spec edits are topology-preserving, but they must be serialized at a block boundary or applied to an inactive/prepared circuit before swap. Topology edits require compiling a new circuit instance and swapping it through the graph host.
+Topology-preserving edits should arrive through the fixed-capacity block-boundary update queue. Topology edits require compiling a new circuit instance and swapping it through the graph host.
 
-## Next device/engine stamps
+## Next device/engine work
 
 The next high-value work is:
 
-1. current-controlled sources (CCCS/CCVS) and explicit branch-current handles
-2. block-boundary component-update commands so UI automation can safely drive prepared component handles
-3. op-amp dominant-pole/GBW behavior, output impedance, current limiting, rail limiting and slew-rate dynamics
-4. triode grid-current onset and inter-electrode capacitances
-5. transformer coupled-inductor model including leakage, winding resistance and core saturation
-6. switches and relays for pedal bypass/channel topology compilation
-7. BJT junction capacitances and a stronger Ebers-Moll/Gummel-Poon-inspired model
-8. MOSFET body diode/capacitances and JFET gate-junction behavior
+1. transformer/coupled-inductor stamp including winding resistance and leakage, followed later by core saturation and parasitic capacitance
+2. op-amp dominant-pole/GBW behavior, output impedance, current limiting, rail limiting and slew-rate dynamics
+3. triode grid-current onset and inter-electrode capacitances
+4. switches and relays for pedal bypass/channel topology compilation
+5. BJT junction capacitances and a stronger Ebers-Moll/Gummel-Poon-inspired model
+6. MOSFET body diode/capacitances and JFET gate-junction behavior
+7. typed branch-current probes beyond independent voltage sources where a circuit needs them
+8. netlist/subcircuit descriptions that can compile schematic-like component graphs into prepared MNA islands
 
 ## Numerical roadmap
 
