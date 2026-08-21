@@ -1,5 +1,6 @@
 #include "guitardsp/app/RealtimeAudioEngine.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
