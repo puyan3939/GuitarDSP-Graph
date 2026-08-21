@@ -42,7 +42,7 @@ std::unique_ptr<graph::PreparedGraph> prepareLiveRig(const LiveRigSettings& sett
     auto& graph = prepared->graph;
     graph::NodeId previous = 0;
 
-    const auto append = [&](std::unique_ptr<graph::AudioNode> node) mutable -> graph::NodeId {
+    auto append = [&](std::unique_ptr<graph::AudioNode> node) -> graph::NodeId {
         const auto id = graph.addNode(std::move(node));
         if (id == 0) return 0;
         if (previous != 0 && !graph.connect(previous, id)) return 0;
