@@ -85,6 +85,10 @@ public:
         const float master = master_.load(std::memory_order_relaxed);
         const float presence = presence_.load(std::memory_order_relaxed);
         const float outputGain = std::pow(10.0f, outputDb_.load(std::memory_order_relaxed) / 20.0f);
+        const float tubeSelector = powerTube_.load(std::memory_order_relaxed);
+        const auto tubeType = tubeSelector < 0.5f ? PowerTubeType::el34
+                           : tubeSelector < 1.5f ? PowerTubeType::sixL6GC
+                                                : PowerTubeType::kt88;
 
         for (auto& t : tone_) t.setControls(bass, mid, treble);
         for (auto& p : phaseInverter_) {
@@ -97,6 +101,7 @@ public:
             p.setSag(0.08f + 0.34f * master);
             p.setCrossover(0.005f + 0.025f * (1.0f - master));
             p.setTransformerSaturation(0.12f + 0.42f * master);
+            p.setTubeType(tubeType);
         }
 
         const float preGain = 0.35f + 2.4f * gain;
@@ -132,6 +137,7 @@ public:
             case 4: return master_.load(std::memory_order_relaxed);
             case 5: return presence_.load(std::memory_order_relaxed);
             case 6: return outputDb_.load(std::memory_order_relaxed);
+            case 7: return powerTube_.load(std::memory_order_relaxed);
             default: return 0.0f;
         }
     }
@@ -146,6 +152,7 @@ public:
             case 4: master_.store(v, std::memory_order_relaxed); break;
             case 5: presence_.store(v, std::memory_order_relaxed); break;
             case 6: outputDb_.store(v, std::memory_order_relaxed); break;
+            case 7: powerTube_.store(std::round(v), std::memory_order_relaxed); break;
             default: return false;
         }
         return true;
@@ -167,15 +174,17 @@ private:
     std::atomic<float> master_{0.45f};
     std::atomic<float> presence_{0.50f};
     std::atomic<float> outputDb_{-10.0f};
+    std::atomic<float> powerTube_{0.0f};
 
-    static constexpr std::array<graph::ParameterDescriptor, 7> descriptors_{{
+    static constexpr std::array<graph::ParameterDescriptor, 8> descriptors_{{
         {"gain", "Gain", 0.0f, 1.0f, 0.35f, graph::ParameterUnit::percent, 1.0f},
         {"bass", "Bass", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
         {"mid", "Mid", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
         {"treble", "Treble", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
         {"master", "Master", 0.0f, 1.0f, 0.45f, graph::ParameterUnit::percent, 1.0f},
         {"presence", "Presence", 0.0f, 1.0f, 0.50f, graph::ParameterUnit::percent, 1.0f},
-        {"output", "Output", -30.0f, 6.0f, -10.0f, graph::ParameterUnit::decibels, 1.0f}
+        {"output", "Output", -30.0f, 6.0f, -10.0f, graph::ParameterUnit::decibels, 1.0f},
+        {"power_tube", "Power Tube (0=EL34, 1=6L6GC, 2=KT88)", 0.0f, 2.0f, 0.0f, graph::ParameterUnit::generic, 1.0f}
     }};
 };
 
