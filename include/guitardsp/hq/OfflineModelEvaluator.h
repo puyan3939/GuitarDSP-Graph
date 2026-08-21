@@ -104,12 +104,12 @@ ParameterFitResult fitParameterGrid1D(Node& node,
                                       int blockSize = 256) {
     ParameterFitResult best;
     steps = std::max(2, steps);
-    minimum = std::min(minimum, maximum);
-    maximum = std::max(minimum, maximum);
+    const float low = std::min(minimum, maximum);
+    const float high = std::max(minimum, maximum);
 
     for (int i = 0; i < steps; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(steps - 1);
-        const float value = minimum + t * (maximum - minimum);
+        const float value = low + t * (high - low);
         if (!node.setParameterValue(parameterIndex, value)) continue;
         const auto metrics = fitNodeFrequencyResponse(node, spec, reference, amplitude, blockSize);
         const float score = metrics.weightedRmsError;
