@@ -6,6 +6,7 @@
 #include "guitardsp/dsp/ConvolutionNode.h"
 #include "guitardsp/graph/AdvancedRoutingNodes.h"
 #include "guitardsp/graph/IONodes.h"
+#include "guitardsp/hq/AmpFamilyNodes.h"
 #include "guitardsp/hq/BD2TopologyNode.h"
 #include "guitardsp/hq/DS1TopologyNode.h"
 #include "guitardsp/hq/PartitionedCabNode.h"
@@ -34,6 +35,8 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("drive.bd2_hq", [] { return std::make_unique<hq::BD2TopologyNode>(); });
     r.registerType("drive.fuzz_two_transistor", [] { return std::make_unique<hq::TwoTransistorFuzzNode>(); });
     r.registerType("amp.reference_hq", [] { return std::make_unique<hq::ReferenceAmpTopologyNode>(); });
+    r.registerType("amp.british_plexi_family_hq", [] { return std::make_unique<hq::BritishPlexiFamilyNode>(); });
+    r.registerType("amp.american_clean_family_hq", [] { return std::make_unique<hq::AmericanCleanFamilyNode>(); });
     r.registerType("dynamics.keyed_gate", [] { return std::make_unique<dsp::KeyedGateNode>(); });
     r.registerType("cab.fir", [] { return std::make_unique<dsp::ConvolutionNode>(); });
     r.registerType("cab.partitioned_hq", [] { return std::make_unique<hq::PartitionedCabNode>(); });
