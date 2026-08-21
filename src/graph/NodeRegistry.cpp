@@ -10,6 +10,7 @@
 #include "guitardsp/hq/DS1TopologyNode.h"
 #include "guitardsp/hq/PartitionedCabNode.h"
 #include "guitardsp/hq/ReferenceAmpTopologyNode.h"
+#include "guitardsp/hq/SpeakerDynamicsNode.h"
 #include "guitardsp/hq/TS808TopologyNode.h"
 #include "guitardsp/hq/TwoTransistorFuzzNode.h"
 
@@ -36,6 +37,7 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("dynamics.keyed_gate", [] { return std::make_unique<dsp::KeyedGateNode>(); });
     r.registerType("cab.fir", [] { return std::make_unique<dsp::ConvolutionNode>(); });
     r.registerType("cab.partitioned_hq", [] { return std::make_unique<hq::PartitionedCabNode>(); });
+    r.registerType("cab.speaker_dynamics_hq", [] { return std::make_unique<hq::SpeakerDynamicsNode>(); });
     r.registerType("route.crossover", [] { return std::make_unique<CrossoverSplitNode>(); });
     r.registerType("io.output", [] { return std::make_unique<OutputBusNode>(); });
     return r;
