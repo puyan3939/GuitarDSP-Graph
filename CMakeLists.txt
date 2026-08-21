@@ -10,6 +10,7 @@ option(GUITARDSP_GRAPH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 add_library(GuitarDSPGraphCore
     src/graph/Graph.cpp
     src/graph/CompiledAudioGraph.cpp
+    src/graph/NodeRegistry.cpp
 )
 
 target_include_directories(GuitarDSPGraphCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -40,3 +41,7 @@ add_test(NAME audio_runtime COMMAND GuitarDSPAudioRuntimeTests)
 add_executable(GuitarDSPNodeTests tests/DSPNodeTests.cpp)
 target_link_libraries(GuitarDSPNodeTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME dsp_nodes COMMAND GuitarDSPNodeTests)
+
+add_executable(GuitarDSPNodeLibraryTests tests/NodeLibraryTests.cpp)
+target_link_libraries(GuitarDSPNodeLibraryTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME node_library COMMAND GuitarDSPNodeLibraryTests)
