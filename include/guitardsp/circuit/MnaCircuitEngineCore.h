@@ -55,6 +55,7 @@ public:
         std::uint64_t generalLinearSolves = 0;
         std::uint64_t sparseNewtonSolves = 0;
         std::uint64_t sparseFallbackSolves = 0;
+        std::uint64_t trustRegionLimitedSteps = 0;
     };
 
     Node addNode() {
@@ -402,6 +403,15 @@ public:
             return stats;
         }
 
+        // Trust-region scale comes from independent voltage sources, so the same
+        // policy behaves sensibly for 9 V pedals and hundreds-of-volts tube stages.
+        // Only node-voltage movement chooses the damping factor; branch-current
+        // unknowns inherit that factor rather than mixing amps and volts in the limit.
+        float circuitVoltageScale = 1.0f;
+        for (const auto& source : voltageSources_)
+            circuitVoltageScale = std::max(circuitVoltageScale, std::abs(source.volts));
+        const float maximumNodeStep = 1.0f + 0.10f * circuitVoltageScale;
+
         candidate_ = solution_;
         stats.converged = false;
         for (int iteration = 0; iteration < maximumNewtonIterations; ++iteration) {
@@ -438,15 +448,11 @@ public:
             }
 
             float maxDelta = 0.0f;
-            for (std::size_t i = 0; i < dimension_; ++i)
-                maxDelta = std::max(maxDelta, std::abs(solution_[i] - candidate_[i]));
-
-            if (iteration < 3) {
-                constexpr float damping = 0.65f;
-                for (std::size_t i = 0; i < dimension_; ++i)
-                    candidate_[i] += damping * (solution_[i] - candidate_[i]);
-            } else {
-                candidate_ = solution_;
+            float maxNodeDelta = 0.0f;
+            for (std::size_t i = 0; i < dimension_; ++i) {
+                const float delta = std::abs(solution_[i] - candidate_[i]);
+                maxDelta = std::max(maxDelta, delta);
+                if (i < nodeCount_) maxNodeDelta = std::max(maxNodeDelta, delta);
             }
 
             stats.iterations = iteration + 1;
@@ -455,6 +461,14 @@ public:
                 candidate_ = solution_;
                 break;
             }
+
+            float damping = iteration < 3 ? 0.65f : 1.0f;
+            if (maxNodeDelta > maximumNodeStep) {
+                damping = std::min(damping, maximumNodeStep / maxNodeDelta);
+                ++performanceStats_.trustRegionLimitedSteps;
+            }
+            for (std::size_t i = 0; i < dimension_; ++i)
+                candidate_[i] += damping * (solution_[i] - candidate_[i]);
         }
 
         if (!stats.converged) solution_ = candidate_;
