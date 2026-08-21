@@ -51,6 +51,8 @@ For diode/BJT/JFET/MOSFET/triode circuits, each Newton iteration begins from the
 
 The nonlinear solve is still dense `O(n^3)` per Newton iteration. Fixed-pattern/sparse work comes next.
 
+The new active-device fidelity layer is built on this split. BJT/JFET/MOSFET parasitic capacitances are ordinary trapezoidal companion elements, so their conductance terms live in the cached matrix while only history terms enter the per-sample RHS. The rail/slew/current-limited dynamic op-amp uses the nonlinear Newton path. See `ACTIVE_DEVICE_FIDELITY.md` for the modelling details and boundaries.
+
 ## Realtime boundary
 
 All vectors and factorization workspaces are sized in `prepare()`. The steady audio path intentionally performs no topology changes and no intentional heap allocation. Matrix-affecting control edits use the existing block-boundary update path and trigger a cache rebuild rather than a topology rebuild.
@@ -68,6 +70,8 @@ All vectors and factorization workspaces are sized in `prepare()`. The steady au
 - general dense solves
 
 `MnaAccelerationTests` verifies that audio-rate voltage-source changes do not rebuild or refactorize the matrix, linear circuits reuse cached LU solves, matrix-affecting edits rebuild/refactorize exactly once, and nonlinear circuits reuse the cached linear base while restamping Newton-dependent terms.
+
+`ActiveDeviceFidelityTests` verifies the new op-amp rail/slew/current-limit and transistor-parasitic paths. `CircuitNetlistTests` verifies ordinary BJT/JFET/MOSFET definitions compile with those parasitic networks enabled.
 
 The complete pre-existing circuit regression suite remains the numerical compatibility gate.
 
