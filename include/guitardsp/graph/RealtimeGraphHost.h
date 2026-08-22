@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <unordered_map>
 
 namespace guitardsp::graph {
@@ -36,6 +37,16 @@ public:
     void submit(std::unique_ptr<PreparedGraph> prepared) noexcept;
     void process(const AudioBuffer& input, AudioBuffer& output, int numSamples) noexcept;
     std::size_t collectRetired() noexcept;
+
+    // Message/control thread only. Prepared graph topology is immutable, and the
+    // supported node parameters are atomic. Apply edits to both the active and
+    // queued graphs so a block-boundary graph swap cannot discard a knob change.
+    bool setCategoryParameter(NodeCategory category,
+                              std::size_t parameterIndex,
+                              float value) noexcept;
+    bool setTypeParameter(std::string_view typeName,
+                          std::size_t parameterIndex,
+                          float value) noexcept;
 
     [[nodiscard]] bool hasActiveGraph() const noexcept { return active_.load(std::memory_order_acquire) != nullptr; }
     [[nodiscard]] bool hasPendingGraph() const noexcept { return pending_.load(std::memory_order_acquire) != nullptr; }

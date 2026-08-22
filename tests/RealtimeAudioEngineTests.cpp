@@ -91,5 +91,35 @@ int main() {
     ok &= require(allocationCount.load(std::memory_order_relaxed) == 0 && mutedPeak == 0.0f,
                   "mute path remains allocation-free and silent");
 
+    app::LiveRigSettings parallelSettings;
+    parallelSettings.quality = graph::ProcessingQuality::eco;
+    parallelSettings.pedal = app::PedalModel::bypass;
+    parallelSettings.ampEnabled = false;
+    parallelSettings.cabinetEnabled = true;
+    parallelSettings.signalRouting = app::SignalRouting::parallelOctaveBass;
+    app::RealtimeAudioEngine parallelEngine;
+    ok &= require(parallelEngine.configure(48000.0, 64, 1, parallelSettings),
+                  "parallel octave/bass/cabinet allocation fixture configures");
+    parallelEngine.setOutputTrimDb(0.0f);
+
+    allocationCount.store(0, std::memory_order_relaxed);
+    trackAllocations.store(true, std::memory_order_release);
+    parallelEngine.process(inputs, 1, outputs, 2, 128);
+    trackAllocations.store(false, std::memory_order_release);
+    ok &= require(allocationCount.load(std::memory_order_relaxed) == 0,
+                  "first parallel octave and dual-cab callback performs zero heap allocations");
+
+    ok &= require(parallelEngine.setNodeTypeParameter(
+                      "Speaker Dynamics + Partitioned Cab", 5, 155.0f)
+                      && parallelEngine.setNodeTypeParameter(
+                          "Speaker Dynamics + Partitioned Cab", 6, 4600.0f),
+                  "live guitar cabinet low/high cuts are independently addressable");
+    allocationCount.store(0, std::memory_order_relaxed);
+    trackAllocations.store(true, std::memory_order_release);
+    parallelEngine.process(inputs, 1, outputs, 2, 128);
+    trackAllocations.store(false, std::memory_order_release);
+    ok &= require(allocationCount.load(std::memory_order_relaxed) == 0,
+                  "changing live cabinet filter coefficients allocates no audio-thread memory");
+
     return ok ? 0 : 1;
 }

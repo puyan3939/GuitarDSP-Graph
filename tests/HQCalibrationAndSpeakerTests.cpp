@@ -1,5 +1,6 @@
 #include "guitardsp/graph/AudioBuffer.h"
 #include "guitardsp/hq/DS1TopologyNode.h"
+#include "guitardsp/hq/AliasAnalysis.h"
 #include "guitardsp/hq/MultiParameterFit.h"
 #include "guitardsp/hq/PowerTubeModels.h"
 #include "guitardsp/hq/SpeakerDynamicsNode.h"
@@ -116,6 +117,31 @@ int main() {
         for (int i = 0; i < samples; ++i) finite &= std::isfinite(output.channel(0)[i]);
         ok &= require(finite && compressedRms > 1.0e-6f, "speaker dynamics output finite and non-silent");
         ok &= require(compressedRms < openRms, "voice-coil compression reduces sustained level");
+    }
+
+    // The default 18% cone-excursion branch must not inject nonharmonic
+    // artifacts when a guitar note decays into the -60 dBFS region.
+    {
+        constexpr int samples = 4096;
+        constexpr double frequency = 48000.0 * 19.0 / samples;
+        graph::PrepareSpec quietSpec {48000.0, samples, 1, graph::ProcessingQuality::eco};
+        graph::AudioBuffer input(1, samples), output(1, samples);
+        for (int i = 0; i < samples; ++i) {
+            input.channel(0)[i] = 0.001f * static_cast<float>(std::sin(
+                2.0 * std::numbers::pi * frequency * i / quietSpec.sampleRate));
+        }
+        hq::SpeakerDynamicsNode speaker;
+        speaker.prepare(quietSpec);
+        speaker.setParameterValue(0, 0.0f);
+        speaker.setParameterValue(1, 0.18f);
+        speaker.setParameterValue(2, 0.0f);
+        speaker.process(input, output, samples);
+        const auto metrics = hq::analyzeAliasResidual(
+            std::span<const float>(output.channel(0), samples),
+            quietSpec.sampleRate, frequency, 48, 3);
+        std::cout << "DIAG quiet-speaker nonharmonic_db=" << metrics.residualDb << '\n';
+        ok &= require(metrics.residualDb < -75.0f,
+                      "speaker excursion does not add audible quiet-note digital noise");
     }
 
     return ok ? 0 : 1;

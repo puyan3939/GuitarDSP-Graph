@@ -55,6 +55,7 @@ public:
         std::uint64_t generalLinearSolves = 0;
         std::uint64_t sparseNewtonSolves = 0;
         std::uint64_t sparseFallbackSolves = 0;
+        std::uint64_t nonlinearResidualConvergences = 0;
     };
 
     Node addNode() {
@@ -281,6 +282,8 @@ public:
         const auto i = static_cast<std::size_t>(handle);
         if (i >= diodes_.size()) return false;
         diodes_[i].spec = spec;
+        diodes_[i].inverseThermalVoltage = 1.0f / std::max(1.0e-6f,
+            spec.emissionCoefficient * spec.thermalVoltage);
         return true;
     }
 
@@ -329,16 +332,21 @@ public:
         for (auto& source : ccvs_) source.branchIndex = branch++;
         for (auto& opAmp : opAmps_) opAmp.branchIndex = branch++;
         for (auto& inductor : inductors_) inductor.branchIndex = branch++;
+        for (auto& diode : diodes_)
+            diode.inverseThermalVoltage = 1.0f / std::max(1.0e-6f,
+                diode.spec.emissionCoefficient * diode.spec.thermalVoltage);
         dimension_ = branch;
         if (dimension_ == 0U) return false;
 
         const std::size_t matrixSize = dimension_ * dimension_;
         staticMatrix_.assign(matrixSize, 0.0f);
         staticRhs_.assign(dimension_, 0.0f);
+        sampleRhs_.assign(dimension_, 0.0f);
         matrix_.assign(matrixSize, 0.0f);
         rhs_.assign(dimension_, 0.0f);
         solution_.assign(dimension_, 0.0f);
         candidate_.assign(dimension_, 0.0f);
+        previousSampleSolution_.assign(dimension_, 0.0f);
         workMatrix_.assign(matrixSize, 0.0f);
         workRhs_.assign(dimension_, 0.0f);
         linearLu_.assign(matrixSize, 0.0f);
@@ -368,6 +376,8 @@ public:
     void reset() noexcept {
         std::fill(solution_.begin(), solution_.end(), 0.0f);
         std::fill(candidate_.begin(), candidate_.end(), 0.0f);
+        std::fill(previousSampleSolution_.begin(), previousSampleSolution_.end(), 0.0f);
+        previousSampleSolutionValid_ = false;
         for (auto& c : capacitors_) {
             c.previousVoltage = 0.0f;
             c.previousCurrent = 0.0f;
@@ -375,6 +385,10 @@ public:
         for (auto& l : inductors_) {
             l.previousVoltage = 0.0f;
             l.previousCurrent = 0.0f;
+        }
+        for (auto& diode : diodes_) {
+            diode.junctionVoltage = 0.0f;
+            diode.junctionVoltageValid = false;
         }
         lastStats_ = {};
     }
@@ -397,9 +411,7 @@ public:
         const bool nonlinear = hasNonlinearDevices();
 
         if (!nonlinear) {
-            matrix_ = staticMatrix_;
-            rhs_ = staticRhs_;
-            addDynamicRhs(rhs_);
+            rhs_ = sampleRhs_;
             if (!linearFactorValid_ || !solveCachedLinearSystem()) {
                 stats.singular = true;
                 stats.converged = false;
@@ -415,22 +427,62 @@ public:
         }
 
         candidate_ = solution_;
+        const bool usesPreparedSparse = sparseSolver_.available()
+            && (nonlinearSolverMode_ == NonlinearSolverMode::sparseFixedPattern
+                || (nonlinearSolverMode_ == NonlinearSolverMode::automatic
+                    && dimension_ >= 12U && sparseSolver_.factorDensity() <= 0.70f));
+        if (usesPreparedSparse) {
+            sparseSolver_.prepareSampleRhs(sampleRhs_);
+            if (previousSampleSolutionValid_) {
+                // Consecutive oversampled audio states are strongly correlated.
+                // A bounded first-order extrapolation is only an initial guess:
+                // Newton still solves the unchanged component-level equations.
+                for (std::size_t i = 0; i < dimension_; ++i) {
+                    const float slope = solution_[i] - previousSampleSolution_[i];
+                    const float scale = std::max(1.0f, std::abs(solution_[i]));
+                    candidate_[i] += std::clamp(slope, -0.10f * scale, 0.10f * scale);
+                }
+            }
+            previousSampleSolution_ = solution_;
+            previousSampleSolutionValid_ = true;
+        }
         stats.converged = false;
         for (int iteration = 0; iteration < maximumNewtonIterations; ++iteration) {
-            matrix_ = staticMatrix_;
-            rhs_ = staticRhs_;
-            addDynamicRhs(rhs_);
-            stampNonlinear(candidate_);
+            for (const auto index : nonlinearMatrixIndices_)
+                matrix_[index] = staticMatrix_[index];
+            rhs_ = sampleRhs_;
+            stampNonlinear(candidate_, usesPreparedSparse);
             ++performanceStats_.nonlinearAssemblies;
 
+            if (iteration > 0 && usesPreparedSparse
+                && sparseSolver_.validate(matrix_, rhs_, candidate_, 3.0e-7)) {
+                // Evaluate the actual nonlinear circuit equations at the current
+                // candidate before factoring their Jacobian again. Near an
+                // op-amp operating point, float-sized voltage jitter can keep
+                // successive Newton iterates moving while KCL is already solved
+                // to a fraction of one part per million. Residual convergence is
+                // the physical criterion and avoids pointless 40-step cycles.
+                solution_ = candidate_;
+                stats.converged = true;
+                stats.iterations = iteration;
+                ++performanceStats_.nonlinearResidualConvergences;
+                break;
+            }
+
             bool solved = false;
+            bool usedSparseSolve = false;
             const bool forceSparse = nonlinearSolverMode_ == NonlinearSolverMode::sparseFixedPattern;
             const bool autoSparse = nonlinearSolverMode_ == NonlinearSolverMode::automatic &&
                                     sparseSolver_.available() && dimension_ >= 12U &&
                                     sparseSolver_.factorDensity() <= 0.70f;
             if ((forceSparse || autoSparse) && sparseSolver_.available()) {
-                solved = sparseSolver_.solve(matrix_, rhs_, solution_);
+                // Double-precision fixed-pattern LU checks every pivot here. The
+                // more expensive backward-error residual is deferred until Newton
+                // is ready to accept the sample, rather than repeated for every
+                // intermediate iterate.
+                solved = sparseSolver_.solve(matrix_, rhs_, solution_, false);
                 if (solved) {
+                    usedSparseSolve = true;
                     ++performanceStats_.sparseNewtonSolves;
                 } else {
                     ++performanceStats_.sparseFallbackSolves;
@@ -450,8 +502,37 @@ public:
             }
 
             float maxDelta = 0.0f;
-            for (std::size_t i = 0; i < dimension_; ++i)
-                maxDelta = std::max(maxDelta, std::abs(solution_[i] - candidate_[i]));
+            float maxScaledDelta = 0.0f;
+            for (std::size_t i = 0; i < dimension_; ++i) {
+                const float delta = std::abs(solution_[i] - candidate_[i]);
+                maxDelta = std::max(maxDelta, delta);
+                const float scale = std::max({1.0f,
+                    std::abs(solution_[i]), std::abs(candidate_[i])});
+                maxScaledDelta = std::max(maxScaledDelta, delta / scale);
+            }
+            if (usedSparseSolve
+                && (maxScaledDelta <= tolerance
+                    || iteration + 1 == maximumNewtonIterations)
+                && !sparseSolver_.validate(matrix_, rhs_, solution_)) {
+                ++performanceStats_.sparseFallbackSolves;
+                usedSparseSolve = false;
+                if (!solveGeneralLinearSystem()) {
+                    stats.singular = true;
+                    stats.converged = false;
+                    stats.iterations = iteration + 1;
+                    lastStats_ = stats;
+                    return stats;
+                }
+                maxDelta = 0.0f;
+                maxScaledDelta = 0.0f;
+                for (std::size_t i = 0; i < dimension_; ++i) {
+                    const float delta = std::abs(solution_[i] - candidate_[i]);
+                    maxDelta = std::max(maxDelta, delta);
+                    const float scale = std::max({1.0f,
+                        std::abs(solution_[i]), std::abs(candidate_[i])});
+                    maxScaledDelta = std::max(maxScaledDelta, delta / scale);
+                }
+            }
 
             // Apply a lightweight trust region instead of taking an unrestricted
             // Newton jump after the first few iterations. Audio circuits routinely
@@ -461,24 +542,34 @@ public:
             // next sample's dynamic history. The step limit scales with the current
             // node magnitude, so low-voltage semiconductor junctions stay tightly
             // controlled while tube/transformer nodes can still move by tens of volts.
-            const float damping = iteration < 3 ? 0.65f : 0.85f;
-            for (std::size_t i = 0; i < dimension_; ++i) {
-                const float rawDelta = solution_[i] - candidate_[i];
-                if (i < nodeCount_) {
-                    if (i < fixedVoltageNodes_.size() && fixedVoltageNodes_[i] != 0U) {
-                        candidate_[i] = solution_[i];
-                        continue;
+            // Once the candidate is already inside the local Newton basin, a full
+            // step restores quadratic convergence. The trust-region clamp remains
+            // active for larger moves and startup/rail transitions.
+            if (usedSparseSolve && maxDelta <= 0.25f) {
+                // No trust-region bound can activate below the 0.25 V minimum,
+                // so a full Newton step is exactly the solved vector. Copy it
+                // directly instead of branching and clamping all 48 unknowns.
+                candidate_ = solution_;
+            } else {
+                const float damping = iteration < 3 ? 0.65f : 0.85f;
+                for (std::size_t i = 0; i < dimension_; ++i) {
+                    const float rawDelta = solution_[i] - candidate_[i];
+                    if (i < nodeCount_) {
+                        if (i < fixedVoltageNodes_.size() && fixedVoltageNodes_[i] != 0U) {
+                            candidate_[i] = solution_[i];
+                            continue;
+                        }
+                        const float scale = std::max(1.0f, std::abs(candidate_[i]));
+                        const float maximumStep = std::clamp(0.25f * scale, 0.25f, 25.0f);
+                        candidate_[i] += damping * std::clamp(rawDelta, -maximumStep, maximumStep);
+                    } else {
+                        candidate_[i] += damping * rawDelta;
                     }
-                    const float scale = std::max(1.0f, std::abs(candidate_[i]));
-                    const float maximumStep = std::clamp(0.25f * scale, 0.25f, 25.0f);
-                    candidate_[i] += damping * std::clamp(rawDelta, -maximumStep, maximumStep);
-                } else {
-                    candidate_[i] += damping * rawDelta;
                 }
             }
 
             stats.iterations = iteration + 1;
-            if (maxDelta <= tolerance) {
+            if (maxScaledDelta <= tolerance) {
                 stats.converged = true;
                 candidate_ = solution_;
                 break;
@@ -518,6 +609,9 @@ public:
     bool sparseNonlinearSolverAvailable() const noexcept { return sparseSolver_.available(); }
     std::size_t sparseNonlinearOriginalNonZeros() const noexcept { return sparseSolver_.originalNonZeros(); }
     std::size_t sparseNonlinearFactorNonZeros() const noexcept { return sparseSolver_.factorNonZeros(); }
+    std::size_t sparseNonlinearCachedLinearUnknowns() const noexcept {
+        return sparseSolver_.cachedLinearUnknowns();
+    }
     float sparseNonlinearFactorDensity() const noexcept { return sparseSolver_.factorDensity(); }
 
 private:
@@ -560,7 +654,13 @@ private:
         float transresistanceOhms = 1.0f;
         std::size_t branchIndex = 0;
     };
-    struct Diode { Node anode{}, cathode{}; hq::DiodeSpec spec{}; };
+    struct Diode {
+        Node anode{}, cathode{};
+        hq::DiodeSpec spec{};
+        float junctionVoltage = 0.0f;
+        float inverseThermalVoltage = 0.0f;
+        bool junctionVoltageValid = false;
+    };
     struct Bjt { Node collector{}, base{}, emitter{}; hq::BJTSpec spec{}; };
     struct Jfet { Node drain{}, gate{}, source{}; hq::JFETSpec spec{}; };
     struct Mosfet { Node drain{}, gate{}, source{}; hq::MOSFETSpec spec{}; };
@@ -734,11 +834,16 @@ private:
         }
 
         staticCacheDirty_ = false;
+        matrix_ = staticMatrix_;
+        if (sparseSolver_.available()) sparseSolver_.refreshStaticFactor(staticMatrix_);
+        previousSampleSolutionValid_ = false;
         ++performanceStats_.staticCacheRebuilds;
         linearFactorValid_ = !hasNonlinearDevices() && factorizeStaticLinearSystem();
     }
 
     void assembleSampleRhs() noexcept {
+        sampleRhs_ = staticRhs_;
+        addDynamicRhs(sampleRhs_);
         ++performanceStats_.sampleRhsAssemblies;
     }
 
@@ -779,23 +884,51 @@ private:
         stampCurrentSource(rhs_, positive, negative, equivalentCurrent);
     }
 
-    static DiodeLinearization linearizeDiode(const hq::DiodeSpec& spec,
-                                               float terminalVoltage) noexcept {
-        const auto junction = spec.toModel();
+    static DiodeLinearization linearizeDiode(Diode& diode,
+                                             float terminalVoltage,
+                                             bool reuseJunctionVoltage) noexcept {
+        const auto& spec = diode.spec;
         const float rs = std::max(0.0f, spec.seriesResistanceOhms);
-        float vj = terminalVoltage;
+        const float denominator = std::max(1.0e-6f,
+            spec.emissionCoefficient * spec.thermalVoltage);
+        const auto evaluate = [&](float voltage) noexcept {
+            const float exponent = reuseJunctionVoltage
+                ? voltage * diode.inverseThermalVoltage
+                : voltage / denominator;
+            const float exponential = exponent <= -40.0f
+                ? 4.248354255291589e-18f
+                : exponent >= 40.0f
+                    ? 2.3538526683702e17f
+                    : std::exp(exponent);
+            return DiodeLinearization{
+                spec.saturationCurrent * (exponential - 1.0f),
+                reuseJunctionVoltage
+                    ? spec.saturationCurrent * exponential * diode.inverseThermalVoltage
+                    : spec.saturationCurrent * exponential / denominator
+            };
+        };
+        // Consecutive Newton iterates and oversampled audio samples start close
+        // to the same physical junction voltage. Reusing that previous implicit
+        // root avoids repeatedly solving a forward-biased BJT diode from its
+        // terminal voltage. The identical diode equation is still solved to the
+        // original tolerance; only its initial guess changes.
+        float vj = reuseJunctionVoltage && diode.junctionVoltageValid
+                && std::abs(diode.junctionVoltage - terminalVoltage) <= 0.75f
+            ? diode.junctionVoltage : terminalVoltage;
         for (int i = 0; i < 8; ++i) {
-            const float current = junction.current(vj);
-            const float gj = junction.conductance(vj);
-            const float residual = vj + rs * current - terminalVoltage;
-            const float derivative = 1.0f + rs * gj;
+            const auto junction = evaluate(vj);
+            const float residual = vj + rs * junction.current - terminalVoltage;
+            const float derivative = 1.0f + rs * junction.conductance;
             const float step = residual / std::max(1.0e-12f, derivative);
             vj -= std::clamp(step, -0.5f, 0.5f);
             if (std::abs(step) < 1.0e-7f) break;
         }
-        const float current = junction.current(vj);
-        const float gj = junction.conductance(vj);
-        return {current, gj / std::max(1.0e-12f, 1.0f + rs * gj)};
+        diode.junctionVoltage = vj;
+        diode.junctionVoltageValid = std::isfinite(vj);
+        const auto junction = evaluate(vj);
+        return {junction.current,
+                junction.conductance /
+                    std::max(1.0e-12f, 1.0f + rs * junction.conductance)};
     }
 
     void stampBjt(const Bjt& device, const std::vector<float>& guess) noexcept {
@@ -892,25 +1025,26 @@ private:
         const float vds = polarity * (vd - vs);
         const float threshold = std::max(0.0f, device.spec.thresholdVoltage);
         const float overdrive = vgs - threshold;
+        // An off rail shunt contributes exactly zero current and zero Jacobian.
+        // Skip its stamp entirely instead of rewriting nine zero matrix entries.
+        if (overdrive <= 0.0f || vds <= 0.0f) return;
         const float k = std::max(0.0f, device.spec.transconductance);
         const float lambda = std::max(0.0f, device.spec.lambda);
 
         float effectiveCurrent = 0.0f;
         float dIdDvgs = 0.0f;
         float dIdDvds = 0.0f;
-        if (overdrive > 0.0f && vds > 0.0f) {
-            const float modulation = 1.0f + lambda * vds;
-            if (vds < overdrive) {
-                const float base = k * (overdrive * vds - 0.5f * vds * vds);
-                effectiveCurrent = base * modulation;
-                dIdDvgs = k * vds * modulation;
-                dIdDvds = k * (overdrive - vds) * modulation + base * lambda;
-            } else {
-                const float base = 0.5f * k * overdrive * overdrive;
-                effectiveCurrent = base * modulation;
-                dIdDvgs = k * overdrive * modulation;
-                dIdDvds = base * lambda;
-            }
+        const float modulation = 1.0f + lambda * vds;
+        if (vds < overdrive) {
+            const float base = k * (overdrive * vds - 0.5f * vds * vds);
+            effectiveCurrent = base * modulation;
+            dIdDvgs = k * vds * modulation;
+            dIdDvds = k * (overdrive - vds) * modulation + base * lambda;
+        } else {
+            const float base = 0.5f * k * overdrive * overdrive;
+            effectiveCurrent = base * modulation;
+            dIdDvgs = k * overdrive * modulation;
+            dIdDvds = base * lambda;
         }
 
         const float current = polarity * effectiveCurrent;
@@ -951,10 +1085,11 @@ private:
         stampLinearizedCurrent(device.plate, device.cathode, current, guess, jac);
     }
 
-    void stampNonlinear(const std::vector<float>& guess) noexcept {
-        for (const auto& d : diodes_) {
+    void stampNonlinear(const std::vector<float>& guess,
+                        bool reuseJunctionVoltage) noexcept {
+        for (auto& d : diodes_) {
             const float v = nodeVoltage(guess, d.anode) - nodeVoltage(guess, d.cathode);
-            const auto linear = linearizeDiode(d.spec, v);
+            const auto linear = linearizeDiode(d, v, reuseJunctionVoltage);
             const float g = std::max(1.0e-12f, linear.conductance);
             const float iEq = linear.current - g * v;
             stampConductance(matrix_, d.anode, d.cathode, g);
@@ -1019,6 +1154,7 @@ private:
 
     bool prepareSparseNonlinearSolver() {
         std::vector<std::uint8_t> pattern(dimension_ * dimension_, 0U);
+        std::vector<std::uint8_t> nonlinearPattern(dimension_ * dimension_, 0U);
 
         for (const auto& r : resistors_) markConductancePattern(pattern, r.a, r.b);
         for (const auto& p : potentiometers_) {
@@ -1064,13 +1200,35 @@ private:
             markPattern(pattern, l.branchIndex, l.branchIndex);
         }
 
-        for (const auto& d : diodes_) markConductancePattern(pattern, d.anode, d.cathode);
-        for (const auto& bjt : bjts_) markThreeTerminalPattern(pattern, bjt.collector, bjt.base, bjt.emitter);
-        for (const auto& jfet : jfets_) markThreeTerminalPattern(pattern, jfet.drain, jfet.gate, jfet.source);
-        for (const auto& mosfet : mosfets_) markThreeTerminalPattern(pattern, mosfet.drain, mosfet.gate, mosfet.source);
-        for (const auto& triode : triodes_) markThreeTerminalPattern(pattern, triode.plate, triode.grid, triode.cathode);
+        for (const auto& d : diodes_) {
+            markConductancePattern(pattern, d.anode, d.cathode);
+            markConductancePattern(nonlinearPattern, d.anode, d.cathode);
+        }
+        for (const auto& bjt : bjts_) {
+            markThreeTerminalPattern(pattern, bjt.collector, bjt.base, bjt.emitter);
+            markThreeTerminalPattern(nonlinearPattern, bjt.collector, bjt.base, bjt.emitter);
+        }
+        for (const auto& jfet : jfets_) {
+            markThreeTerminalPattern(pattern, jfet.drain, jfet.gate, jfet.source);
+            markThreeTerminalPattern(nonlinearPattern, jfet.drain, jfet.gate, jfet.source);
+        }
+        for (const auto& mosfet : mosfets_) {
+            markThreeTerminalPattern(pattern, mosfet.drain, mosfet.gate, mosfet.source);
+            markThreeTerminalPattern(nonlinearPattern, mosfet.drain, mosfet.gate, mosfet.source);
+        }
+        for (const auto& triode : triodes_) {
+            markThreeTerminalPattern(pattern, triode.plate, triode.grid, triode.cathode);
+            markThreeTerminalPattern(nonlinearPattern, triode.plate, triode.grid, triode.cathode);
+        }
 
-        return sparseSolver_.prepare(dimension_, pattern, staticMatrix_);
+        nonlinearMatrixIndices_.clear();
+        nonlinearMatrixIndices_.reserve(pattern.size());
+        for (std::size_t index = 0; index < nonlinearPattern.size(); ++index) {
+            if (nonlinearPattern[index] != 0U)
+                nonlinearMatrixIndices_.push_back(index);
+        }
+
+        return sparseSolver_.prepare(dimension_, pattern, staticMatrix_, nonlinearPattern);
     }
 
     bool factorizeStaticLinearSystem() noexcept {
@@ -1215,15 +1373,19 @@ private:
 
     std::vector<float> staticMatrix_;
     std::vector<float> staticRhs_;
+    std::vector<float> sampleRhs_;
     std::vector<float> matrix_;
     std::vector<float> rhs_;
     std::vector<float> solution_;
     std::vector<float> candidate_;
+    std::vector<float> previousSampleSolution_;
     std::vector<float> workMatrix_;
     std::vector<float> workRhs_;
     std::vector<float> linearLu_;
     std::vector<std::size_t> linearPivots_;
+    std::vector<std::size_t> nonlinearMatrixIndices_;
     std::vector<std::uint8_t> fixedVoltageNodes_;
+    bool previousSampleSolutionValid_ = false;
     FixedPatternSparseSolver sparseSolver_;
 };
 

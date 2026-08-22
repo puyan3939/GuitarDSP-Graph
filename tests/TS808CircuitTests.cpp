@@ -189,6 +189,97 @@ int main() {
     }
 
     {
+        circuit::TS808Circuit ts;
+        constexpr double oversampledRate = 88200.0;
+        ok &= require(ts.prepare(oversampledRate),
+                      "full TS808 prepares at the Eco oversampled rate");
+        ok &= require(ts.engine().dimension() == 48
+                          && ts.engine().sparseNonlinearFactorNonZeros()
+                              <= ts.engine().sparseNonlinearOriginalNonZeros() + 40
+                          && ts.engine().sparseNonlinearCachedLinearUnknowns() >= 24,
+                      "cached linear Schur prefix retains all 48 TS808 component unknowns");
+        ts.engine().resetPerformanceStats();
+        constexpr int samples = 1024;
+        int totalIterations = 0;
+        int unconverged = 0;
+        for (int i = 0; i < samples; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 220.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float output = ts.processSample(0.15f * std::sin(phase));
+            const auto solve = ts.lastSolveStats();
+            totalIterations += solve.iterations;
+            unconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const float averageIterations = static_cast<float>(totalIterations)
+            / static_cast<float>(samples);
+        const auto performance = ts.engine().performanceStats();
+        std::cout << "DIAG optimized-ts808 average_iterations=" << averageIterations
+                  << " unconverged=" << unconverged
+                  << " sparse=" << performance.sparseNewtonSolves
+                  << " fallback=" << performance.sparseFallbackSolves << '\n';
+        ok &= require(averageIterations < 4.0f && unconverged < 8,
+                      "double-precision sparse Newton converges rapidly at 2x guitar rate");
+        ok &= require(performance.sampleRhsAssemblies == performance.samples
+                          && performance.sparseNewtonSolves > 0,
+                      "TS808 assembles sample history once while preserving full sparse MNA");
+
+        // Quiet input is the real hardware worst case: the high-gain op-amp can
+        // alternate between adjacent float-sized operating points after KCL has
+        // already converged. A voltage-delta-only test previously spent all 40
+        // Newton steps on many silent samples and caused continuous audio XRUNs.
+        ts.engine().resetPerformanceStats();
+        constexpr int quietSamples = 8192;
+        int quietIterations = 0;
+        int quietUnconverged = 0;
+        for (int i = 0; i < quietSamples; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 220.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float output = ts.processSample(0.0035f * std::sin(phase));
+            const auto solve = ts.lastSolveStats();
+            quietIterations += solve.iterations;
+            quietUnconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const float averageQuietIterations = static_cast<float>(quietIterations)
+            / static_cast<float>(quietSamples);
+        const auto quietPerformance = ts.engine().performanceStats();
+        std::cout << "DIAG quiet-ts808 average_iterations=" << averageQuietIterations
+                  << " unconverged=" << quietUnconverged
+                  << " residual_convergences="
+                  << quietPerformance.nonlinearResidualConvergences << '\n';
+        ok &= require(averageQuietIterations < 3.0f && quietUnconverged == 0,
+                      "quiet guitar input converges without Newton-limit cycles");
+        ok &= require(quietPerformance.nonlinearResidualConvergences > 0
+                          && quietPerformance.sparseNewtonSolves
+                              >= quietPerformance.samples,
+                      "strict nonlinear KCL residual terminates physically converged samples");
+
+        ts.engine().resetPerformanceStats();
+        constexpr int silentSamples = 16384;
+        int silentIterations = 0;
+        int silentUnconverged = 0;
+        for (int i = 0; i < silentSamples; ++i) {
+            const float output = ts.processSample(0.0f);
+            const auto solve = ts.lastSolveStats();
+            silentIterations += solve.iterations;
+            silentUnconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const auto silentPerformance = ts.engine().performanceStats();
+        const float averageSilentIterations = static_cast<float>(silentIterations)
+            / static_cast<float>(silentSamples);
+        std::cout << "DIAG silent-ts808 average_iterations=" << averageSilentIterations
+                  << " unconverged=" << silentUnconverged
+                  << " cached_linear_unknowns="
+                  << ts.engine().sparseNonlinearCachedLinearUnknowns()
+                  << " static_rebuilds=" << silentPerformance.staticCacheRebuilds << '\n';
+        ok &= require(averageSilentIterations < 3.0f && silentUnconverged == 0
+                          && silentPerformance.staticCacheRebuilds == 0,
+                      "prolonged silence preserves cached physical circuit operating point");
+    }
+
+    {
         hq::TS808CircuitNode node;
         graph::PrepareSpec spec{};
         spec.sampleRate = 48000.0;

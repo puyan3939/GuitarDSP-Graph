@@ -34,6 +34,50 @@ private:
     std::atomic<float> gain_{1.0f};
 };
 
+// Distinct names let the realtime host automate parallel branch balances
+// independently without accidentally touching every generic gain in a graph.
+class BranchLevelNode final : public AudioNode {
+public:
+    enum class Branch { guitar, bass };
+
+    explicit BranchLevelNode(Branch branch = Branch::guitar, float level = 1.0f)
+        : branch_(branch), level_(std::clamp(level, 0.0f, 2.0f)) {}
+
+    std::string_view typeName() const noexcept override {
+        return branch_ == Branch::guitar ? "Guitar Branch Level" : "Bass Branch Level";
+    }
+    std::size_t parameterCount() const noexcept override { return 1; }
+    ParameterDescriptor parameterDescriptor(std::size_t index) const noexcept override {
+        return index == 0
+            ? ParameterDescriptor{"level", "Branch Level", 0.0f, 2.0f, 1.0f,
+                                  ParameterUnit::generic, 1.0f}
+            : ParameterDescriptor{};
+    }
+    float parameterValue(std::size_t index) const noexcept override {
+        return index == 0 ? level_.load(std::memory_order_relaxed) : 0.0f;
+    }
+    bool setParameterValue(std::size_t index, float value) noexcept override {
+        if (index != 0) return false;
+        level_.store(clampParameter(parameterDescriptor(0), value), std::memory_order_relaxed);
+        return true;
+    }
+    void prepare(const PrepareSpec&) override {}
+    void reset() noexcept override {}
+    void process(const AudioBuffer& input, AudioBuffer& output, int numSamples) noexcept override {
+        output.copyFrom(input, numSamples);
+        const float level = level_.load(std::memory_order_relaxed);
+        const int count = std::min(numSamples, output.samples());
+        for (int channel = 0; channel < output.channels(); ++channel) {
+            float* destination = output.channel(channel);
+            for (int index = 0; index < count; ++index) destination[index] *= level;
+        }
+    }
+
+private:
+    Branch branch_;
+    std::atomic<float> level_{1.0f};
+};
+
 class PolarityNode final : public AudioNode {
 public:
     explicit PolarityNode(bool inverted = false) : inverted_(inverted) {}

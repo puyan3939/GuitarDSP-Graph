@@ -53,6 +53,11 @@ struct BJTModel {
 };
 
 struct TriodeModel {
+    struct PlateLinearization {
+        float current = 0.0f;
+        float conductance = 0.0f;
+    };
+
     float mu = 100.0f;
     float kg1 = 1060.0f;
     float kp = 600.0f;
@@ -65,9 +70,37 @@ struct TriodeModel {
     float plateCurrent(float gridVoltage, float plateVoltage) const noexcept {
         const float safePlate = std::max(0.0f, plateVoltage);
         const float root = std::sqrt(kvb + safePlate * safePlate);
-        const float inner = std::max(0.0f, kp * (1.0f / std::max(1.0f, mu) + gridVoltage / std::max(1.0f, root)));
+        // Keep the signed grid term: softplus already guarantees positive plate
+        // current. Clamping its input to zero makes every sufficiently negative
+        // grid voltage produce the same current, eliminating transconductance
+        // after the cathode self-bias settles and silencing the whole amplifier.
+        const float inner = kp * (1.0f / std::max(1.0f, mu)
+                                + gridVoltage / std::max(1.0f, root));
         const float logTerm = std::log1p(std::exp(std::clamp(inner, -30.0f, 30.0f)));
         return 2.0f * std::pow(std::max(0.0f, logTerm), exponent) / std::max(1.0f, kg1);
+    }
+
+    PlateLinearization linearizePlate(float gridVoltage, float plateVoltage) const noexcept {
+        const float safePlate = std::max(0.0f, plateVoltage);
+        const float root = std::sqrt(kvb + safePlate * safePlate);
+        const float safeRoot = std::max(1.0f, root);
+        const float inner = kp * (1.0f / std::max(1.0f, mu)
+                                + gridVoltage / safeRoot);
+        const float limited = std::clamp(inner, -30.0f, 30.0f);
+        const float exponential = std::exp(limited);
+        const float logTerm = std::log1p(exponential);
+        const float current = 2.0f * std::pow(std::max(0.0f, logTerm), exponent)
+            / std::max(1.0f, kg1);
+
+        float conductance = 0.0f;
+        if (plateVoltage > 0.0f && root > 1.0f
+            && inner > -30.0f && inner < 30.0f && logTerm > 0.0f) {
+            const float innerSlope = -kp * gridVoltage * safePlate
+                / (root * root * root);
+            const float softplusSlope = exponential / (1.0f + exponential);
+            conductance = exponent * current / logTerm * softplusSlope * innerSlope;
+        }
+        return {current, conductance};
     }
 };
 

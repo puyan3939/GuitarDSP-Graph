@@ -80,6 +80,48 @@ void RealtimeGraphHost::process(const AudioBuffer& input, AudioBuffer& output, i
     }
 }
 
+bool RealtimeGraphHost::setCategoryParameter(NodeCategory category,
+                                             std::size_t parameterIndex,
+                                             float value) noexcept {
+    bool changed = false;
+    auto apply = [&](PreparedGraph* prepared) noexcept {
+        if (prepared == nullptr) return;
+        for (const NodeId id : prepared->graph.schedule()) {
+            if (auto* node = prepared->graph.node(id);
+                node != nullptr && node->category() == category) {
+                changed = node->setParameterValue(parameterIndex, value) || changed;
+            }
+        }
+    };
+
+    PreparedGraph* active = active_.load(std::memory_order_acquire);
+    apply(active);
+    PreparedGraph* pending = pending_.load(std::memory_order_acquire);
+    if (pending != active) apply(pending);
+    return changed;
+}
+
+bool RealtimeGraphHost::setTypeParameter(std::string_view typeName,
+                                         std::size_t parameterIndex,
+                                         float value) noexcept {
+    bool changed = false;
+    auto apply = [&](PreparedGraph* prepared) noexcept {
+        if (prepared == nullptr) return;
+        for (const NodeId id : prepared->graph.schedule()) {
+            if (auto* node = prepared->graph.node(id);
+                node != nullptr && node->typeName() == typeName) {
+                changed = node->setParameterValue(parameterIndex, value) || changed;
+            }
+        }
+    };
+
+    PreparedGraph* active = active_.load(std::memory_order_acquire);
+    apply(active);
+    PreparedGraph* pending = pending_.load(std::memory_order_acquire);
+    if (pending != active) apply(pending);
+    return changed;
+}
+
 std::size_t RealtimeGraphHost::collectRetired() noexcept {
     std::size_t count = 0;
     while (PreparedGraph* pointer = retired_.tryPop()) {

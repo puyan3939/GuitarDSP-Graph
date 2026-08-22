@@ -22,16 +22,31 @@ public:
             const float mid = 0.5f * (x + previous_);
             y = std::tanh(mid);
         } else {
-            y = (antiderivative(x) - antiderivative(previous_)) / dx;
+            // log(cosh(x)) is O(x^2). Evaluating it in float first rounds
+            // cosh(x) to one for quiet audio, then dividing two quantized
+            // primitives by dx turns that cancellation into audible noise.
+            // Keep the complete divided difference in double precision. The
+            // small-signal series is both more accurate and cheaper than two
+            // log/cosh evaluations in the region where the old path failed.
+            const double current = static_cast<double>(x);
+            const double previous = static_cast<double>(previous_);
+            y = static_cast<float>((antiderivative(current) - antiderivative(previous))
+                                   / (current - previous));
         }
         previous_ = x;
         return y;
     }
 
 private:
-    static float antiderivative(float x) noexcept {
-        const float ax = std::abs(x);
-        return ax > 18.0f ? ax : std::log(std::cosh(x));
+    static double antiderivative(double x) noexcept {
+        const double ax = std::abs(x);
+        if (ax < 0.25) {
+            const double square = x * x;
+            return square * (0.5 + square * (-1.0 / 12.0
+                + square * (1.0 / 45.0 + square * (-17.0 / 2520.0
+                + square * (31.0 / 14175.0 - square * 691.0 / 935550.0)))));
+        }
+        return ax > 18.0 ? ax : std::log(std::cosh(x));
     }
 
     float previous_ = 0.0f;

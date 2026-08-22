@@ -233,6 +233,10 @@ private:
     }
 
     void applySmoothedControls() noexcept {
+        if (appliedDrive_ == targetDrive_ && appliedTone_ == targetTone_
+            && appliedLevel_ == targetLevel_)
+            return;
+
         // About 5 ms for a full-scale knob jump at any sample rate. This is fast
         // enough to feel immediate but prevents a preset/UI discontinuity from
         // replacing the MNA conductance matrix with a radically different one in a

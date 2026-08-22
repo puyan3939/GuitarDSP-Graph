@@ -287,6 +287,10 @@ private:
     }
 
     void applySmoothedControls() noexcept {
+        if (appliedDistortion_ == targetDistortion_ && appliedTone_ == targetTone_
+            && appliedLevel_ == targetLevel_)
+            return;
+
         // Five milliseconds for a full knob excursion. Matrix-affecting pot edits
         // are therefore bounded and all happen before processSample(), so a sample
         // incurs at most one static-cache rebuild even if several controls move.
