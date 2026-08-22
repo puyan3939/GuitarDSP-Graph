@@ -277,6 +277,7 @@ public:
                                           int numOutputChannels,
                                           int numSamples,
                                           const juce::AudioIODeviceCallbackContext&) override {
+        const juce::ScopedNoDenormals noDenormals;
         engine_.process(inputChannelData, numInputChannels,
                         outputChannelData, numOutputChannels, numSamples);
     }

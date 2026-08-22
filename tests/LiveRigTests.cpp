@@ -1,6 +1,7 @@
 #include "guitardsp/app/LiveRig.h"
 #include "guitardsp/app/RealtimeAudioEngine.h"
 #include "guitardsp/app/ReferenceCabinetIR.h"
+#include "guitardsp/hq/Components.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,17 @@ bool require(bool condition, const char* name) {
 
 int main() {
     bool ok = true;
+
+    {
+        const auto triode = hq::TriodeModel::twelveAX7();
+        const float nearCutoff = triode.plateCurrent(-2.0f, 180.0f);
+        const float belowCutoff = triode.plateCurrent(-3.0f, 180.0f);
+        const float furtherBelowCutoff = triode.plateCurrent(-4.0f, 180.0f);
+        ok &= require(nearCutoff > belowCutoff
+                          && belowCutoff > furtherBelowCutoff
+                          && furtherBelowCutoff > 0.0f,
+                      "12AX7 retains a smooth, grid-dependent current below nominal cutoff");
+    }
 
     {
         const auto ir = app::makeReferenceCabinetImpulse(48000.0);
@@ -101,6 +113,51 @@ int main() {
                       "mono guitar input is duplicated coherently to stereo outputs");
         ok &= require(engine.stats().callbacks == 1,
                       "realtime device bridge publishes callback telemetry");
+    }
+
+    {
+        constexpr int blockSize = 512;
+        constexpr int blocks = 32;
+        constexpr double sampleRate = 44100.0;
+
+        app::LiveRigSettings settings;
+        settings.quality = graph::ProcessingQuality::eco;
+        settings.pedal = app::PedalModel::bypass;
+        settings.amp = app::AmpModel::reference;
+        settings.ampEnabled = true;
+        settings.cabinetEnabled = true;
+
+        app::RealtimeAudioEngine engine;
+        ok &= require(engine.configure(sampleRate, blockSize, 2, settings),
+                      "44.1 kHz stereo amp/cab hardware rig prepares without a pedal");
+        engine.setInputRoutingMode(app::InputRoutingMode::autoMono);
+        engine.setOutputTrimDb(-12.0f);
+        engine.setMuted(false);
+
+        std::vector<float> silentLeft(static_cast<std::size_t>(blockSize), 0.0f);
+        std::vector<float> activeRight(static_cast<std::size_t>(blockSize), 0.0f);
+        std::vector<float> outputLeft(static_cast<std::size_t>(blockSize), 0.0f);
+        std::vector<float> outputRight(static_cast<std::size_t>(blockSize), 0.0f);
+        const float* inputs[]{silentLeft.data(), activeRight.data()};
+        float* outputs[]{outputLeft.data(), outputRight.data()};
+
+        float finalPeak = 0.0f;
+        for (int block = 0; block < blocks; ++block) {
+            for (int i = 0; i < blockSize; ++i) {
+                const int sample = block * blockSize + i;
+                activeRight[static_cast<std::size_t>(i)] = 0.20f * std::sin(
+                    2.0f * std::numbers::pi_v<float> * 220.0f
+                    * static_cast<float>(sample) / static_cast<float>(sampleRate));
+            }
+            engine.process(inputs, 2, outputs, 2, blockSize);
+            if (block == blocks - 1) {
+                for (const float sample : outputLeft)
+                    finalPeak = std::max(finalPeak, std::abs(sample));
+            }
+        }
+
+        ok &= require(engine.stats().selectedInputChannel == 1 && finalPeak > 1.0e-5f,
+                      "right-jack guitar stays audible after tube self-bias settles");
     }
 
     return ok ? 0 : 1;

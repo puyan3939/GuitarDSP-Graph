@@ -65,7 +65,12 @@ struct TriodeModel {
     float plateCurrent(float gridVoltage, float plateVoltage) const noexcept {
         const float safePlate = std::max(0.0f, plateVoltage);
         const float root = std::sqrt(kvb + safePlate * safePlate);
-        const float inner = std::max(0.0f, kp * (1.0f / std::max(1.0f, mu) + gridVoltage / std::max(1.0f, root)));
+        // Keep the signed grid term: softplus already guarantees positive plate
+        // current. Clamping its input to zero makes every sufficiently negative
+        // grid voltage produce the same current, eliminating transconductance
+        // after the cathode self-bias settles and silencing the whole amplifier.
+        const float inner = kp * (1.0f / std::max(1.0f, mu)
+                                + gridVoltage / std::max(1.0f, root));
         const float logTerm = std::log1p(std::exp(std::clamp(inner, -30.0f, 30.0f)));
         return 2.0f * std::pow(std::max(0.0f, logTerm), exponent) / std::max(1.0f, kg1);
     }
