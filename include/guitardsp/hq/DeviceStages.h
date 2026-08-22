@@ -76,11 +76,14 @@ private:
     float solvePlate(float grid, float initial) const noexcept {
         float plate = std::clamp(initial, 1.0f, config_.supplyVoltage);
         for (int iteration = 0; iteration < 8; ++iteration) {
-            const float current = config_.tube.plateCurrent(grid, plate);
+            const auto operatingPoint = config_.tube.linearizePlate(grid, plate);
+            const float current = operatingPoint.current;
             const float f = plate + config_.plateResistance * current - config_.supplyVoltage;
-            const float delta = std::max(0.01f, plate * 0.0005f);
-            const float i2 = config_.tube.plateCurrent(grid, std::min(config_.supplyVoltage, plate + delta));
-            const float derivative = 1.0f + config_.plateResistance * (i2 - current) / delta;
+            // Differentiate the same Koren-style triode law analytically. The
+            // former finite difference evaluated sqrt/exp/log/pow twice per
+            // Newton step and added subtraction noise at the operating point.
+            const float derivative = 1.0f
+                + config_.plateResistance * operatingPoint.conductance;
             const float step = f / std::max(0.05f, derivative);
             plate -= std::clamp(step, -40.0f, 40.0f);
             plate = std::clamp(plate, 1.0f, config_.supplyVoltage);

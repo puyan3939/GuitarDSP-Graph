@@ -13,6 +13,7 @@ namespace guitardsp::circuit {
 //
 // Symbolic work happens in prepare():
 // - find a structural row permutation that gives every column a diagonal entry
+// - choose a minimum-fill symmetric elimination ordering for the matched system
 // - compute the exact no-pivot elimination fill pattern
 // - compile CSR rows and a dense row/column -> sparse-slot lookup table
 //
@@ -23,7 +24,8 @@ namespace guitardsp::circuit {
 // accepted Newton result against the original dense equations using a scaled
 // backward-error residual. An unsafe pivot or residual falls back to the dense
 // partial-pivot reference solver.
-// Columns are never permuted, so the output vector remains in original MNA order.
+// Internal rows and columns may be permuted for sparsity; solved unknowns are
+// scattered back into the caller's original MNA/component order.
 class FixedPatternSparseSolver {
 public:
     bool prepare(std::size_t dimension,
@@ -89,12 +91,70 @@ public:
             }
         }
 
+        // The user-visible MNA numbering follows schematic construction rather
+        // than a useful elimination order. Directly factoring that order can
+        // create several times more fill than the actual circuit graph requires.
+        // A symbolic Markowitz pass only changes the order of exact Gaussian
+        // elimination: every component, unknown and Newton equation is retained.
+        std::vector<std::uint8_t> orderingFill(dimension_ * dimension_, 0U);
+        for (std::size_t row = 0; row < dimension_; ++row) {
+            const auto originalRow = rowPermutation_[row];
+            for (std::size_t column = 0; column < dimension_; ++column)
+                orderingFill[row * dimension_ + column] =
+                    structuralPattern[originalRow * dimension_ + column];
+        }
+
+        std::vector<std::uint8_t> eliminated(dimension_, 0U);
+        columnPermutation_.clear();
+        columnPermutation_.reserve(dimension_);
+        for (std::size_t step = 0; step < dimension_; ++step) {
+            std::size_t best = npos;
+            std::size_t bestScore = npos;
+            for (std::size_t candidate = 0; candidate < dimension_; ++candidate) {
+                if (eliminated[candidate] != 0U) continue;
+                std::size_t rowDegree = 0U;
+                std::size_t columnDegree = 0U;
+                for (std::size_t other = 0; other < dimension_; ++other) {
+                    if (other == candidate || eliminated[other] != 0U) continue;
+                    rowDegree += orderingFill[candidate * dimension_ + other] != 0U ? 1U : 0U;
+                    columnDegree += orderingFill[other * dimension_ + candidate] != 0U ? 1U : 0U;
+                }
+                const auto score = rowDegree * columnDegree;
+                if (best == npos || score < bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+            if (best == npos) {
+                clear();
+                return false;
+            }
+            columnPermutation_.push_back(best);
+
+            for (std::size_t row = 0; row < dimension_; ++row) {
+                if (row == best || eliminated[row] != 0U ||
+                    orderingFill[row * dimension_ + best] == 0U)
+                    continue;
+                for (std::size_t column = 0; column < dimension_; ++column) {
+                    if (column == best || eliminated[column] != 0U ||
+                        orderingFill[best * dimension_ + column] == 0U)
+                        continue;
+                    orderingFill[row * dimension_ + column] = 1U;
+                }
+            }
+            eliminated[best] = 1U;
+        }
+
+        const auto matchedRows = rowPermutation_;
+        for (std::size_t row = 0; row < dimension_; ++row)
+            rowPermutation_[row] = matchedRows[columnPermutation_[row]];
+
         std::vector<std::uint8_t> fill(dimension_ * dimension_, 0U);
         for (std::size_t row = 0; row < dimension_; ++row) {
             const auto originalRow = rowPermutation_[row];
             for (std::size_t column = 0; column < dimension_; ++column)
                 fill[row * dimension_ + column] =
-                    structuralPattern[originalRow * dimension_ + column];
+                    structuralPattern[originalRow * dimension_ + columnPermutation_[column]];
         }
 
         for (std::size_t k = 0; k < dimension_; ++k) {
@@ -147,11 +207,12 @@ public:
             originalRowOffsets_[row] = originalColumns_.size();
             const auto originalRow = rowPermutation_[row];
             for (std::size_t column = 0; column < dimension_; ++column) {
-                if (structuralPattern[originalRow * dimension_ + column] == 0U)
+                const auto originalColumn = columnPermutation_[column];
+                if (structuralPattern[originalRow * dimension_ + originalColumn] == 0U)
                     continue;
-                originalColumns_.push_back(column);
+                originalColumns_.push_back(originalColumn);
                 originalSlots_.push_back(slotLookup_[row * dimension_ + column]);
-                originalDenseIndices_.push_back(originalRow * dimension_ + column);
+                originalDenseIndices_.push_back(originalRow * dimension_ + originalColumn);
             }
         }
         originalRowOffsets_[dimension_] = originalColumns_.size();
@@ -257,14 +318,15 @@ public:
         }
 
         for (std::size_t i = 0; i < dimension_; ++i)
-            solution[i] = static_cast<float>(solutionWork_[i]);
+            solution[columnPermutation_[i]] = static_cast<float>(solutionWork_[i]);
 
         return !verifyResidual || validate(denseMatrix, rhs, solution);
     }
 
     bool validate(const std::vector<float>& denseMatrix,
                   const std::vector<float>& rhs,
-                  const std::vector<float>& solution) const noexcept {
+                  const std::vector<float>& solution,
+                  double maximumBackwardError = 2.0e-4) const noexcept {
         if (!available_ || denseMatrix.size() != dimension_ * dimension_ ||
             rhs.size() != dimension_ || solution.size() != dimension_)
             return false;
@@ -274,7 +336,6 @@ public:
         // exposing it to Newton. The row-scaled backward error is dimensionless and
         // works for both millivolt pedals and hundreds-of-volts tube circuits.
         constexpr double residualFloor = 1.0e-18;
-        constexpr double maximumBackwardError = 2.0e-4;
         double worstBackwardError = 0.0;
         for (std::size_t row = 0; row < dimension_; ++row) {
             const auto originalRow = rowPermutation_[row];
@@ -312,6 +373,7 @@ private:
         originalNonZeros_ = 0U;
         factorNonZeros_ = 0U;
         rowPermutation_.clear();
+        columnPermutation_.clear();
         rowOffsets_.clear();
         columns_.clear();
         slotLookup_.clear();
@@ -335,6 +397,7 @@ private:
     std::size_t originalNonZeros_ = 0U;
     std::size_t factorNonZeros_ = 0U;
     std::vector<std::size_t> rowPermutation_;
+    std::vector<std::size_t> columnPermutation_;
     std::vector<std::size_t> rowOffsets_;
     std::vector<std::size_t> columns_;
     std::vector<std::size_t> slotLookup_;

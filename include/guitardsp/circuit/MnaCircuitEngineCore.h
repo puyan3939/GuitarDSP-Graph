@@ -55,6 +55,7 @@ public:
         std::uint64_t generalLinearSolves = 0;
         std::uint64_t sparseNewtonSolves = 0;
         std::uint64_t sparseFallbackSolves = 0;
+        std::uint64_t nonlinearResidualConvergences = 0;
     };
 
     Node addNode() {
@@ -380,6 +381,10 @@ public:
             l.previousVoltage = 0.0f;
             l.previousCurrent = 0.0f;
         }
+        for (auto& diode : diodes_) {
+            diode.junctionVoltage = 0.0f;
+            diode.junctionVoltageValid = false;
+        }
         lastStats_ = {};
     }
 
@@ -440,8 +445,23 @@ public:
             for (const auto index : nonlinearMatrixIndices_)
                 matrix_[index] = staticMatrix_[index];
             rhs_ = sampleRhs_;
-            stampNonlinear(candidate_);
+            stampNonlinear(candidate_, usesPreparedSparse);
             ++performanceStats_.nonlinearAssemblies;
+
+            if (iteration > 0 && usesPreparedSparse
+                && sparseSolver_.validate(matrix_, rhs_, candidate_, 3.0e-7)) {
+                // Evaluate the actual nonlinear circuit equations at the current
+                // candidate before factoring their Jacobian again. Near an
+                // op-amp operating point, float-sized voltage jitter can keep
+                // successive Newton iterates moving while KCL is already solved
+                // to a fraction of one part per million. Residual convergence is
+                // the physical criterion and avoids pointless 40-step cycles.
+                solution_ = candidate_;
+                stats.converged = true;
+                stats.iterations = iteration;
+                ++performanceStats_.nonlinearResidualConvergences;
+                break;
+            }
 
             bool solved = false;
             bool usedSparseSolve = false;
@@ -484,7 +504,6 @@ public:
                     std::abs(solution_[i]), std::abs(candidate_[i])});
                 maxScaledDelta = std::max(maxScaledDelta, delta / scale);
             }
-
             if (usedSparseSolve
                 && (maxScaledDelta <= tolerance
                     || iteration + 1 == maximumNewtonIterations)
@@ -620,7 +639,12 @@ private:
         float transresistanceOhms = 1.0f;
         std::size_t branchIndex = 0;
     };
-    struct Diode { Node anode{}, cathode{}; hq::DiodeSpec spec{}; };
+    struct Diode {
+        Node anode{}, cathode{};
+        hq::DiodeSpec spec{};
+        float junctionVoltage = 0.0f;
+        bool junctionVoltageValid = false;
+    };
     struct Bjt { Node collector{}, base{}, emitter{}; hq::BJTSpec spec{}; };
     struct Jfet { Node drain{}, gate{}, source{}; hq::JFETSpec spec{}; };
     struct Mosfet { Node drain{}, gate{}, source{}; hq::MOSFETSpec spec{}; };
@@ -843,8 +867,10 @@ private:
         stampCurrentSource(rhs_, positive, negative, equivalentCurrent);
     }
 
-    static DiodeLinearization linearizeDiode(const hq::DiodeSpec& spec,
-                                               float terminalVoltage) noexcept {
+    static DiodeLinearization linearizeDiode(Diode& diode,
+                                             float terminalVoltage,
+                                             bool reuseJunctionVoltage) noexcept {
+        const auto& spec = diode.spec;
         const float rs = std::max(0.0f, spec.seriesResistanceOhms);
         const float denominator = std::max(1.0e-6f,
             spec.emissionCoefficient * spec.thermalVoltage);
@@ -856,7 +882,14 @@ private:
                 spec.saturationCurrent * exponential / denominator
             };
         };
-        float vj = terminalVoltage;
+        // Consecutive Newton iterates and oversampled audio samples start close
+        // to the same physical junction voltage. Reusing that previous implicit
+        // root avoids repeatedly solving a forward-biased BJT diode from its
+        // terminal voltage. The identical diode equation is still solved to the
+        // original tolerance; only its initial guess changes.
+        float vj = reuseJunctionVoltage && diode.junctionVoltageValid
+                && std::abs(diode.junctionVoltage - terminalVoltage) <= 0.75f
+            ? diode.junctionVoltage : terminalVoltage;
         for (int i = 0; i < 8; ++i) {
             const auto junction = evaluate(vj);
             const float residual = vj + rs * junction.current - terminalVoltage;
@@ -865,6 +898,8 @@ private:
             vj -= std::clamp(step, -0.5f, 0.5f);
             if (std::abs(step) < 1.0e-7f) break;
         }
+        diode.junctionVoltage = vj;
+        diode.junctionVoltageValid = std::isfinite(vj);
         const auto junction = evaluate(vj);
         return {junction.current,
                 junction.conductance /
@@ -1025,10 +1060,11 @@ private:
         stampLinearizedCurrent(device.plate, device.cathode, current, guess, jac);
     }
 
-    void stampNonlinear(const std::vector<float>& guess) noexcept {
-        for (const auto& d : diodes_) {
+    void stampNonlinear(const std::vector<float>& guess,
+                        bool reuseJunctionVoltage) noexcept {
+        for (auto& d : diodes_) {
             const float v = nodeVoltage(guess, d.anode) - nodeVoltage(guess, d.cathode);
-            const auto linear = linearizeDiode(d.spec, v);
+            const auto linear = linearizeDiode(d, v, reuseJunctionVoltage);
             const float g = std::max(1.0e-12f, linear.conductance);
             const float iEq = linear.current - g * v;
             stampConductance(matrix_, d.anode, d.cathode, g);

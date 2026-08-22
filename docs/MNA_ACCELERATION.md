@@ -55,11 +55,18 @@ are not rebuilt or copied as a complete dense matrix inside the iteration.
 
 `prepare()` performs symbolic analysis once and compiles:
 
+- a Markowitz-style minimum-fill ordering of the matched MNA rows and columns;
 - the original sparse matrix entries;
 - the exact structural LU fill pattern;
 - every diagonal and lower-factor location;
 - every elimination target address;
 - the rows needed for scaled backward-error validation.
+
+The ordering never removes an unknown or changes a circuit equation. For the
+complete 48-unknown TS808, it reduces symbolic factor entries from 323 to 177
+and elimination multiply/subtract updates from 375 to 47. The 57-unknown DS-1
+factor similarly falls from 453 entries to 219. Internal columns are scattered
+back to the original schematic-facing MNA order after each solve.
 
 Numeric sparse LU and its temporary forward/back-substitution vectors use
 double precision even though the external audio and component contract remains
@@ -68,6 +75,20 @@ pedal op-amp nodes in a 40-iteration limit cycle. Newton convergence is scaled t
 each unknown's voltage/current magnitude, and a bounded previous-sample predictor
 provides its initial guess. Small corrections use full Newton steps; larger
 transitions retain the existing trust-region damping.
+
+Newton accepts a physically converged candidate when its freshly restamped
+nonlinear KCL equations meet a strict scaled backward-error limit of `3e-7`.
+This is substantially stricter than the sparse linear-solve safety limit. It
+also handles high-gain op-amp nodes whose float-sized operating-point jitter
+previously prevented a voltage-delta-only test from terminating: silence and
+quiet guitar input could otherwise consume all 40 Newton iterations despite
+already satisfying the actual circuit equations. Every sample still receives at
+least one complete sparse MNA solve.
+
+Diodes with series resistance retain the same implicit junction equation and
+convergence tolerance. Their previous converged junction voltage is reused only
+as the next Newton starting point, avoiding repeated cold-start exponential
+solves in the TS808 and DS-1 Ebers-Moll transistor subcircuits.
 
 Every accepted sparse result is checked against the original MNA equations. The
 expensive sparse backward-error pass runs when Newton accepts the sample or
@@ -95,6 +116,7 @@ All vectors and factorization workspaces are sized in `prepare()`. The steady au
 - cached linear solves
 - general dense solves
 - sparse Newton solves and dense fallbacks
+- accepted nonlinear residual convergences
 
 `MnaAccelerationTests` verifies that audio-rate voltage-source changes do not rebuild or refactorize the matrix, linear circuits reuse cached LU solves, matrix-affecting edits rebuild/refactorize exactly once, and nonlinear circuits reuse the cached linear base while restamping Newton-dependent terms.
 

@@ -193,6 +193,10 @@ int main() {
         constexpr double oversampledRate = 88200.0;
         ok &= require(ts.prepare(oversampledRate),
                       "full TS808 prepares at the Eco oversampled rate");
+        ok &= require(ts.engine().dimension() == 48
+                          && ts.engine().sparseNonlinearFactorNonZeros()
+                              <= ts.engine().sparseNonlinearOriginalNonZeros() + 20,
+                      "minimum-fill ordering retains all 48 TS808 unknowns without excess fill");
         ts.engine().resetPerformanceStats();
         constexpr int samples = 1024;
         int totalIterations = 0;
@@ -218,6 +222,37 @@ int main() {
         ok &= require(performance.sampleRhsAssemblies == performance.samples
                           && performance.sparseNewtonSolves > 0,
                       "TS808 assembles sample history once while preserving full sparse MNA");
+
+        // Quiet input is the real hardware worst case: the high-gain op-amp can
+        // alternate between adjacent float-sized operating points after KCL has
+        // already converged. A voltage-delta-only test previously spent all 40
+        // Newton steps on many silent samples and caused continuous audio XRUNs.
+        ts.engine().resetPerformanceStats();
+        constexpr int quietSamples = 8192;
+        int quietIterations = 0;
+        int quietUnconverged = 0;
+        for (int i = 0; i < quietSamples; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 220.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float output = ts.processSample(0.0035f * std::sin(phase));
+            const auto solve = ts.lastSolveStats();
+            quietIterations += solve.iterations;
+            quietUnconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const float averageQuietIterations = static_cast<float>(quietIterations)
+            / static_cast<float>(quietSamples);
+        const auto quietPerformance = ts.engine().performanceStats();
+        std::cout << "DIAG quiet-ts808 average_iterations=" << averageQuietIterations
+                  << " unconverged=" << quietUnconverged
+                  << " residual_convergences="
+                  << quietPerformance.nonlinearResidualConvergences << '\n';
+        ok &= require(averageQuietIterations < 3.0f && quietUnconverged == 0,
+                      "quiet guitar input converges without Newton-limit cycles");
+        ok &= require(quietPerformance.nonlinearResidualConvergences > 0
+                          && quietPerformance.sparseNewtonSolves
+                              >= quietPerformance.samples,
+                      "strict nonlinear KCL residual terminates physically converged samples");
     }
 
     {

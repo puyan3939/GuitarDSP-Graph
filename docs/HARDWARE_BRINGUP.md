@@ -80,6 +80,14 @@ are shown alongside the core callback statistics. They are complementary:
 - neither value, by itself, proves which plugin, driver or competing process was
   responsible.
 
+Measure callback load both while playing and while the guitar is quiet. The
+component TS808's former voltage-delta-only Newton criterion was worst near its
+quiescent operating point, so a loud-sine benchmark could pass while actual
+low-level input produced repeated 40-iteration cycles and driver XRUNs. The
+current solver also tests the freshly restamped nonlinear circuit residual;
+quiet-input regression coverage therefore belongs alongside driven-waveform
+tests.
+
 The app reports buffer duration, the driver's reported input/output latency, DSP
 graph latency and their reported I/O + DSP total separately. It does not add the
 buffer a second time because drivers differ in whether their reported I/O latency
