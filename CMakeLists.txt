@@ -8,6 +8,7 @@ option(GUITARDSP_GRAPH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(GUITARDSP_BUILD_BENCHMARKS "Build local benchmark executables" OFF)
 option(GUITARDSP_BUILD_AUDIO_APP "Build the JUCE standalone realtime guitar host" OFF)
 option(GUITARDSP_FETCH_JUCE "Fetch the pinned JUCE release when building the audio app" OFF)
+option(GUITARDSP_NATIVE_CPU "Optimize DSP code for the CPU building this executable" OFF)
 set(GUITARDSP_JUCE_PATH "" CACHE PATH "Path to a JUCE source checkout containing CMakeLists.txt")
 
 add_library(GuitarDSPGraphCore
@@ -28,6 +29,9 @@ if (MSVC)
     endif()
 else()
     target_compile_options(GuitarDSPGraphCore PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    if (GUITARDSP_NATIVE_CPU)
+        target_compile_options(GuitarDSPGraphCore PRIVATE -march=native)
+    endif()
     if (GUITARDSP_GRAPH_WARNINGS_AS_ERRORS)
         target_compile_options(GuitarDSPGraphCore PRIVATE -Werror)
     endif()
@@ -68,6 +72,9 @@ if (GUITARDSP_BUILD_AUDIO_APP)
         COMPANY_NAME "GuitarDSP"
     )
     target_sources(GuitarDSPApp PRIVATE apps/GuitarDSPApp/Main.cpp)
+    if (GUITARDSP_NATIVE_CPU AND NOT MSVC)
+        target_compile_options(GuitarDSPApp PRIVATE -march=native)
+    endif()
     target_compile_definitions(GuitarDSPApp PRIVATE
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0

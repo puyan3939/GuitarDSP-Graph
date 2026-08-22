@@ -29,11 +29,17 @@ and output meters behave as expected.
 Four explicit policies are available:
 
 1. **Auto mono:** choose the stronger valid physical input, apply switching
-   hysteresis, and duplicate that one guitar signal coherently to all processing
-   channels.
-2. **Input 1:** force physical input 1 to both processing channels.
-3. **Input 2:** force physical input 2 to both processing channels.
-4. **Stereo:** preserve independent left/right inputs.
+   hysteresis, process one component-level guitar signal, and copy its result to
+   both physical outputs.
+2. **Input 1:** process physical input 1 once and copy it to both outputs.
+3. **Input 2:** process physical input 2 once and copy it to both outputs.
+4. **Stereo:** preserve independent left/right inputs and independent circuit
+   state for both processing channels.
+
+Changing between mono and independent stereo synchronizes with the current audio
+callback before preparing a graph with the new processing-channel count. Stereo
+hardware outputs alone no longer cause a mono guitar pedal, amplifier and cabinet
+to be solved twice.
 
 An explicitly requested input that is unavailable produces silence rather than
 silently substituting a different jack. Automatic mode keeps its previous

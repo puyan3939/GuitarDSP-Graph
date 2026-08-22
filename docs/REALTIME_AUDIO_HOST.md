@@ -64,6 +64,12 @@ cmake -S . -B build-app -G Ninja \
 cmake --build build-app --target GuitarDSPApp --parallel
 ```
 
+For an executable that will run on the same machine where it is compiled, add
+`-DGUITARDSP_NATIVE_CPU=ON` to either configure command. GCC/Clang then use
+`-march=native` for the DSP core and standalone host. Keep this option disabled
+for portable binaries built on a different CPU. It does not enable fast-math or
+change finite-sample safety checks.
+
 Typical Debian/Ubuntu development packages for the Linux standalone build are:
 
 ```bash

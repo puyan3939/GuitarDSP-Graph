@@ -189,6 +189,38 @@ int main() {
     }
 
     {
+        circuit::TS808Circuit ts;
+        constexpr double oversampledRate = 88200.0;
+        ok &= require(ts.prepare(oversampledRate),
+                      "full TS808 prepares at the Eco oversampled rate");
+        ts.engine().resetPerformanceStats();
+        constexpr int samples = 1024;
+        int totalIterations = 0;
+        int unconverged = 0;
+        for (int i = 0; i < samples; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 220.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float output = ts.processSample(0.15f * std::sin(phase));
+            const auto solve = ts.lastSolveStats();
+            totalIterations += solve.iterations;
+            unconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const float averageIterations = static_cast<float>(totalIterations)
+            / static_cast<float>(samples);
+        const auto performance = ts.engine().performanceStats();
+        std::cout << "DIAG optimized-ts808 average_iterations=" << averageIterations
+                  << " unconverged=" << unconverged
+                  << " sparse=" << performance.sparseNewtonSolves
+                  << " fallback=" << performance.sparseFallbackSolves << '\n';
+        ok &= require(averageIterations < 4.0f && unconverged < 8,
+                      "double-precision sparse Newton converges rapidly at 2x guitar rate");
+        ok &= require(performance.sampleRhsAssemblies == performance.samples
+                          && performance.sparseNewtonSolves > 0,
+                      "TS808 assembles sample history once while preserving full sparse MNA");
+    }
+
+    {
         hq::TS808CircuitNode node;
         graph::PrepareSpec spec{};
         spec.sampleRate = 48000.0;

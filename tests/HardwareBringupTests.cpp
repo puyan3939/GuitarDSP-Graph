@@ -72,6 +72,25 @@ int main() {
     const float* stereoInputs[]{physicalLeft.data(), physicalRight.data()};
     float* stereoOutputs[]{outputLeft.data(), outputRight.data()};
 
+    {
+        app::RealtimeAudioEngine monoEngine;
+        ok &= require(monoEngine.configure(48000.0, 64, 1, settings),
+                      "one-channel guitar rig prepares independently of stereo outputs");
+        monoEngine.setInputRoutingMode(app::InputRoutingMode::input2);
+        monoEngine.setInputTrimDb(0.0f);
+        monoEngine.setOutputTrimDb(0.0f);
+        monoEngine.process(stereoInputs, 2, stereoOutputs, 2, 64);
+        float maximumDifference = 0.0f;
+        for (std::size_t i = 0; i < outputLeft.size(); ++i)
+            maximumDifference = std::max(maximumDifference,
+                std::abs(outputLeft[i] - outputRight[i]));
+        ok &= require(monoEngine.processingChannels() == 1
+                          && monoEngine.stats().selectedInputChannel == 1
+                          && maximumDifference < 1.0e-7f
+                          && peak(outputLeft) > 0.15f,
+                      "right-jack guitar is processed once and copied to both outputs");
+    }
+
     engine.setInputRoutingMode(app::InputRoutingMode::autoMono);
     engine.process(stereoInputs, 2, stereoOutputs, 2, 64);
     float stereoDifference = 0.0f;

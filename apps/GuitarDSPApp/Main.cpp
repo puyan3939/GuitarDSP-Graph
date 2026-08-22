@@ -238,7 +238,12 @@ public:
         currentInputLatencySamples_ = std::max(0, device->getInputLatencyInSamples());
         currentOutputLatencySamples_ = std::max(0, device->getOutputLatencyInSamples());
         const int outputChannels = device->getActiveOutputChannels().countNumberOfSetBits();
-        processingChannels_ = outputChannels >= 2 ? 2 : 1;
+        // A guitar selected from either physical jack is one signal. Run the
+        // complete component-level rig once, then let RealtimeAudioEngine fan the
+        // result out to both hardware outputs. Independent stereo deliberately
+        // retains two separate circuit and capacitor histories.
+        const bool independentStereo = inputRoutingBox_.getSelectedId() == 4;
+        processingChannels_ = independentStereo && outputChannels >= 2 ? 2 : 1;
 
         auto settings = settingsForCurrentDevice();
         const bool ok = engine_.configure(currentSampleRate_, currentBlockSize_,
@@ -381,12 +386,27 @@ private:
 
     void updateInputRouting() {
         using guitardsp::app::InputRoutingMode;
+        InputRoutingMode mode = InputRoutingMode::autoMono;
         switch (inputRoutingBox_.getSelectedId()) {
-            case 2: engine_.setInputRoutingMode(InputRoutingMode::input1); break;
-            case 3: engine_.setInputRoutingMode(InputRoutingMode::input2); break;
-            case 4: engine_.setInputRoutingMode(InputRoutingMode::stereo); break;
-            default: engine_.setInputRoutingMode(InputRoutingMode::autoMono); break;
+            case 2: mode = InputRoutingMode::input1; break;
+            case 3: mode = InputRoutingMode::input2; break;
+            case 4: mode = InputRoutingMode::stereo; break;
+            default: break;
         }
+        engine_.setInputRoutingMode(mode);
+
+        const auto* device = deviceManager_.getCurrentAudioDevice();
+        if (device == nullptr || !engine_.configured()) return;
+        const int outputs = device->getActiveOutputChannels().countNumberOfSetBits();
+        const int requiredChannels = mode == InputRoutingMode::stereo && outputs >= 2
+            ? 2 : 1;
+        if (requiredChannels == processingChannels_) return;
+
+        // Removing the callback first synchronizes with any in-flight audio call.
+        // Adding it again invokes audioDeviceAboutToStart(), which safely prepares
+        // all graph buffers and component histories at the new channel count.
+        deviceManager_.removeAudioCallback(this);
+        deviceManager_.addAudioCallback(this);
     }
 
     void applyToneControls() {

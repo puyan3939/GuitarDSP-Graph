@@ -47,9 +47,35 @@ This changes the steady-state linear solve path from repeated dense factorizatio
 
 ### Nonlinear circuits
 
-For diode/BJT/JFET/MOSFET/triode circuits, each Newton iteration begins from the cached linear base matrix and only adds the nonlinear Jacobian/equivalent-source terms before the dense reference solve. This removes repeated stamping of the passive and controlled-source network from the Newton loop while preserving the existing nonlinear equations and partial-pivot solver.
+For diode/BJT/JFET/MOSFET/triode circuits, the complete source and reactive
+history RHS is assembled once per audio sample. Each Newton iteration restores
+only the matrix entries touched by nonlinear devices, then stamps the unchanged
+component equations and equivalent sources. Passive and controlled-source stamps
+are not rebuilt or copied as a complete dense matrix inside the iteration.
 
-The nonlinear solve is still dense `O(n^3)` per Newton iteration. Fixed-pattern/sparse work comes next.
+`prepare()` performs symbolic analysis once and compiles:
+
+- the original sparse matrix entries;
+- the exact structural LU fill pattern;
+- every diagonal and lower-factor location;
+- every elimination target address;
+- the rows needed for scaled backward-error validation.
+
+Numeric sparse LU and its temporary forward/back-substitution vectors use
+double precision even though the external audio and component contract remains
+single precision. This avoids the amplified rounding jitter that previously kept
+pedal op-amp nodes in a 40-iteration limit cycle. Newton convergence is scaled to
+each unknown's voltage/current magnitude, and a bounded previous-sample predictor
+provides its initial guess. Small corrections use full Newton steps; larger
+transitions retain the existing trust-region damping.
+
+Every accepted sparse result is checked against the original MNA equations. The
+expensive sparse backward-error pass runs when Newton accepts the sample or
+exhausts its iteration budget, instead of once for every intermediate iterate.
+Unsafe pivots or residuals still fall back to the dense partial-pivot oracle.
+
+No diode, transistor, dynamic op-amp, capacitor, potentiometer, oversampling
+factor, or externally visible circuit topology is removed by these changes.
 
 The new active-device fidelity layer is built on this split. BJT/JFET/MOSFET parasitic capacitances are ordinary trapezoidal companion elements, so their conductance terms live in the cached matrix while only history terms enter the per-sample RHS. The rail/slew/current-limited dynamic op-amp uses the nonlinear Newton path. See `ACTIVE_DEVICE_FIDELITY.md` for the modelling details and boundaries.
 
@@ -68,6 +94,7 @@ All vectors and factorization workspaces are sized in `prepare()`. The steady au
 - full factorizations
 - cached linear solves
 - general dense solves
+- sparse Newton solves and dense fallbacks
 
 `MnaAccelerationTests` verifies that audio-rate voltage-source changes do not rebuild or refactorize the matrix, linear circuits reuse cached LU solves, matrix-affecting edits rebuild/refactorize exactly once, and nonlinear circuits reuse the cached linear base while restamping Newton-dependent terms.
 
@@ -89,12 +116,13 @@ It reports samples/second and structural counters for a 32-stage linear RC ladde
 
 ## Next acceleration stages
 
-1. Preassemble the complete per-sample RHS once and reuse it across Newton iterations.
-2. Compile fixed matrix write locations so nonlinear stamps avoid repeated row/column address arithmetic.
-3. Separate symbolic sparsity analysis from numeric factorization.
-4. Add a fixed-pattern sparse LU backend for larger circuit islands while retaining the dense solver as a correctness oracle.
-5. Partition circuits so only nonlinear islands iterate; solve purely linear regions with cached factorizations.
-6. Add bounded Newton continuation/voltage limiting so acceleration does not trade away difficult-circuit convergence.
-7. Benchmark representative pedal, tube-preamp and power-amp netlists rather than synthetic ladders only.
+1. Compile direct nonlinear stamp destinations so device models do not perform
+   repeated row/column address arithmetic.
+2. Partition circuits so only nonlinear islands iterate; solve purely linear
+   regions with cached factorizations or an exact Schur complement.
+3. Improve convergence of the larger DS-1 booster/op-amp circuit without
+   weakening its physical component model.
+4. Benchmark representative pedal, tube-preamp and power-amp netlists rather
+   than synthetic ladders only.
 
 The design rule is unchanged: every optimization must preserve the schematic-facing netlist contract and remain regression-compatible with the dense correctness model.
