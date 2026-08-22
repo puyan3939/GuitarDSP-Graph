@@ -131,15 +131,19 @@ int main() {
         ok &= require(std::abs(a.channel(0)[0]) < 1.0e-8f
                           && std::abs(a.channel(0)[latency]) > 0.05f,
                       "dry cabinet mix retains convolution latency alignment");
-        ok &= require(std::abs(a.channel(0)[latency] - b.channel(0)[latency]) < 1.0e-5f,
-                      "dry and wet cabinet paths share the same impulse arrival");
+        const float dryArrival = a.channel(0)[latency];
+        const float wetArrival = b.channel(0)[latency];
+        ok &= require(std::abs(b.channel(0)[0]) < 1.0e-8f
+                          && wetArrival > 0.001f,
+                      "filtered dry and wet cabinet paths share the same impulse arrival");
 
         cab.setParameterValue(4, 0.5f);
         cab.reset();
         cab.process(impulse, a, samples);
         ok &= require(std::abs(a.channel(0)[0]) < 1.0e-8f
-                          && std::abs(a.channel(0)[latency] - b.channel(0)[latency]) < 1.0e-5f,
-                      "50 percent cabinet IR mix recombines without comb cancellation");
+                          && std::abs(a.channel(0)[latency]
+                                      - 0.5f * (dryArrival + wetArrival)) < 1.0e-5f,
+                      "50 percent cabinet IR mix recombines aligned dry and filtered wet paths");
     }
 
     return ok ? 0 : 1;

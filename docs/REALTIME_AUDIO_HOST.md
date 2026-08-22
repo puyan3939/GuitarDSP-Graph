@@ -47,24 +47,45 @@ The emergency output ceiling defaults to 0.98 linear and only clamps samples tha
 
 ## Cabinet IR policy
 
-A measured cabinet IR is the fidelity path. The app accepts WAV/AIFF IR files and converts them to the active device sample rate offline using the windowed-sinc resampler in `ReferenceCabinetIR.h` before graph preparation.
+A measured cabinet IR is the fidelity path. The app accepts WAV/AIFF IR files and
+converts them to the active device sample rate offline using the windowed-sinc
+resampler in `ReferenceCabinetIR.h` before graph preparation. `Match measured IR
+loudness` is enabled by default: it removes inaudible DC, measures the actual
+convolution frequency response, and applies one broadband gain to target roughly
+-1 dB through the guitar midrange while bounding the highest response to +4 dB.
+It does not EQ, flatten, compress, or limit the measured cabinet. The control can
+be disabled when the original capture gain is required. Non-finite IR samples
+are removed before the graph reaches the realtime callback.
 
-If no measured IR is supplied, the app uses `makeReferenceCabinetImpulse()`. This is a deterministic synthetic band-limited cabinet-like response intended only to verify that speaker dynamics + partitioned convolution are live. It is **not measured data and must not be used as a cabinet-model accuracy reference**.
+If no measured IR is supplied, the app uses `makeReferenceCabinetImpulse()`.
+The synthetic reference is designed as a stable high-pass/body/mid/presence/
+low-pass filter cascade with short early reflections. Its response is normalized
+by midband convolution gain, not by the peak amplitude of a single impulse
+sample. At 44.1, 48, and 96 kHz the midrange is approximately -0.75 dB and the
+broad cabinet-body peak remains around +2.1 dB. It is **not measured data and
+must not be used as a cabinet-model accuracy reference**.
 
 The dedicated bass branch uses a separately voiced synthetic fallback from
 `makeReferenceBassCabinetImpulse()`. Its frequency response is bounded during
 offline preparation so a resonant impulse cannot silently add tens of decibels
 of convolution gain. It is also **not measured**.
 
-The Cabinet + Speaker page exposes IR Mix, voice-coil compression, excursion,
-low-frequency resonance and cabinet output level. IR Mix combines partitioned
-convolution with the post-speaker/pre-IR signal through a matching dry delay;
-0%, 50% and 100% all preserve the same reported cabinet latency.
+The Speaker + Cabinet inspector exposes IR Mix, adjustable 12 dB/octave low cut
+and high cut, voice-coil compression, excursion, low-frequency speaker resonance,
+cabinet output level, external IR selection, and measured-IR level matching.
+The low/high filters shape only the wet cabinet path. IR Mix combines that path
+with the post-speaker/pre-IR signal through a matching dry delay; 0%, 50%, and
+100% all preserve the same reported cabinet latency. Low cut, high cut, speaker,
+and mix edits are atomic realtime parameters and never rebuild the graph.
 
-The Advanced Amp page exposes output gain plus the existing EL34/6L6GC/KT88
-power-tube, reference/British/American tone-stack, cathode-follower/plate-driver
-and negative-feedback voicing controls. Family-specific British/American amps
-intentionally keep their fixed internal family selections.
+The standalone interface presents the signal chain as a vertical selector on
+the left and opens the selected block's complete controls in the inspector on
+the right. Guitar amplifier gain/EQ/output and the existing EL34/6L6GC/KT88
+power-tube, reference/British/American tone-stack, cathode-follower/plate-driver,
+and negative-feedback controls are together in the amplifier inspector.
+Family-specific British/American amps intentionally keep their fixed internal
+family selections. Audio-device setup is collapsed until `AUDIO SETTINGS` is
+selected, leaving the main editing surface available for actual tone controls.
 
 ## Quality modes
 

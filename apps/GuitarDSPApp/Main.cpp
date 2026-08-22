@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -110,7 +112,7 @@ public:
                           false, false, true, false) {
         formatManager_.registerBasicFormats();
 
-        addAndMakeVisible(deviceSelector_);
+        addChildComponent(deviceSelector_);
         addAndMakeVisible(pedalBox_);
         addAndMakeVisible(ampBox_);
         addAndMakeVisible(qualityBox_);
@@ -126,10 +128,12 @@ public:
         addAndMakeVisible(bassCabinetEnabled_);
         addAndMakeVisible(safeDry_);
         addAndMakeVisible(mute_);
+        addAndMakeVisible(matchIrLevel_);
         addAndMakeVisible(inputTrim_);
         addAndMakeVisible(outputTrim_);
         addAndMakeVisible(loadIrButton_);
         addAndMakeVisible(resetDiagnosticsButton_);
+        addAndMakeVisible(audioSettingsButton_);
         addAndMakeVisible(rigPageButton_);
         addAndMakeVisible(cabinetPageButton_);
         addAndMakeVisible(routingPageButton_);
@@ -159,7 +163,7 @@ public:
         qualityBox_.addItem("Live (4x nonlinear)", 2);
         qualityBox_.addItem("High (8x nonlinear)", 3);
         qualityBox_.addItem("Studio (16x nonlinear)", 4);
-        qualityBox_.setSelectedId(3, juce::dontSendNotification);
+        qualityBox_.setSelectedId(1, juce::dontSendNotification);
 
         inputRoutingBox_.addItem("Auto mono: strongest input", 1);
         inputRoutingBox_.addItem("Input 1 / left", 2);
@@ -201,6 +205,10 @@ public:
         safeDry_.setToggleState(true, juce::dontSendNotification);
         mute_.setButtonText("Mute output");
         mute_.setToggleState(true, juce::dontSendNotification);
+        matchIrLevel_.setButtonText("Match measured IR loudness");
+        matchIrLevel_.setToggleState(true, juce::dontSendNotification);
+        audioSettingsButton_.setButtonText("AUDIO SETTINGS");
+        audioSettingsButton_.setClickingTogglesState(true);
 
         inputTrim_.setSliderStyle(juce::Slider::LinearHorizontal);
         inputTrim_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
@@ -261,6 +269,26 @@ public:
         configureDbControl(ampOutput_, "AMP", -30.0, 6.0,
                            settings_.ampOutputDb);
 
+        auto configureFrequencyControl = [this](juce::Slider& slider,
+                                                 const juce::String& name,
+                                                 double minimum,
+                                                 double maximum,
+                                                 double midpoint,
+                                                 double value) {
+            addAndMakeVisible(slider);
+            slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+            slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 132, 22);
+            slider.setRange(minimum, maximum, 1.0);
+            slider.setSkewFactorFromMidPoint(midpoint);
+            slider.setValue(value, juce::dontSendNotification);
+            slider.setTextValueSuffix(" Hz " + name);
+            slider.onValueChange = [this] { toneControlsPending_ = true; };
+        };
+        configureFrequencyControl(cabinetLowCut_, "LOW CUT", 35.0, 240.0,
+                                  95.0, settings_.cabinetLowCutHz);
+        configureFrequencyControl(cabinetHighCut_, "HIGH CUT", 1800.0, 16000.0,
+                                  6500.0, settings_.cabinetHighCutHz);
+
         addAndMakeVisible(crossoverFrequency_);
         crossoverFrequency_.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         crossoverFrequency_.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 118, 22);
@@ -271,25 +299,32 @@ public:
         crossoverFrequency_.setTextValueSuffix(" Hz X-OVER");
         crossoverFrequency_.onValueChange = [this] { toneControlsPending_ = true; };
 
-        rigPageButton_.setButtonText("PEDAL + AMP");
-        cabinetPageButton_.setButtonText("CABINET + SPEAKER");
-        routingPageButton_.setButtonText("ROUTING + BASS");
-        advancedPageButton_.setButtonText("ADVANCED AMP");
+        rigPageButton_.setButtonText("01   CIRCUIT PEDAL");
+        advancedPageButton_.setButtonText("02   GUITAR AMPLIFIER");
+        cabinetPageButton_.setButtonText("03   SPEAKER + CABINET");
+        routingPageButton_.setButtonText("04   ROUTING + BASS");
 
-        pedalControlsTitle_.setText("CIRCUIT PEDAL", juce::dontSendNotification);
-        ampControlsTitle_.setText("AMPLIFIER", juce::dontSendNotification);
-        loadIrButton_.setButtonText("Load measured cabinet IR WAV");
-        resetDiagnosticsButton_.setButtonText("Reset CPU / XRUN / clip counters");
+        pedalControlsTitle_.setText("SIGNAL CHAIN", juce::dontSendNotification);
+        ampControlsTitle_.setText("CIRCUIT PEDAL", juce::dontSendNotification);
+        pedalControlsTitle_.setFont(juce::FontOptions(16.0f, juce::Font::bold));
+        ampControlsTitle_.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+        loadIrButton_.setButtonText("LOAD MEASURED IR");
+        resetDiagnosticsButton_.setButtonText("RESET METERS");
         statusLabel_.setText("Audio device not started", juce::dontSendNotification);
-        irLabel_.setText("Cab IR: synthetic reference fallback (NOT measured)",
+        irLabel_.setText("BUILT-IN REFERENCE / calibrated guitar cabinet / not measured",
                          juce::dontSendNotification);
         meterLabel_.setText("Input: -inf dBFS    Output: -inf dBFS",
                             juce::dontSendNotification);
 
-        pedalBox_.onChange = [this] { updateSettingsFromControls(); rebuildRig(); };
+        pedalBox_.onChange = [this] {
+            updateSettingsFromControls();
+            setControlPage(currentPage_);
+            rebuildRig();
+        };
         ampBox_.onChange = [this] {
             updateSettingsFromControls();
             updateAdvancedControlAvailability();
+            setControlPage(currentPage_);
             rebuildRig();
         };
         qualityBox_.onChange = [this] { updateSettingsFromControls(); rebuildRig(); };
@@ -317,6 +352,19 @@ public:
         feedbackVoicingBox_.onChange = [this] { toneControlsPending_ = true; };
         safeDry_.onClick = [this] { rebuildRig(); };
         mute_.onClick = [this] { engine_.setMuted(mute_.getToggleState()); };
+        matchIrLevel_.onClick = [this] {
+            settings_.matchMeasuredCabinetLevel = matchIrLevel_.getToggleState();
+            updateImpulseLabel();
+            rebuildRig();
+        };
+        audioSettingsButton_.onClick = [this] {
+            const bool expanded = audioSettingsButton_.getToggleState();
+            deviceSelector_.setVisible(expanded);
+            audioSettingsButton_.setButtonText(expanded
+                ? "CLOSE AUDIO SETTINGS" : "AUDIO SETTINGS");
+            resized();
+            repaint();
+        };
         inputTrim_.onValueChange = [this] {
             engine_.setInputTrimDb(static_cast<float>(inputTrim_.getValue()));
         };
@@ -328,10 +376,10 @@ public:
             engine_.resetDiagnostics();
             xRunBaseline_ = std::max(0, deviceManager_.getXRunCount());
         };
-        rigPageButton_.onClick = [this] { setControlPage(ControlPage::rig); };
+        rigPageButton_.onClick = [this] { setControlPage(ControlPage::pedal); };
         cabinetPageButton_.onClick = [this] { setControlPage(ControlPage::cabinet); };
         routingPageButton_.onClick = [this] { setControlPage(ControlPage::routing); };
-        advancedPageButton_.onClick = [this] { setControlPage(ControlPage::advanced); };
+        advancedPageButton_.onClick = [this] { setControlPage(ControlPage::amplifier); };
 
         engine_.setInputTrimDb(0.0f);
         engine_.setOutputTrimDb(-12.0f);
@@ -341,7 +389,7 @@ public:
         updateInputRouting();
         updateRoutingGraph();
         updateAdvancedControlAvailability();
-        setControlPage(ControlPage::rig);
+        setControlPage(ControlPage::pedal);
 
         const auto stateFile = audioStateFile();
         auto savedState = stateFile.existsAsFile()
@@ -353,7 +401,7 @@ public:
             statusLabel_.setText("Audio init error: " + error, juce::dontSendNotification);
         deviceManager_.addAudioCallback(this);
 
-        setSize(1160, 940);
+        setSize(1240, 900);
         startTimerHz(20);
     }
 
@@ -365,111 +413,149 @@ public:
         engine_.collectRetired();
     }
 
+    void paint(juce::Graphics& graphics) override {
+        graphics.fillAll(juce::Colour::fromRGB(20, 29, 34));
+        graphics.setColour(juce::Colour::fromRGB(29, 42, 48));
+        graphics.fillRoundedRectangle(chainPanel_.toFloat(), 11.0f);
+        graphics.fillRoundedRectangle(inspectorPanel_.toFloat(), 11.0f);
+        graphics.setColour(juce::Colour::fromRGB(78, 188, 180).withAlpha(0.34f));
+        graphics.drawRoundedRectangle(chainPanel_.toFloat(), 11.0f, 1.0f);
+        graphics.drawRoundedRectangle(inspectorPanel_.toFloat(), 11.0f, 1.0f);
+
+        auto guide = chainPanel_.reduced(16);
+        guide.removeFromTop(305);
+        if (guide.getHeight() > 55) {
+            graphics.setColour(juce::Colours::white.withAlpha(0.55f));
+            graphics.setFont(13.0f);
+            graphics.drawFittedText(
+                "Select a signal block to edit its full controls.\n"
+                "Routing can split guitar and octave/bass paths.",
+                guide.removeFromTop(75), juce::Justification::topLeft, 4);
+        }
+    }
+
     void resized() override {
-        auto area = getLocalBounds().reduced(12);
-        statusLabel_.setBounds(area.removeFromTop(30));
+        auto area = getLocalBounds().reduced(14);
+        auto row = area.removeFromTop(36);
+        audioSettingsButton_.setBounds(row.removeFromRight(190).reduced(0, 3));
+        row.removeFromRight(12);
+        statusLabel_.setBounds(row);
 
-        deviceSelector_.setBounds(area.removeFromTop(274));
-        area.removeFromTop(8);
-
-        auto row = area.removeFromTop(34);
-        pedalBox_.setBounds(row.removeFromLeft(195));
-        row.removeFromLeft(8);
-        ampBox_.setBounds(row.removeFromLeft(210));
-        row.removeFromLeft(8);
-        qualityBox_.setBounds(row.removeFromLeft(205));
-        row.removeFromLeft(8);
-        inputRoutingBox_.setBounds(row);
-
-        area.removeFromTop(6);
-        row = area.removeFromTop(30);
-        safeDry_.setBounds(row.removeFromLeft(180));
-        ampEnabled_.setBounds(row.removeFromLeft(90));
-        cabEnabled_.setBounds(row.removeFromLeft(180));
-        mute_.setBounds(row.removeFromLeft(150));
-        resetDiagnosticsButton_.setBounds(row);
-
-        area.removeFromTop(8);
-        row = area.removeFromTop(30);
-        const int navigationWidth = row.getWidth() / 4;
-        rigPageButton_.setBounds(row.removeFromLeft(navigationWidth).reduced(2, 0));
-        cabinetPageButton_.setBounds(row.removeFromLeft(navigationWidth).reduced(2, 0));
-        routingPageButton_.setBounds(row.removeFromLeft(navigationWidth).reduced(2, 0));
-        advancedPageButton_.setBounds(row.reduced(2, 0));
-
-        auto panel = area.removeFromTop(210);
-        if (currentPage_ == ControlPage::rig) {
-            row = panel.removeFromTop(24);
-            pedalControlsTitle_.setBounds(row.removeFromLeft(360));
-            ampControlsTitle_.setBounds(row);
-            row = panel.removeFromTop(116);
-            auto pedalArea = row.removeFromLeft(360);
-            pedalDrive_.setBounds(pedalArea.removeFromLeft(118));
-            pedalTone_.setBounds(pedalArea.removeFromLeft(118));
-            pedalLevel_.setBounds(pedalArea.removeFromLeft(118));
-            const int ampWidth = std::max(90, row.getWidth() / 6);
-            ampGain_.setBounds(row.removeFromLeft(ampWidth));
-            ampBass_.setBounds(row.removeFromLeft(ampWidth));
-            ampMid_.setBounds(row.removeFromLeft(ampWidth));
-            ampTreble_.setBounds(row.removeFromLeft(ampWidth));
-            ampMaster_.setBounds(row.removeFromLeft(ampWidth));
-            ampPresence_.setBounds(row);
-        } else if (currentPage_ == ControlPage::cabinet) {
-            row = panel.removeFromTop(24);
-            pedalControlsTitle_.setBounds(row);
-            row = panel.removeFromTop(120);
-            const int width = std::max(100, row.getWidth() / 5);
-            cabinetMix_.setBounds(row.removeFromLeft(width));
-            speakerCompression_.setBounds(row.removeFromLeft(width));
-            speakerExcursion_.setBounds(row.removeFromLeft(width));
-            speakerResonance_.setBounds(row.removeFromLeft(width));
-            cabinetOutput_.setBounds(row);
-        } else if (currentPage_ == ControlPage::routing) {
-            row = panel.removeFromTop(32);
-            signalRoutingBox_.setBounds(row.removeFromLeft(340));
-            row.removeFromLeft(12);
-            octaveEnabled_.setBounds(row.removeFromLeft(150));
-            bassCabinetEnabled_.setBounds(row.removeFromLeft(190));
-            routingGraphView_.setBounds(panel.removeFromTop(78));
-            row = panel.removeFromTop(100);
-            const int width = std::max(85, row.getWidth() / 8);
-            guitarBranchLevel_.setBounds(row.removeFromLeft(width));
-            bassBranchLevel_.setBounds(row.removeFromLeft(width));
-            octaveMix_.setBounds(row.removeFromLeft(width));
-            octaveLevel_.setBounds(row.removeFromLeft(width));
-            bassGain_.setBounds(row.removeFromLeft(width));
-            bassTone_.setBounds(row.removeFromLeft(width));
-            bassLevel_.setBounds(row.removeFromLeft(width));
-            crossoverFrequency_.setBounds(row);
-        } else {
-            row = panel.removeFromTop(30);
-            const int width = row.getWidth() / 4;
-            powerTubeBox_.setBounds(row.removeFromLeft(width).reduced(3, 0));
-            toneStackBox_.setBounds(row.removeFromLeft(width).reduced(3, 0));
-            toneDriverBox_.setBounds(row.removeFromLeft(width).reduced(3, 0));
-            feedbackVoicingBox_.setBounds(row.reduced(3, 0));
-            panel.removeFromTop(12);
-            ampOutput_.setBounds(panel.removeFromTop(120).removeFromLeft(180));
+        if (deviceSelector_.isVisible()) {
+            deviceSelector_.setBounds(area.removeFromTop(260));
+            area.removeFromTop(8);
         }
 
-        area.removeFromTop(4);
-        row = area.removeFromTop(34);
-        inputTrim_.setBounds(row.removeFromLeft(row.getWidth() / 2 - 6));
-        row.removeFromLeft(12);
-        outputTrim_.setBounds(row);
+        row = area.removeFromTop(36);
+        const int selectorWidth = std::max(160, row.getWidth() / 5);
+        pedalBox_.setBounds(row.removeFromLeft(selectorWidth).reduced(0, 2));
+        row.removeFromLeft(8);
+        ampBox_.setBounds(row.removeFromLeft(selectorWidth + 22).reduced(0, 2));
+        row.removeFromLeft(8);
+        qualityBox_.setBounds(row.removeFromLeft(selectorWidth + 12).reduced(0, 2));
+        row.removeFromLeft(8);
+        inputRoutingBox_.setBounds(row.reduced(0, 2));
 
-        area.removeFromTop(8);
-        row = area.removeFromTop(34);
-        loadIrButton_.setBounds(row.removeFromLeft(300));
-        row.removeFromLeft(12);
-        irLabel_.setBounds(row);
-
+        area.removeFromTop(5);
+        row = area.removeFromTop(32);
+        safeDry_.setBounds(row.removeFromLeft(180));
+        ampEnabled_.setBounds(row.removeFromLeft(90));
+        cabEnabled_.setBounds(row.removeFromLeft(190));
+        mute_.setBounds(row.removeFromLeft(140));
+        resetDiagnosticsButton_.setBounds(row.removeFromRight(158).reduced(0, 2));
         area.removeFromTop(10);
-        routingLabel_.setBounds(area.removeFromTop(27));
-        meterLabel_.setBounds(area.removeFromTop(27));
-        performanceLabel_.setBounds(area.removeFromTop(27));
-        latencyLabel_.setBounds(area.removeFromTop(27));
-        safetyLabel_.setBounds(area.removeFromTop(27));
+
+        auto diagnostics = area.removeFromBottom(155);
+        row = diagnostics.removeFromTop(34);
+        inputTrim_.setBounds(row.removeFromLeft(row.getWidth() / 2 - 8));
+        row.removeFromLeft(16);
+        outputTrim_.setBounds(row);
+        diagnostics.removeFromTop(5);
+        routingLabel_.setBounds(diagnostics.removeFromTop(23));
+        meterLabel_.setBounds(diagnostics.removeFromTop(23));
+        performanceLabel_.setBounds(diagnostics.removeFromTop(23));
+        latencyLabel_.setBounds(diagnostics.removeFromTop(23));
+        safetyLabel_.setBounds(diagnostics.removeFromTop(23));
+
+        area.removeFromBottom(10);
+        const int chainWidth = std::clamp(area.getWidth() / 4, 238, 292);
+        chainPanel_ = area.removeFromLeft(chainWidth);
+        area.removeFromLeft(12);
+        inspectorPanel_ = area;
+
+        auto chain = chainPanel_.reduced(13);
+        pedalControlsTitle_.setBounds(chain.removeFromTop(40));
+        chain.removeFromTop(8);
+        rigPageButton_.setBounds(chain.removeFromTop(54));
+        chain.removeFromTop(9);
+        advancedPageButton_.setBounds(chain.removeFromTop(54));
+        chain.removeFromTop(9);
+        cabinetPageButton_.setBounds(chain.removeFromTop(54));
+        chain.removeFromTop(9);
+        routingPageButton_.setBounds(chain.removeFromTop(54));
+
+        auto panel = inspectorPanel_.reduced(18, 12);
+        ampControlsTitle_.setBounds(panel.removeFromTop(40));
+        panel.removeFromTop(5);
+
+        const auto placeKnobs = [](juce::Rectangle<int> knobRow,
+                                   std::initializer_list<juce::Slider*> sliders) {
+            const int count = static_cast<int>(sliders.size());
+            if (count <= 0) return;
+            const int width = knobRow.getWidth() / count;
+            for (auto* slider : sliders)
+                slider->setBounds(knobRow.removeFromLeft(width).reduced(3, 0));
+        };
+
+        if (currentPage_ == ControlPage::pedal) {
+            placeKnobs(panel.removeFromTop(std::min(180, panel.getHeight())),
+                       {&pedalDrive_, &pedalTone_, &pedalLevel_});
+        } else if (currentPage_ == ControlPage::amplifier) {
+            const int knobHeight = std::clamp((panel.getHeight() - 105) / 2,
+                                               86, 155);
+            placeKnobs(panel.removeFromTop(knobHeight),
+                       {&ampGain_, &ampBass_, &ampMid_, &ampTreble_});
+            placeKnobs(panel.removeFromTop(knobHeight),
+                       {&ampMaster_, &ampPresence_, &ampOutput_});
+            panel.removeFromTop(8);
+            row = panel.removeFromTop(32);
+            powerTubeBox_.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(3, 0));
+            toneStackBox_.setBounds(row.reduced(3, 0));
+            panel.removeFromTop(6);
+            row = panel.removeFromTop(32);
+            toneDriverBox_.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(3, 0));
+            feedbackVoicingBox_.setBounds(row.reduced(3, 0));
+        } else if (currentPage_ == ControlPage::cabinet) {
+            const int knobHeight = std::clamp((panel.getHeight() - 106) / 2,
+                                               86, 158);
+            placeKnobs(panel.removeFromTop(knobHeight),
+                       {&cabinetMix_, &cabinetLowCut_, &cabinetHighCut_,
+                        &speakerResonance_});
+            placeKnobs(panel.removeFromTop(knobHeight),
+                       {&speakerCompression_, &speakerExcursion_, &cabinetOutput_});
+            panel.removeFromTop(8);
+            row = panel.removeFromTop(34);
+            loadIrButton_.setBounds(row.removeFromLeft(220));
+            row.removeFromLeft(12);
+            matchIrLevel_.setBounds(row);
+            irLabel_.setBounds(panel.removeFromTop(34));
+        } else {
+            row = panel.removeFromTop(34);
+            signalRoutingBox_.setBounds(row.removeFromLeft(std::min(320, row.getWidth() / 2)));
+            row.removeFromLeft(8);
+            octaveEnabled_.setBounds(row.removeFromLeft(130));
+            bassCabinetEnabled_.setBounds(row);
+            panel.removeFromTop(5);
+            routingGraphView_.setBounds(panel.removeFromTop(
+                std::clamp(panel.getHeight() / 4, 72, 105)));
+            panel.removeFromTop(5);
+            const int knobHeight = std::clamp(panel.getHeight() / 2, 83, 148);
+            placeKnobs(panel.removeFromTop(knobHeight),
+                       {&guitarBranchLevel_, &bassBranchLevel_, &octaveMix_,
+                        &octaveLevel_});
+            placeKnobs(panel.removeFromTop(knobHeight),
+                       {&bassGain_, &bassTone_, &bassLevel_, &crossoverFrequency_});
+        }
     }
 
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override {
@@ -529,29 +615,35 @@ public:
     }
 
 private:
-    enum class ControlPage { rig, cabinet, routing, advanced };
+    enum class ControlPage { pedal, amplifier, cabinet, routing };
 
     void setControlPage(ControlPage page) {
         currentPage_ = page;
-        const bool rig = page == ControlPage::rig;
+        const bool pedal = page == ControlPage::pedal;
+        const bool amplifier = page == ControlPage::amplifier;
         const bool cabinet = page == ControlPage::cabinet;
         const bool routing = page == ControlPage::routing;
-        const bool advanced = page == ControlPage::advanced;
 
-        pedalControlsTitle_.setVisible(rig || cabinet);
-        pedalControlsTitle_.setText(cabinet ? "CABINET IR + SPEAKER DYNAMICS"
-                                             : "CIRCUIT PEDAL",
-                                   juce::dontSendNotification);
-        ampControlsTitle_.setVisible(rig);
+        const juce::String title = pedal ? "CIRCUIT PEDAL  /  " + pedalBox_.getText()
+            : amplifier ? "GUITAR AMPLIFIER  /  " + ampBox_.getText()
+            : cabinet ? "SPEAKER + CABINET RESPONSE"
+                      : "PARALLEL ROUTING + BASS AMP";
+        ampControlsTitle_.setText(title, juce::dontSendNotification);
 
-        for (auto* control : std::array<juce::Component*, 9>{{
-                 &pedalDrive_, &pedalTone_, &pedalLevel_, &ampGain_, &ampBass_,
-                 &ampMid_, &ampTreble_, &ampMaster_, &ampPresence_}})
-            control->setVisible(rig);
+        for (auto* control : std::array<juce::Component*, 3>{{
+                 &pedalDrive_, &pedalTone_, &pedalLevel_}})
+            control->setVisible(pedal);
 
-        for (auto* control : std::array<juce::Component*, 5>{{
-                 &cabinetMix_, &speakerCompression_, &speakerExcursion_,
-                 &speakerResonance_, &cabinetOutput_}})
+        for (auto* control : std::array<juce::Component*, 11>{{
+                 &ampGain_, &ampBass_, &ampMid_, &ampTreble_, &ampMaster_,
+                 &ampPresence_, &ampOutput_, &powerTubeBox_, &toneStackBox_,
+                 &toneDriverBox_, &feedbackVoicingBox_}})
+            control->setVisible(amplifier);
+
+        for (auto* control : std::array<juce::Component*, 10>{{
+                 &cabinetMix_, &cabinetLowCut_, &cabinetHighCut_,
+                 &speakerCompression_, &speakerExcursion_, &speakerResonance_,
+                 &cabinetOutput_, &loadIrButton_, &matchIrLevel_, &irLabel_}})
             control->setVisible(cabinet);
 
         for (auto* control : std::array<juce::Component*, 12>{{
@@ -561,20 +653,20 @@ private:
                  &crossoverFrequency_}})
             control->setVisible(routing);
 
-        for (auto* control : std::array<juce::Component*, 5>{{
-                 &powerTubeBox_, &toneStackBox_, &toneDriverBox_,
-                 &feedbackVoicingBox_, &ampOutput_}})
-            control->setVisible(advanced);
-
         rigPageButton_.setColour(juce::TextButton::buttonColourId,
-            rig ? juce::Colours::steelblue : juce::Colours::darkslategrey);
-        cabinetPageButton_.setColour(juce::TextButton::buttonColourId,
-            cabinet ? juce::Colours::steelblue : juce::Colours::darkslategrey);
-        routingPageButton_.setColour(juce::TextButton::buttonColourId,
-            routing ? juce::Colours::steelblue : juce::Colours::darkslategrey);
+            pedal ? juce::Colour::fromRGB(43, 119, 134)
+                  : juce::Colour::fromRGB(43, 55, 61));
         advancedPageButton_.setColour(juce::TextButton::buttonColourId,
-            advanced ? juce::Colours::steelblue : juce::Colours::darkslategrey);
+            amplifier ? juce::Colour::fromRGB(43, 119, 134)
+                      : juce::Colour::fromRGB(43, 55, 61));
+        cabinetPageButton_.setColour(juce::TextButton::buttonColourId,
+            cabinet ? juce::Colour::fromRGB(43, 119, 134)
+                    : juce::Colour::fromRGB(43, 55, 61));
+        routingPageButton_.setColour(juce::TextButton::buttonColourId,
+            routing ? juce::Colour::fromRGB(43, 119, 134)
+                    : juce::Colour::fromRGB(43, 55, 61));
         if (getWidth() > 0 && getHeight() > 0) resized();
+        repaint();
     }
 
     void updateAdvancedControlAvailability() {
@@ -759,6 +851,8 @@ private:
         settings_.speakerExcursion = normalized(speakerExcursion_);
         settings_.speakerResonance = normalized(speakerResonance_);
         settings_.cabinetOutputDb = static_cast<float>(cabinetOutput_.getValue());
+        settings_.cabinetLowCutHz = static_cast<float>(cabinetLowCut_.getValue());
+        settings_.cabinetHighCutHz = static_cast<float>(cabinetHighCut_.getValue());
         settings_.guitarBranchLevel = normalized(guitarBranchLevel_);
         settings_.bassBranchLevel = normalized(bassBranchLevel_);
         settings_.octaveMix = normalized(octaveMix_);
@@ -794,6 +888,8 @@ private:
         engine_.setNodeTypeParameter(guitarCab, 2, settings_.speakerResonance);
         engine_.setNodeTypeParameter(guitarCab, 3, settings_.cabinetOutputDb);
         engine_.setNodeTypeParameter(guitarCab, 4, settings_.cabinetMix);
+        engine_.setNodeTypeParameter(guitarCab, 5, settings_.cabinetLowCutHz);
+        engine_.setNodeTypeParameter(guitarCab, 6, settings_.cabinetHighCutHz);
         engine_.setNodeTypeParameter("Guitar Branch Level", 0, settings_.guitarBranchLevel);
         engine_.setNodeTypeParameter("Bass Branch Level", 0, settings_.bassBranchLevel);
         engine_.setNodeTypeParameter("Monophonic Octave Down", 0, settings_.octaveMix);
@@ -836,6 +932,7 @@ private:
         }
         settings_.octaveEnabled = octaveEnabled_.getToggleState();
         settings_.bassCabinetEnabled = bassCabinetEnabled_.getToggleState();
+        settings_.matchMeasuredCabinetLevel = matchIrLevel_.getToggleState();
     }
 
     guitardsp::app::LiveRigSettings settingsForCurrentDevice() const {
@@ -849,8 +946,17 @@ private:
             return result;
         }
         if (!loadedIr_.empty() && loadedIrSampleRate_ > 0.0 && currentSampleRate_ > 0.0) {
-            result.cabinetImpulse = guitardsp::app::resampleImpulseWindowedSinc(
+            auto resampled = guitardsp::app::resampleImpulseWindowedSinc(
                 loadedIr_, loadedIrSampleRate_, currentSampleRate_);
+            if (result.matchMeasuredCabinetLevel) {
+                auto calibrated = guitardsp::app::calibrateMeasuredCabinetImpulse(
+                    resampled, currentSampleRate_);
+                result.cabinetImpulse = std::move(calibrated.impulse);
+            } else {
+                for (float& sample : resampled)
+                    if (!std::isfinite(sample)) sample = 0.0f;
+                result.cabinetImpulse = std::move(resampled);
+            }
         } else {
             result.cabinetImpulse.clear();
         }
@@ -884,6 +990,33 @@ private:
         });
     }
 
+    void updateImpulseLabel() {
+        if (loadedIr_.empty()) {
+            irLabel_.setText(
+                "BUILT-IN REFERENCE / calibrated guitar cabinet / not measured",
+                juce::dontSendNotification);
+            irLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            return;
+        }
+
+        const bool matched = matchIrLevel_.getToggleState();
+        const double peak = matched ? loadedIrMatchedPeakDb_ : loadedIrRawPeakDb_;
+        juce::String description = loadedIrName_ + "  /  "
+            + juce::String(loadedIrSampleRate_, 0) + " Hz  /  ";
+        if (matched) {
+            description += "matched "
+                + juce::String(loadedIrCalibrationGainDb_, 1) + " dB";
+        } else {
+            description += "RAW LEVEL";
+        }
+        description += "  /  peak " + juce::String(peak, 1) + " dB";
+        if (!loadedIrAllFinite_) description += "  /  invalid samples removed";
+        irLabel_.setText(description, juce::dontSendNotification);
+        irLabel_.setColour(juce::Label::textColourId,
+            !matched && peak > 8.0 ? juce::Colours::orange
+                                   : juce::Colours::lightgrey);
+    }
+
     void loadImpulseResponse(const juce::File& file) {
         auto reader = std::unique_ptr<juce::AudioFormatReader>(formatManager_.createReaderFor(file));
         if (!reader) {
@@ -904,9 +1037,18 @@ private:
 
         loadedIr_.assign(buffer.getReadPointer(0), buffer.getReadPointer(0) + samplesToRead);
         loadedIrSampleRate_ = reader->sampleRate;
-        irLabel_.setText("Cab IR: " + file.getFileName() + " / "
-                            + juce::String(loadedIrSampleRate_, 0) + " Hz / measured external file",
-                         juce::dontSendNotification);
+        loadedIrName_ = file.getFileName();
+        const auto calibration = guitardsp::app::calibrateMeasuredCabinetImpulse(
+            loadedIr_, loadedIrSampleRate_);
+        loadedIrCalibrationGainDb_ = calibration.appliedGainDb;
+        loadedIrRawPeakDb_ = calibration.before.maximumGainDb;
+        loadedIrMatchedPeakDb_ = calibration.after.maximumGainDb;
+        loadedIrAllFinite_ = calibration.before.allFinite;
+        if (!loadedIrAllFinite_) {
+            for (float& sample : loadedIr_)
+                if (!std::isfinite(sample)) sample = 0.0f;
+        }
+        updateImpulseLabel();
         rebuildRig();
     }
 
@@ -931,6 +1073,7 @@ private:
     juce::ToggleButton bassCabinetEnabled_;
     juce::ToggleButton safeDry_;
     juce::ToggleButton mute_;
+    juce::ToggleButton matchIrLevel_;
     juce::Slider inputTrim_;
     juce::Slider outputTrim_;
     juce::Slider pedalDrive_;
@@ -943,6 +1086,8 @@ private:
     juce::Slider ampMaster_;
     juce::Slider ampPresence_;
     juce::Slider cabinetMix_;
+    juce::Slider cabinetLowCut_;
+    juce::Slider cabinetHighCut_;
     juce::Slider speakerCompression_;
     juce::Slider speakerExcursion_;
     juce::Slider speakerResonance_;
@@ -958,6 +1103,7 @@ private:
     juce::Slider crossoverFrequency_;
     juce::TextButton loadIrButton_;
     juce::TextButton resetDiagnosticsButton_;
+    juce::TextButton audioSettingsButton_;
     juce::TextButton rigPageButton_;
     juce::TextButton cabinetPageButton_;
     juce::TextButton routingPageButton_;
@@ -975,15 +1121,22 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser_;
 
     std::vector<float> loadedIr_;
+    juce::String loadedIrName_;
     double loadedIrSampleRate_ = 0.0;
+    double loadedIrCalibrationGainDb_ = 0.0;
+    double loadedIrRawPeakDb_ = 0.0;
+    double loadedIrMatchedPeakDb_ = 0.0;
     double currentSampleRate_ = 0.0;
     int currentBlockSize_ = 0;
     int currentInputLatencySamples_ = 0;
     int currentOutputLatencySamples_ = 0;
     int processingChannels_ = 2;
     int xRunBaseline_ = 0;
+    bool loadedIrAllFinite_ = true;
     bool toneControlsPending_ = false;
-    ControlPage currentPage_ = ControlPage::rig;
+    juce::Rectangle<int> chainPanel_;
+    juce::Rectangle<int> inspectorPanel_;
+    ControlPage currentPage_ = ControlPage::pedal;
 };
 
 class MainWindow final : public juce::DocumentWindow {
@@ -1008,7 +1161,7 @@ public:
 class GuitarDSPApplication final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "GuitarDSP Graph"; }
-    const juce::String getApplicationVersion() override { return "0.33.0"; }
+    const juce::String getApplicationVersion() override { return "0.34.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override {

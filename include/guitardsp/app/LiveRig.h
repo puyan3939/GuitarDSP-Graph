@@ -55,6 +55,9 @@ struct LiveRigSettings {
     float speakerResonance = 0.35f;
     float cabinetOutputDb = 0.0f;
     float cabinetMix = 1.0f;
+    float cabinetLowCutHz = 72.0f;
+    float cabinetHighCutHz = 7200.0f;
+    bool matchMeasuredCabinetLevel = true;
     int cabinetPartitionSize = 64;
 
     bool octaveEnabled = true;

@@ -40,9 +40,12 @@ int main() {
             peak = std::max(peak, std::abs(ir[i]));
             if (i > 32U) tailEnergy += ir[i] * ir[i];
         }
-        ok &= require(ir.size() >= 512U && peak > 0.5f && peak <= 0.93f,
-                      "reference fallback cabinet IR is normalized and nontrivial");
-        ok &= require(tailEnergy > 1.0e-5f,
+        const auto response = app::analyzeCabinetImpulse(ir, 48000.0);
+        ok &= require(ir.size() >= 512U && peak > 0.05f && peak < 0.9f
+                          && response.maximumGainDb <= 3.3
+                          && response.midbandGainDb > -2.0,
+                      "reference cabinet IR bounds convolution gain rather than sample peak");
+        ok &= require(tailEnergy > 1.0e-6f,
                       "reference fallback cabinet IR has a real time-domain tail");
 
         const auto resampled = app::resampleImpulseWindowedSinc(ir, 48000.0, 96000.0);

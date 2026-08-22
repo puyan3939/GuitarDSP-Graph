@@ -78,6 +78,8 @@ std::unique_ptr<hq::CabinetChainNode> makeGuitarCabinet(const LiveRigSettings& s
     cab->setParameterValue(2, settings.speakerResonance);
     cab->setParameterValue(3, settings.cabinetOutputDb);
     cab->setParameterValue(4, settings.cabinetMix);
+    cab->setParameterValue(5, settings.cabinetLowCutHz);
+    cab->setParameterValue(6, settings.cabinetHighCutHz);
     return cab;
 }
 

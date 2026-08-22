@@ -109,5 +109,17 @@ int main() {
     ok &= require(allocationCount.load(std::memory_order_relaxed) == 0,
                   "first parallel octave and dual-cab callback performs zero heap allocations");
 
+    ok &= require(parallelEngine.setNodeTypeParameter(
+                      "Speaker Dynamics + Partitioned Cab", 5, 155.0f)
+                      && parallelEngine.setNodeTypeParameter(
+                          "Speaker Dynamics + Partitioned Cab", 6, 4600.0f),
+                  "live guitar cabinet low/high cuts are independently addressable");
+    allocationCount.store(0, std::memory_order_relaxed);
+    trackAllocations.store(true, std::memory_order_release);
+    parallelEngine.process(inputs, 1, outputs, 2, 128);
+    trackAllocations.store(false, std::memory_order_release);
+    ok &= require(allocationCount.load(std::memory_order_relaxed) == 0,
+                  "changing live cabinet filter coefficients allocates no audio-thread memory");
+
     return ok ? 0 : 1;
 }
