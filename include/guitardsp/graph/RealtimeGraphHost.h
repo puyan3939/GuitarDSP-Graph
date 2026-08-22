@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <unordered_map>
 
 namespace guitardsp::graph {
@@ -43,6 +44,9 @@ public:
     bool setCategoryParameter(NodeCategory category,
                               std::size_t parameterIndex,
                               float value) noexcept;
+    bool setTypeParameter(std::string_view typeName,
+                          std::size_t parameterIndex,
+                          float value) noexcept;
 
     [[nodiscard]] bool hasActiveGraph() const noexcept { return active_.load(std::memory_order_acquire) != nullptr; }
     [[nodiscard]] bool hasPendingGraph() const noexcept { return pending_.load(std::memory_order_acquire) != nullptr; }

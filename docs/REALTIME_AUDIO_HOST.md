@@ -1,6 +1,7 @@
-# Realtime audio host: pedal -> amp -> speaker/cab
+# Realtime audio host: component-level guitar and parallel octave/bass rigs
 
-Phase 4 opens the first complete live audio path while keeping the DSP graph and realtime constraints established in the earlier phases.
+Phase 5 opens live hardware playback and selectable parallel graph routing while
+keeping the component-level pedal model and established realtime constraints.
 
 ## Signal path
 
@@ -17,9 +18,30 @@ Audio interface input
 
 Input and output trims live in the JUCE-independent `RealtimeAudioEngine` so they can be changed atomically without rebuilding the graph. Mono guitar input is duplicated coherently to both processing channels when a stereo output device is active.
 
+The Routing + Bass page can also prepare two real branched graphs:
+
+```text
+                               -> pedal -> guitar amp -> guitar cab -> guitar level --
+audio input -> split/crossover                                                     -> merge -> output
+                               -> octave -1 -> bass amp -> bass cab -> bass level ----
+```
+
+`Parallel octave + bass amp` sends the full input to both branches. `Crossover
+octave + bass amp` sends the complementary high band to the guitar path and the
+low band to the octave/bass path. The crossover frequency, branch levels, octave
+mix/level and dedicated bass drive/tone/output are independently adjustable. The
+octave stage is a **monophonic** Schmitt/PLL divider, not a polyphonic POG-style
+pitch shifter. Octave and bass cabinet stages can each be omitted structurally.
+Graph PDC aligns the cabinet and oversampling delays before the branch merge.
+
 ## Realtime boundaries
 
 `RealtimeAudioEngine::process()` performs no graph preparation, file I/O, topology changes, IR conversion, or graph destruction. Callback buffers are allocated in `configure()`. Structural/quality/IR changes create a new `PreparedGraph` on the control thread, submit it through `RealtimeGraphHost`, and the audio callback adopts it only at a block boundary. Retired graphs are destroyed by the UI timer through `collectRetired()`.
+
+Realtime parameter edits can target either a node category or an exact node type.
+The standalone host uses exact types for guitar and bass amplifiers so changing
+one branch never rewrites another amplifier's controls. Both serial and parallel
+graphs have first-callback zero-allocation regression coverage.
 
 The emergency output ceiling defaults to 0.98 linear and only clamps samples that exceed that ceiling. It is a bring-up safety net, not a tone-shaping limiter. The standalone app starts with -12 dB output trim.
 
@@ -28,6 +50,21 @@ The emergency output ceiling defaults to 0.98 linear and only clamps samples tha
 A measured cabinet IR is the fidelity path. The app accepts WAV/AIFF IR files and converts them to the active device sample rate offline using the windowed-sinc resampler in `ReferenceCabinetIR.h` before graph preparation.
 
 If no measured IR is supplied, the app uses `makeReferenceCabinetImpulse()`. This is a deterministic synthetic band-limited cabinet-like response intended only to verify that speaker dynamics + partitioned convolution are live. It is **not measured data and must not be used as a cabinet-model accuracy reference**.
+
+The dedicated bass branch uses a separately voiced synthetic fallback from
+`makeReferenceBassCabinetImpulse()`. Its frequency response is bounded during
+offline preparation so a resonant impulse cannot silently add tens of decibels
+of convolution gain. It is also **not measured**.
+
+The Cabinet + Speaker page exposes IR Mix, voice-coil compression, excursion,
+low-frequency resonance and cabinet output level. IR Mix combines partitioned
+convolution with the post-speaker/pre-IR signal through a matching dry delay;
+0%, 50% and 100% all preserve the same reported cabinet latency.
+
+The Advanced Amp page exposes output gain plus the existing EL34/6L6GC/KT88
+power-tube, reference/British/American tone-stack, cathode-follower/plate-driver
+and negative-feedback voicing controls. Family-specific British/American amps
+intentionally keep their fixed internal family selections.
 
 ## Quality modes
 
@@ -87,9 +124,11 @@ The executable is generated in the JUCE product output directory under `build-ap
 The Phase 5 host starts muted in Safe dry monitor with -12 dB output trim. Select
 the interface, inspect both physical input meters, confirm the automatically
 selected guitar jack, and then unmute at low monitor volume. Disable Safe dry
-monitor after direct monitoring is verified. Start in `High` or `Live` quality
-to confirm stable streaming, then move to `Studio` while watching callback peak,
-deadline misses and driver XRUNs on the actual machine.
+monitor after direct monitoring is verified. Start in `Eco` quality to confirm
+stable streaming, especially on older CPUs. Move to `Live`, `High`, or `Studio`
+only while watching callback peak, deadline misses and driver XRUNs on the
+actual machine. Enable the parallel bass branch after the serial guitar path is
+stable because its second cabinet adds real, measurable CPU work.
 
 Load a measured cabinet IR before making cabinet-fidelity judgments. The synthetic reference fallback exists only so the full signal path can be tested immediately.
 

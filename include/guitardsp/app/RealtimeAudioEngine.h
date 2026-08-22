@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace guitardsp::app {
 
@@ -62,6 +63,9 @@ public:
     bool setNodeParameter(graph::NodeCategory category,
                           std::size_t parameterIndex,
                           float value) noexcept;
+    bool setNodeTypeParameter(std::string_view typeName,
+                              std::size_t parameterIndex,
+                              float value) noexcept;
     void resetDiagnostics() noexcept;
 
     [[nodiscard]] double sampleRate() const noexcept { return sampleRate_; }

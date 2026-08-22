@@ -7,11 +7,98 @@
 #include "guitardsp/app/ReferenceCabinetIR.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 namespace {
+
+class RoutingGraphView final : public juce::Component {
+public:
+    void setState(guitardsp::app::SignalRouting routing,
+                  bool octaveEnabled, bool bassCabinetEnabled) {
+        routing_ = routing;
+        octaveEnabled_ = octaveEnabled;
+        bassCabinetEnabled_ = bassCabinetEnabled;
+        repaint();
+    }
+
+    void paint(juce::Graphics& graphics) override {
+        const auto bounds = getLocalBounds().toFloat().reduced(4.0f);
+        graphics.setColour(juce::Colours::black.withAlpha(0.24f));
+        graphics.fillRoundedRectangle(bounds, 7.0f);
+        if (bounds.getWidth() < 100.0f) return;
+
+        const float middle = bounds.getCentreY();
+        const float left = bounds.getX() + 12.0f;
+        const float right = bounds.getRight() - 12.0f;
+        const auto link = [&](float startX, float startY, float endX, float endY) {
+            juce::Path path;
+            path.startNewSubPath(startX, startY);
+            path.lineTo(endX, endY);
+            graphics.setColour(juce::Colours::lightseagreen.withAlpha(0.75f));
+            graphics.strokePath(path, juce::PathStrokeType(2.0f));
+        };
+        const auto node = [&](float centerX, float centerY, float width,
+                              const juce::String& text, bool bass) {
+            const juce::Rectangle<float> rectangle(centerX - width * 0.5f,
+                                                    centerY - 13.0f, width, 26.0f);
+            graphics.setColour((bass ? juce::Colours::darkorange
+                                     : juce::Colours::steelblue).withAlpha(0.58f));
+            graphics.fillRoundedRectangle(rectangle, 4.0f);
+            graphics.setColour(juce::Colours::white);
+            graphics.drawFittedText(text, rectangle.toNearestInt(),
+                                    juce::Justification::centred, 1);
+        };
+
+        if (routing_ == guitardsp::app::SignalRouting::serialGuitar) {
+            const float span = right - left;
+            const std::array<float, 5> points{{left + 44.0f, left + span * 0.27f,
+                                                left + span * 0.50f,
+                                                left + span * 0.73f, right - 44.0f}};
+            for (std::size_t index = 1; index < points.size(); ++index)
+                link(points[index - 1], middle, points[index], middle);
+            node(points[0], middle, 80.0f, "INPUT", false);
+            node(points[1], middle, 92.0f, "PEDAL", false);
+            node(points[2], middle, 92.0f, "GUITAR AMP", false);
+            node(points[3], middle, 92.0f, "GUITAR CAB", false);
+            node(points[4], middle, 80.0f, "OUTPUT", false);
+            return;
+        }
+
+        const float top = middle - 22.0f;
+        const float bottom = middle + 22.0f;
+        const float span = right - left;
+        const float split = left + span * 0.18f;
+        const float merge = left + span * 0.82f;
+        link(left + 40.0f, middle, split, middle);
+        link(split, middle, split + 55.0f, top);
+        link(split, middle, split + 55.0f, bottom);
+        link(split + 55.0f, top, merge - 55.0f, top);
+        link(split + 55.0f, bottom, merge - 55.0f, bottom);
+        link(merge - 55.0f, top, merge, middle);
+        link(merge - 55.0f, bottom, merge, middle);
+        link(merge, middle, right - 40.0f, middle);
+
+        node(left + 40.0f, middle, 76.0f, "INPUT", false);
+        node(split, middle, 80.0f,
+             routing_ == guitardsp::app::SignalRouting::crossoverOctaveBass
+                 ? "X-OVER" : "SPLIT", false);
+        node(left + span * 0.43f, top, 180.0f, "PEDAL + GUITAR AMP + CAB", false);
+        juce::String lower = octaveEnabled_ ? "OCT -1 + BASS AMP" : "BASS AMP";
+        if (bassCabinetEnabled_) lower += " + CAB";
+        node(left + span * 0.57f, bottom, 200.0f, lower, true);
+        node(merge, middle, 74.0f, "MIX", false);
+        node(right - 40.0f, middle, 76.0f, "OUTPUT", false);
+    }
+
+private:
+    guitardsp::app::SignalRouting routing_ = guitardsp::app::SignalRouting::serialGuitar;
+    bool octaveEnabled_ = true;
+    bool bassCabinetEnabled_ = true;
+};
 
 class MainComponent final : public juce::Component,
                             public juce::AudioIODeviceCallback,
@@ -28,14 +115,26 @@ public:
         addAndMakeVisible(ampBox_);
         addAndMakeVisible(qualityBox_);
         addAndMakeVisible(inputRoutingBox_);
+        addAndMakeVisible(signalRoutingBox_);
+        addAndMakeVisible(powerTubeBox_);
+        addAndMakeVisible(toneStackBox_);
+        addAndMakeVisible(toneDriverBox_);
+        addAndMakeVisible(feedbackVoicingBox_);
         addAndMakeVisible(ampEnabled_);
         addAndMakeVisible(cabEnabled_);
+        addAndMakeVisible(octaveEnabled_);
+        addAndMakeVisible(bassCabinetEnabled_);
         addAndMakeVisible(safeDry_);
         addAndMakeVisible(mute_);
         addAndMakeVisible(inputTrim_);
         addAndMakeVisible(outputTrim_);
         addAndMakeVisible(loadIrButton_);
         addAndMakeVisible(resetDiagnosticsButton_);
+        addAndMakeVisible(rigPageButton_);
+        addAndMakeVisible(cabinetPageButton_);
+        addAndMakeVisible(routingPageButton_);
+        addAndMakeVisible(advancedPageButton_);
+        addAndMakeVisible(routingGraphView_);
         addAndMakeVisible(statusLabel_);
         addAndMakeVisible(irLabel_);
         addAndMakeVisible(meterLabel_);
@@ -68,10 +167,36 @@ public:
         inputRoutingBox_.addItem("Independent stereo", 4);
         inputRoutingBox_.setSelectedId(1, juce::dontSendNotification);
 
+        signalRoutingBox_.addItem("Serial guitar rig", 1);
+        signalRoutingBox_.addItem("Parallel octave + bass amp", 2);
+        signalRoutingBox_.addItem("Crossover octave + bass amp", 3);
+        signalRoutingBox_.setSelectedId(1, juce::dontSendNotification);
+
+        powerTubeBox_.addItem("Power tubes: EL34", 1);
+        powerTubeBox_.addItem("Power tubes: 6L6GC", 2);
+        powerTubeBox_.addItem("Power tubes: KT88", 3);
+        powerTubeBox_.setSelectedId(1, juce::dontSendNotification);
+        toneStackBox_.addItem("Tone stack: Reference", 1);
+        toneStackBox_.addItem("Tone stack: British", 2);
+        toneStackBox_.addItem("Tone stack: American", 3);
+        toneStackBox_.setSelectedId(1, juce::dontSendNotification);
+        toneDriverBox_.addItem("Driver: Reference", 1);
+        toneDriverBox_.addItem("Driver: Cathode follower", 2);
+        toneDriverBox_.addItem("Driver: Plate driven", 3);
+        toneDriverBox_.setSelectedId(1, juce::dontSendNotification);
+        feedbackVoicingBox_.addItem("Feedback: Reference", 1);
+        feedbackVoicingBox_.addItem("Feedback: British", 2);
+        feedbackVoicingBox_.addItem("Feedback: American", 3);
+        feedbackVoicingBox_.setSelectedId(1, juce::dontSendNotification);
+
         ampEnabled_.setButtonText("Amp");
         ampEnabled_.setToggleState(true, juce::dontSendNotification);
         cabEnabled_.setButtonText("Speaker + Cab IR");
         cabEnabled_.setToggleState(true, juce::dontSendNotification);
+        octaveEnabled_.setButtonText("Octave -1");
+        octaveEnabled_.setToggleState(true, juce::dontSendNotification);
+        bassCabinetEnabled_.setButtonText("Bass cabinet IR");
+        bassCabinetEnabled_.setToggleState(true, juce::dontSendNotification);
         safeDry_.setButtonText("Safe dry monitor");
         safeDry_.setToggleState(true, juce::dontSendNotification);
         mute_.setButtonText("Mute output");
@@ -109,6 +234,47 @@ public:
         configureToneControl(ampTreble_, "TREBLE", settings_.ampTreble);
         configureToneControl(ampMaster_, "MASTER", settings_.ampMaster);
         configureToneControl(ampPresence_, "PRES", settings_.ampPresence);
+        configureToneControl(cabinetMix_, "IR MIX", settings_.cabinetMix);
+        configureToneControl(speakerCompression_, "COMP", settings_.speakerCompression);
+        configureToneControl(speakerExcursion_, "EXCURS", settings_.speakerExcursion);
+        configureToneControl(speakerResonance_, "RESON", settings_.speakerResonance);
+        configureToneControl(guitarBranchLevel_, "GUITAR", settings_.guitarBranchLevel);
+        configureToneControl(bassBranchLevel_, "BASS MIX", settings_.bassBranchLevel);
+        configureToneControl(octaveMix_, "OCT MIX", settings_.octaveMix);
+        configureToneControl(octaveLevel_, "OCT LVL", settings_.octaveLevel);
+        configureToneControl(bassGain_, "BASS DRV", settings_.bassGain);
+        configureToneControl(bassTone_, "BASS TONE", settings_.bassTone);
+        configureToneControl(bassLevel_, "BASS OUT", settings_.bassLevel);
+
+        auto configureDbControl = [this](juce::Slider& slider, const juce::String& name,
+                                         double minimum, double maximum, double value) {
+            addAndMakeVisible(slider);
+            slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+            slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 118, 22);
+            slider.setRange(minimum, maximum, 0.1);
+            slider.setValue(value, juce::dontSendNotification);
+            slider.setTextValueSuffix(" dB " + name);
+            slider.onValueChange = [this] { toneControlsPending_ = true; };
+        };
+        configureDbControl(cabinetOutput_, "CAB", -18.0, 12.0,
+                           settings_.cabinetOutputDb);
+        configureDbControl(ampOutput_, "AMP", -30.0, 6.0,
+                           settings_.ampOutputDb);
+
+        addAndMakeVisible(crossoverFrequency_);
+        crossoverFrequency_.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        crossoverFrequency_.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 118, 22);
+        crossoverFrequency_.setRange(40.0, 1200.0, 1.0);
+        crossoverFrequency_.setSkewFactorFromMidPoint(240.0);
+        crossoverFrequency_.setValue(settings_.crossoverFrequency,
+                                    juce::dontSendNotification);
+        crossoverFrequency_.setTextValueSuffix(" Hz X-OVER");
+        crossoverFrequency_.onValueChange = [this] { toneControlsPending_ = true; };
+
+        rigPageButton_.setButtonText("PEDAL + AMP");
+        cabinetPageButton_.setButtonText("CABINET + SPEAKER");
+        routingPageButton_.setButtonText("ROUTING + BASS");
+        advancedPageButton_.setButtonText("ADVANCED AMP");
 
         pedalControlsTitle_.setText("CIRCUIT PEDAL", juce::dontSendNotification);
         ampControlsTitle_.setText("AMPLIFIER", juce::dontSendNotification);
@@ -121,11 +287,34 @@ public:
                             juce::dontSendNotification);
 
         pedalBox_.onChange = [this] { updateSettingsFromControls(); rebuildRig(); };
-        ampBox_.onChange = [this] { updateSettingsFromControls(); rebuildRig(); };
+        ampBox_.onChange = [this] {
+            updateSettingsFromControls();
+            updateAdvancedControlAvailability();
+            rebuildRig();
+        };
         qualityBox_.onChange = [this] { updateSettingsFromControls(); rebuildRig(); };
         inputRoutingBox_.onChange = [this] { updateInputRouting(); };
         ampEnabled_.onClick = [this] { updateSettingsFromControls(); rebuildRig(); };
         cabEnabled_.onClick = [this] { updateSettingsFromControls(); rebuildRig(); };
+        signalRoutingBox_.onChange = [this] {
+            updateSettingsFromControls();
+            updateRoutingGraph();
+            rebuildRig();
+        };
+        octaveEnabled_.onClick = [this] {
+            updateSettingsFromControls();
+            updateRoutingGraph();
+            rebuildRig();
+        };
+        bassCabinetEnabled_.onClick = [this] {
+            updateSettingsFromControls();
+            updateRoutingGraph();
+            rebuildRig();
+        };
+        powerTubeBox_.onChange = [this] { toneControlsPending_ = true; };
+        toneStackBox_.onChange = [this] { toneControlsPending_ = true; };
+        toneDriverBox_.onChange = [this] { toneControlsPending_ = true; };
+        feedbackVoicingBox_.onChange = [this] { toneControlsPending_ = true; };
         safeDry_.onClick = [this] { rebuildRig(); };
         mute_.onClick = [this] { engine_.setMuted(mute_.getToggleState()); };
         inputTrim_.onValueChange = [this] {
@@ -139,6 +328,10 @@ public:
             engine_.resetDiagnostics();
             xRunBaseline_ = std::max(0, deviceManager_.getXRunCount());
         };
+        rigPageButton_.onClick = [this] { setControlPage(ControlPage::rig); };
+        cabinetPageButton_.onClick = [this] { setControlPage(ControlPage::cabinet); };
+        routingPageButton_.onClick = [this] { setControlPage(ControlPage::routing); };
+        advancedPageButton_.onClick = [this] { setControlPage(ControlPage::advanced); };
 
         engine_.setInputTrimDb(0.0f);
         engine_.setOutputTrimDb(-12.0f);
@@ -146,6 +339,9 @@ public:
         engine_.setMuted(true);
         updateSettingsFromControls();
         updateInputRouting();
+        updateRoutingGraph();
+        updateAdvancedControlAvailability();
+        setControlPage(ControlPage::rig);
 
         const auto stateFile = audioStateFile();
         auto savedState = stateFile.existsAsFile()
@@ -157,7 +353,7 @@ public:
             statusLabel_.setText("Audio init error: " + error, juce::dontSendNotification);
         deviceManager_.addAudioCallback(this);
 
-        setSize(1120, 880);
+        setSize(1160, 940);
         startTimerHz(20);
     }
 
@@ -173,7 +369,7 @@ public:
         auto area = getLocalBounds().reduced(12);
         statusLabel_.setBounds(area.removeFromTop(30));
 
-        deviceSelector_.setBounds(area.removeFromTop(290));
+        deviceSelector_.setBounds(area.removeFromTop(274));
         area.removeFromTop(8);
 
         auto row = area.removeFromTop(34);
@@ -194,24 +390,69 @@ public:
         resetDiagnosticsButton_.setBounds(row);
 
         area.removeFromTop(8);
-        row = area.removeFromTop(24);
-        pedalControlsTitle_.setBounds(row.removeFromLeft(360));
-        ampControlsTitle_.setBounds(row);
+        row = area.removeFromTop(30);
+        const int navigationWidth = row.getWidth() / 4;
+        rigPageButton_.setBounds(row.removeFromLeft(navigationWidth).reduced(2, 0));
+        cabinetPageButton_.setBounds(row.removeFromLeft(navigationWidth).reduced(2, 0));
+        routingPageButton_.setBounds(row.removeFromLeft(navigationWidth).reduced(2, 0));
+        advancedPageButton_.setBounds(row.reduced(2, 0));
 
-        row = area.removeFromTop(108);
-        auto pedalArea = row.removeFromLeft(360);
-        pedalDrive_.setBounds(pedalArea.removeFromLeft(118));
-        pedalTone_.setBounds(pedalArea.removeFromLeft(118));
-        pedalLevel_.setBounds(pedalArea.removeFromLeft(118));
-        const int ampWidth = std::max(90, row.getWidth() / 6);
-        ampGain_.setBounds(row.removeFromLeft(ampWidth));
-        ampBass_.setBounds(row.removeFromLeft(ampWidth));
-        ampMid_.setBounds(row.removeFromLeft(ampWidth));
-        ampTreble_.setBounds(row.removeFromLeft(ampWidth));
-        ampMaster_.setBounds(row.removeFromLeft(ampWidth));
-        ampPresence_.setBounds(row);
+        auto panel = area.removeFromTop(210);
+        if (currentPage_ == ControlPage::rig) {
+            row = panel.removeFromTop(24);
+            pedalControlsTitle_.setBounds(row.removeFromLeft(360));
+            ampControlsTitle_.setBounds(row);
+            row = panel.removeFromTop(116);
+            auto pedalArea = row.removeFromLeft(360);
+            pedalDrive_.setBounds(pedalArea.removeFromLeft(118));
+            pedalTone_.setBounds(pedalArea.removeFromLeft(118));
+            pedalLevel_.setBounds(pedalArea.removeFromLeft(118));
+            const int ampWidth = std::max(90, row.getWidth() / 6);
+            ampGain_.setBounds(row.removeFromLeft(ampWidth));
+            ampBass_.setBounds(row.removeFromLeft(ampWidth));
+            ampMid_.setBounds(row.removeFromLeft(ampWidth));
+            ampTreble_.setBounds(row.removeFromLeft(ampWidth));
+            ampMaster_.setBounds(row.removeFromLeft(ampWidth));
+            ampPresence_.setBounds(row);
+        } else if (currentPage_ == ControlPage::cabinet) {
+            row = panel.removeFromTop(24);
+            pedalControlsTitle_.setBounds(row);
+            row = panel.removeFromTop(120);
+            const int width = std::max(100, row.getWidth() / 5);
+            cabinetMix_.setBounds(row.removeFromLeft(width));
+            speakerCompression_.setBounds(row.removeFromLeft(width));
+            speakerExcursion_.setBounds(row.removeFromLeft(width));
+            speakerResonance_.setBounds(row.removeFromLeft(width));
+            cabinetOutput_.setBounds(row);
+        } else if (currentPage_ == ControlPage::routing) {
+            row = panel.removeFromTop(32);
+            signalRoutingBox_.setBounds(row.removeFromLeft(340));
+            row.removeFromLeft(12);
+            octaveEnabled_.setBounds(row.removeFromLeft(150));
+            bassCabinetEnabled_.setBounds(row.removeFromLeft(190));
+            routingGraphView_.setBounds(panel.removeFromTop(78));
+            row = panel.removeFromTop(100);
+            const int width = std::max(85, row.getWidth() / 8);
+            guitarBranchLevel_.setBounds(row.removeFromLeft(width));
+            bassBranchLevel_.setBounds(row.removeFromLeft(width));
+            octaveMix_.setBounds(row.removeFromLeft(width));
+            octaveLevel_.setBounds(row.removeFromLeft(width));
+            bassGain_.setBounds(row.removeFromLeft(width));
+            bassTone_.setBounds(row.removeFromLeft(width));
+            bassLevel_.setBounds(row.removeFromLeft(width));
+            crossoverFrequency_.setBounds(row);
+        } else {
+            row = panel.removeFromTop(30);
+            const int width = row.getWidth() / 4;
+            powerTubeBox_.setBounds(row.removeFromLeft(width).reduced(3, 0));
+            toneStackBox_.setBounds(row.removeFromLeft(width).reduced(3, 0));
+            toneDriverBox_.setBounds(row.removeFromLeft(width).reduced(3, 0));
+            feedbackVoicingBox_.setBounds(row.reduced(3, 0));
+            panel.removeFromTop(12);
+            ampOutput_.setBounds(panel.removeFromTop(120).removeFromLeft(180));
+        }
 
-        area.removeFromTop(8);
+        area.removeFromTop(4);
         row = area.removeFromTop(34);
         inputTrim_.setBounds(row.removeFromLeft(row.getWidth() / 2 - 6));
         row.removeFromLeft(12);
@@ -288,6 +529,90 @@ public:
     }
 
 private:
+    enum class ControlPage { rig, cabinet, routing, advanced };
+
+    void setControlPage(ControlPage page) {
+        currentPage_ = page;
+        const bool rig = page == ControlPage::rig;
+        const bool cabinet = page == ControlPage::cabinet;
+        const bool routing = page == ControlPage::routing;
+        const bool advanced = page == ControlPage::advanced;
+
+        pedalControlsTitle_.setVisible(rig || cabinet);
+        pedalControlsTitle_.setText(cabinet ? "CABINET IR + SPEAKER DYNAMICS"
+                                             : "CIRCUIT PEDAL",
+                                   juce::dontSendNotification);
+        ampControlsTitle_.setVisible(rig);
+
+        for (auto* control : std::array<juce::Component*, 9>{{
+                 &pedalDrive_, &pedalTone_, &pedalLevel_, &ampGain_, &ampBass_,
+                 &ampMid_, &ampTreble_, &ampMaster_, &ampPresence_}})
+            control->setVisible(rig);
+
+        for (auto* control : std::array<juce::Component*, 5>{{
+                 &cabinetMix_, &speakerCompression_, &speakerExcursion_,
+                 &speakerResonance_, &cabinetOutput_}})
+            control->setVisible(cabinet);
+
+        for (auto* control : std::array<juce::Component*, 12>{{
+                 &signalRoutingBox_, &octaveEnabled_, &bassCabinetEnabled_,
+                 &routingGraphView_, &guitarBranchLevel_, &bassBranchLevel_,
+                 &octaveMix_, &octaveLevel_, &bassGain_, &bassTone_, &bassLevel_,
+                 &crossoverFrequency_}})
+            control->setVisible(routing);
+
+        for (auto* control : std::array<juce::Component*, 5>{{
+                 &powerTubeBox_, &toneStackBox_, &toneDriverBox_,
+                 &feedbackVoicingBox_, &ampOutput_}})
+            control->setVisible(advanced);
+
+        rigPageButton_.setColour(juce::TextButton::buttonColourId,
+            rig ? juce::Colours::steelblue : juce::Colours::darkslategrey);
+        cabinetPageButton_.setColour(juce::TextButton::buttonColourId,
+            cabinet ? juce::Colours::steelblue : juce::Colours::darkslategrey);
+        routingPageButton_.setColour(juce::TextButton::buttonColourId,
+            routing ? juce::Colours::steelblue : juce::Colours::darkslategrey);
+        advancedPageButton_.setColour(juce::TextButton::buttonColourId,
+            advanced ? juce::Colours::steelblue : juce::Colours::darkslategrey);
+        if (getWidth() > 0 && getHeight() > 0) resized();
+    }
+
+    void updateAdvancedControlAvailability() {
+        const bool reference = settings_.amp == guitardsp::app::AmpModel::reference;
+        powerTubeBox_.setEnabled(reference);
+        toneStackBox_.setEnabled(reference);
+        toneDriverBox_.setEnabled(reference);
+        feedbackVoicingBox_.setEnabled(reference);
+    }
+
+    void updateRoutingGraph() {
+        routingGraphView_.setState(settings_.signalRouting,
+                                   settings_.octaveEnabled,
+                                   settings_.bassCabinetEnabled);
+        const bool parallel = settings_.signalRouting
+            != guitardsp::app::SignalRouting::serialGuitar;
+        octaveEnabled_.setEnabled(parallel);
+        bassCabinetEnabled_.setEnabled(parallel);
+        for (auto* slider : std::array<juce::Slider*, 7>{{
+                 &guitarBranchLevel_, &bassBranchLevel_, &octaveMix_,
+                 &octaveLevel_, &bassGain_, &bassTone_, &bassLevel_}})
+            slider->setEnabled(parallel);
+        crossoverFrequency_.setEnabled(
+            settings_.signalRouting == guitardsp::app::SignalRouting::crossoverOctaveBass);
+    }
+
+    [[nodiscard]] std::string_view selectedGuitarAmpType() const noexcept {
+        switch (settings_.amp) {
+            case guitardsp::app::AmpModel::britishPlexiFamily:
+                return "British Plexi Family Reference";
+            case guitardsp::app::AmpModel::americanCleanFamily:
+                return "American Clean Family Reference";
+            case guitardsp::app::AmpModel::reference:
+            default:
+                return "Reference Amp Topology";
+        }
+    }
+
     void timerCallback() override {
         engine_.collectRetired();
         if (toneControlsPending_) applyToneControls();
@@ -423,18 +748,60 @@ private:
         settings_.ampTreble = normalized(ampTreble_);
         settings_.ampMaster = normalized(ampMaster_);
         settings_.ampPresence = normalized(ampPresence_);
+        settings_.ampOutputDb = static_cast<float>(ampOutput_.getValue());
+        settings_.ampPowerTube = static_cast<float>(powerTubeBox_.getSelectedId() - 1);
+        settings_.ampToneStack = static_cast<float>(toneStackBox_.getSelectedId() - 1);
+        settings_.ampToneDriver = static_cast<float>(toneDriverBox_.getSelectedId() - 1);
+        settings_.ampFeedbackVoicing = static_cast<float>(
+            feedbackVoicingBox_.getSelectedId() - 1);
+        settings_.cabinetMix = normalized(cabinetMix_);
+        settings_.speakerCompression = normalized(speakerCompression_);
+        settings_.speakerExcursion = normalized(speakerExcursion_);
+        settings_.speakerResonance = normalized(speakerResonance_);
+        settings_.cabinetOutputDb = static_cast<float>(cabinetOutput_.getValue());
+        settings_.guitarBranchLevel = normalized(guitarBranchLevel_);
+        settings_.bassBranchLevel = normalized(bassBranchLevel_);
+        settings_.octaveMix = normalized(octaveMix_);
+        settings_.octaveLevel = normalized(octaveLevel_);
+        settings_.bassGain = normalized(bassGain_);
+        settings_.bassTone = normalized(bassTone_);
+        settings_.bassLevel = normalized(bassLevel_);
+        settings_.crossoverFrequency = static_cast<float>(crossoverFrequency_.getValue());
 
         if (!engine_.configured() || safeDry_.getToggleState()) return;
         using guitardsp::graph::NodeCategory;
         engine_.setNodeParameter(NodeCategory::drive, 0, settings_.pedalDrive);
         engine_.setNodeParameter(NodeCategory::drive, 1, settings_.pedalTone);
         engine_.setNodeParameter(NodeCategory::drive, 2, settings_.pedalLevel);
-        engine_.setNodeParameter(NodeCategory::amp, 0, settings_.ampGain);
-        engine_.setNodeParameter(NodeCategory::amp, 1, settings_.ampBass);
-        engine_.setNodeParameter(NodeCategory::amp, 2, settings_.ampMid);
-        engine_.setNodeParameter(NodeCategory::amp, 3, settings_.ampTreble);
-        engine_.setNodeParameter(NodeCategory::amp, 4, settings_.ampMaster);
-        engine_.setNodeParameter(NodeCategory::amp, 5, settings_.ampPresence);
+        const auto ampType = selectedGuitarAmpType();
+        engine_.setNodeTypeParameter(ampType, 0, settings_.ampGain);
+        engine_.setNodeTypeParameter(ampType, 1, settings_.ampBass);
+        engine_.setNodeTypeParameter(ampType, 2, settings_.ampMid);
+        engine_.setNodeTypeParameter(ampType, 3, settings_.ampTreble);
+        engine_.setNodeTypeParameter(ampType, 4, settings_.ampMaster);
+        engine_.setNodeTypeParameter(ampType, 5, settings_.ampPresence);
+        engine_.setNodeTypeParameter(ampType, 6, settings_.ampOutputDb);
+        if (settings_.amp == guitardsp::app::AmpModel::reference) {
+            engine_.setNodeTypeParameter(ampType, 7, settings_.ampPowerTube);
+            engine_.setNodeTypeParameter(ampType, 8, settings_.ampToneStack);
+            engine_.setNodeTypeParameter(ampType, 9, settings_.ampToneDriver);
+            engine_.setNodeTypeParameter(ampType, 10, settings_.ampFeedbackVoicing);
+        }
+
+        constexpr std::string_view guitarCab = "Speaker Dynamics + Partitioned Cab";
+        engine_.setNodeTypeParameter(guitarCab, 0, settings_.speakerCompression);
+        engine_.setNodeTypeParameter(guitarCab, 1, settings_.speakerExcursion);
+        engine_.setNodeTypeParameter(guitarCab, 2, settings_.speakerResonance);
+        engine_.setNodeTypeParameter(guitarCab, 3, settings_.cabinetOutputDb);
+        engine_.setNodeTypeParameter(guitarCab, 4, settings_.cabinetMix);
+        engine_.setNodeTypeParameter("Guitar Branch Level", 0, settings_.guitarBranchLevel);
+        engine_.setNodeTypeParameter("Bass Branch Level", 0, settings_.bassBranchLevel);
+        engine_.setNodeTypeParameter("Monophonic Octave Down", 0, settings_.octaveMix);
+        engine_.setNodeTypeParameter("Monophonic Octave Down", 1, settings_.octaveLevel);
+        engine_.setNodeTypeParameter("Bass Amp Reference", 0, settings_.bassGain);
+        engine_.setNodeTypeParameter("Bass Amp Reference", 1, settings_.bassTone);
+        engine_.setNodeTypeParameter("Bass Amp Reference", 2, settings_.bassLevel);
+        engine_.setNodeTypeParameter("CrossoverSplit", 0, settings_.crossoverFrequency);
     }
 
     void updateSettingsFromControls() {
@@ -456,12 +823,26 @@ private:
         }
         settings_.ampEnabled = ampEnabled_.getToggleState();
         settings_.cabinetEnabled = cabEnabled_.getToggleState();
+        switch (signalRoutingBox_.getSelectedId()) {
+            case 2:
+                settings_.signalRouting = guitardsp::app::SignalRouting::parallelOctaveBass;
+                break;
+            case 3:
+                settings_.signalRouting = guitardsp::app::SignalRouting::crossoverOctaveBass;
+                break;
+            default:
+                settings_.signalRouting = guitardsp::app::SignalRouting::serialGuitar;
+                break;
+        }
+        settings_.octaveEnabled = octaveEnabled_.getToggleState();
+        settings_.bassCabinetEnabled = bassCabinetEnabled_.getToggleState();
     }
 
     guitardsp::app::LiveRigSettings settingsForCurrentDevice() const {
         auto result = settings_;
         if (safeDry_.getToggleState()) {
             result.pedal = guitardsp::app::PedalModel::bypass;
+            result.signalRouting = guitardsp::app::SignalRouting::serialGuitar;
             result.ampEnabled = false;
             result.cabinetEnabled = false;
             result.cabinetImpulse.clear();
@@ -539,8 +920,15 @@ private:
     juce::ComboBox ampBox_;
     juce::ComboBox qualityBox_;
     juce::ComboBox inputRoutingBox_;
+    juce::ComboBox signalRoutingBox_;
+    juce::ComboBox powerTubeBox_;
+    juce::ComboBox toneStackBox_;
+    juce::ComboBox toneDriverBox_;
+    juce::ComboBox feedbackVoicingBox_;
     juce::ToggleButton ampEnabled_;
     juce::ToggleButton cabEnabled_;
+    juce::ToggleButton octaveEnabled_;
+    juce::ToggleButton bassCabinetEnabled_;
     juce::ToggleButton safeDry_;
     juce::ToggleButton mute_;
     juce::Slider inputTrim_;
@@ -554,8 +942,27 @@ private:
     juce::Slider ampTreble_;
     juce::Slider ampMaster_;
     juce::Slider ampPresence_;
+    juce::Slider cabinetMix_;
+    juce::Slider speakerCompression_;
+    juce::Slider speakerExcursion_;
+    juce::Slider speakerResonance_;
+    juce::Slider cabinetOutput_;
+    juce::Slider ampOutput_;
+    juce::Slider guitarBranchLevel_;
+    juce::Slider bassBranchLevel_;
+    juce::Slider octaveMix_;
+    juce::Slider octaveLevel_;
+    juce::Slider bassGain_;
+    juce::Slider bassTone_;
+    juce::Slider bassLevel_;
+    juce::Slider crossoverFrequency_;
     juce::TextButton loadIrButton_;
     juce::TextButton resetDiagnosticsButton_;
+    juce::TextButton rigPageButton_;
+    juce::TextButton cabinetPageButton_;
+    juce::TextButton routingPageButton_;
+    juce::TextButton advancedPageButton_;
+    RoutingGraphView routingGraphView_;
     juce::Label statusLabel_;
     juce::Label irLabel_;
     juce::Label meterLabel_;
@@ -576,6 +983,7 @@ private:
     int processingChannels_ = 2;
     int xRunBaseline_ = 0;
     bool toneControlsPending_ = false;
+    ControlPage currentPage_ = ControlPage::rig;
 };
 
 class MainWindow final : public juce::DocumentWindow {
@@ -600,7 +1008,7 @@ public:
 class GuitarDSPApplication final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "GuitarDSP Graph"; }
-    const juce::String getApplicationVersion() override { return "0.32.0"; }
+    const juce::String getApplicationVersion() override { return "0.33.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override {

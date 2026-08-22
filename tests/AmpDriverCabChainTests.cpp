@@ -110,6 +110,36 @@ int main() {
         cab.process(input, b, samples);
         ok &= require(differenceRms(a, b, 512, samples) > 1.0e-8f,
                       "speaker compression changes cabinet-chain output");
+
+        graph::AudioBuffer impulse(1, samples);
+        impulse.clear();
+        impulse.channel(0)[0] = 0.2f;
+        cab.setImpulseResponse({1.0f});
+        cab.prepare(spec);
+        cab.setParameterValue(0, 0.0f);
+        cab.setParameterValue(1, 0.0f);
+        cab.setParameterValue(2, 0.0f);
+
+        cab.setParameterValue(4, 0.0f);
+        cab.reset();
+        cab.process(impulse, a, samples);
+        cab.setParameterValue(4, 1.0f);
+        cab.reset();
+        cab.process(impulse, b, samples);
+
+        const int latency = cab.latencySamples();
+        ok &= require(std::abs(a.channel(0)[0]) < 1.0e-8f
+                          && std::abs(a.channel(0)[latency]) > 0.05f,
+                      "dry cabinet mix retains convolution latency alignment");
+        ok &= require(std::abs(a.channel(0)[latency] - b.channel(0)[latency]) < 1.0e-5f,
+                      "dry and wet cabinet paths share the same impulse arrival");
+
+        cab.setParameterValue(4, 0.5f);
+        cab.reset();
+        cab.process(impulse, a, samples);
+        ok &= require(std::abs(a.channel(0)[0]) < 1.0e-8f
+                          && std::abs(a.channel(0)[latency] - b.channel(0)[latency]) < 1.0e-5f,
+                      "50 percent cabinet IR mix recombines without comb cancellation");
     }
 
     return ok ? 0 : 1;

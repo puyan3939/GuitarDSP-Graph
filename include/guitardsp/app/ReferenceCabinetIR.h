@@ -65,6 +65,60 @@ inline std::vector<float> makeReferenceCabinetImpulse(double sampleRate, int len
     return impulse;
 }
 
+// Bass-specific fallback: lower cutoff and a gentler top end than the guitar
+// response. Like the guitar fallback this is explicitly synthetic, not measured.
+inline std::vector<float> makeReferenceBassCabinetImpulse(double sampleRate, int length = 1024) {
+    const double sr = std::max(8000.0, sampleRate);
+    const int count = std::clamp(length, 128, 16384);
+    std::vector<float> impulse(static_cast<std::size_t>(count), 0.0f);
+    const double hp = std::exp(-2.0 * std::numbers::pi * 38.0 / sr);
+    const double lp = std::exp(-2.0 * std::numbers::pi * 4300.0 / sr);
+    double previousInput = 0.0;
+    double previousHighpass = 0.0;
+    double lowpass = 0.0;
+
+    for (int index = 0; index < count; ++index) {
+        const double time = static_cast<double>(index) / sr;
+        double sample = index == 0 ? 1.0 : 0.0;
+        sample += 0.14 * std::exp(-time * 34.0)
+            * std::sin(2.0 * std::numbers::pi * 82.0 * time);
+        sample += 0.06 * std::exp(-time * 75.0)
+            * std::sin(2.0 * std::numbers::pi * 410.0 * time);
+        const double highpassed = hp * (previousHighpass + sample - previousInput);
+        previousInput = sample;
+        previousHighpass = highpassed;
+        lowpass = (1.0 - lp) * highpassed + lp * lowpass;
+        impulse[static_cast<std::size_t>(index)] = static_cast<float>(lowpass);
+    }
+
+    float peak = 0.0f;
+    for (const float sample : impulse) peak = std::max(peak, std::abs(sample));
+    double maximumResponse = 0.0;
+    for (const double frequency : {45.0, 55.0, 70.0, 82.0, 98.0, 110.0,
+                                   140.0, 165.0, 220.0, 330.0, 440.0,
+                                   660.0, 1000.0, 2000.0, 4000.0}) {
+        double real = 0.0;
+        double imaginary = 0.0;
+        for (int index = 0; index < count; ++index) {
+            const double phase = 2.0 * std::numbers::pi * frequency
+                * static_cast<double>(index) / sr;
+            const double sample = impulse[static_cast<std::size_t>(index)];
+            real += sample * std::cos(phase);
+            imaginary -= sample * std::sin(phase);
+        }
+        maximumResponse = std::max(maximumResponse,
+                                   std::sqrt(real * real + imaginary * imaginary));
+    }
+    if (peak > 1.0e-9f && maximumResponse > 1.0e-12) {
+        // Peak-normalizing a long low-frequency resonance can hide 30-40 dB
+        // of steady-state convolution gain and trip the output safety limiter.
+        const float gain = std::min(0.82f / peak,
+            static_cast<float>(1.15 / maximumResponse));
+        for (auto& sample : impulse) sample *= gain;
+    }
+    return impulse;
+}
+
 // Offline high-quality IR sample-rate conversion. This is intentionally a control-
 // thread utility; it allocates and performs a windowed-sinc convolution so the audio
 // callback never pays for IR rate conversion.

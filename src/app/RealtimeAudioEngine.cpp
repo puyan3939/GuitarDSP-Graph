@@ -60,6 +60,12 @@ bool RealtimeAudioEngine::setNodeParameter(graph::NodeCategory category,
     return configured_ && host_.setCategoryParameter(category, parameterIndex, value);
 }
 
+bool RealtimeAudioEngine::setNodeTypeParameter(std::string_view typeName,
+                                               std::size_t parameterIndex,
+                                               float value) noexcept {
+    return configured_ && host_.setTypeParameter(typeName, parameterIndex, value);
+}
+
 void RealtimeAudioEngine::resetDiagnostics() noexcept {
     callbacks_.store(0, std::memory_order_relaxed);
     clippedSamples_.store(0, std::memory_order_relaxed);
