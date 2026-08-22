@@ -86,7 +86,12 @@ quiescent operating point, so a loud-sine benchmark could pass while actual
 low-level input produced repeated 40-iteration cycles and driver XRUNs. The
 current solver also tests the freshly restamped nonlinear circuit residual;
 quiet-input regression coverage therefore belongs alongside driven-waveform
-tests.
+tests. Also run a sustained post-note/silence interval: callback average is an
+exponentially smoothed measurement, peak load is retained until diagnostics are
+reset, and competing desktop/PipeWire work can still create isolated scheduler
+spikes even when the component-level solver's operating point remains stable.
+The TS808 now caches the exact 27-unknown invariant linear prefix and solves its
+21-unknown nonlinear boundary without changing the 48-unknown circuit topology.
 
 The app reports buffer duration, the driver's reported input/output latency, DSP
 graph latency and their reported I/O + DSP total separately. It does not add the

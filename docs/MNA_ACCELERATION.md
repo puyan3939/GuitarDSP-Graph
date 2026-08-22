@@ -55,18 +55,29 @@ are not rebuilt or copied as a complete dense matrix inside the iteration.
 
 `prepare()` performs symbolic analysis once and compiles:
 
-- a Markowitz-style minimum-fill ordering of the matched MNA rows and columns;
+- a linear-first Markowitz ordering of the matched MNA rows and columns;
 - the original sparse matrix entries;
 - the exact structural LU fill pattern;
 - every diagonal and lower-factor location;
 - every elimination target address;
-- the rows needed for scaled backward-error validation.
+- the rows needed for scaled backward-error validation;
+- an exact, reusable factorization of the invariant linear prefix.
 
 The ordering never removes an unknown or changes a circuit equation. For the
-complete 48-unknown TS808, it reduces symbolic factor entries from 323 to 177
-and elimination multiply/subtract updates from 375 to 47. The 57-unknown DS-1
-factor similarly falls from 453 entries to 219. Internal columns are scattered
-back to the original schematic-facing MNA order after each solve.
+complete 48-unknown TS808, 27 linear unknowns are eliminated once whenever the
+static conductance matrix changes. Newton iterations factor only the remaining
+21-unknown nonlinear Schur boundary, then reconstruct all 48 schematic-facing
+voltages and branch currents. This deliberately trades a small amount of
+symbolic fill for a reusable linear prefix: the factor has 193 entries instead
+of 323 in schematic order, and only 15 of its 71 elimination updates remain in
+the per-Newton suffix. The 57-unknown DS-1 similarly caches 29 linear unknowns,
+leaving a 28-unknown nonlinear boundary and a 238-entry factor instead of 453.
+
+The invariant-prefix factor and the static Schur complement are refreshed when
+potentiometers or other conductance-affecting controls change. Reactive/source
+history is forward-substituted once per audio sample, while nonlinear equivalent
+sources are still updated on every Newton iteration. All original capacitor,
+transistor, diode and op-amp equations remain active.
 
 Numeric sparse LU and its temporary forward/back-substitution vectors use
 double precision even though the external audio and component contract remains
@@ -88,7 +99,10 @@ least one complete sparse MNA solve.
 Diodes with series resistance retain the same implicit junction equation and
 convergence tolerance. Their previous converged junction voltage is reused only
 as the next Newton starting point, avoiding repeated cold-start exponential
-solves in the TS808 and DS-1 Ebers-Moll transistor subcircuits.
+solves in the TS808 and DS-1 Ebers-Moll transistor subcircuits. The prepared
+sparse path caches each device's inverse thermal voltage; clamped exponential
+endpoints use their identical precomputed float values. Dense-reference mode
+keeps its original division path.
 
 Every accepted sparse result is checked against the original MNA equations. The
 expensive sparse backward-error pass runs when Newton accepts the sample or

@@ -13,15 +13,17 @@ namespace guitardsp::circuit {
 //
 // Symbolic work happens in prepare():
 // - find a structural row permutation that gives every column a diagonal entry
-// - choose a minimum-fill symmetric elimination ordering for the matched system
+// - order invariant linear equations ahead of the nonlinear boundary
+// - choose minimum-fill pivots inside each of those matched partitions
 // - compute the exact no-pivot elimination fill pattern
 // - compile CSR rows and a dense row/column -> sparse-slot lookup table
+// - cache the exact elimination of the invariant linear prefix
 //
-// Numeric solve() performs no allocation. It copies only the prepared structural
-// entries from the dense correctness matrix into CSR storage, factors that fixed
-// pattern in double precision, and solves the permuted-row system. Because the
-// numeric phase deliberately avoids dynamic pivoting, callers can validate the
-// accepted Newton result against the original dense equations using a scaled
+// Numeric solve() performs no allocation. It restores only the mutable Schur
+// boundary, adds the current nonlinear device stamps, factors the remaining
+// suffix in double precision, and reconstructs all original circuit unknowns.
+// Because numeric elimination deliberately avoids dynamic pivoting, callers can
+// validate the result against the original dense equations using a scaled
 // backward-error residual. An unsafe pivot or residual falls back to the dense
 // partial-pivot reference solver.
 // Internal rows and columns may be permuted for sparsity; solved unknowns are
@@ -30,7 +32,8 @@ class FixedPatternSparseSolver {
 public:
     bool prepare(std::size_t dimension,
                  const std::vector<std::uint8_t>& structuralPattern,
-                 const std::vector<float>& numericHint) {
+                 const std::vector<float>& numericHint,
+                 const std::vector<std::uint8_t>& nonlinearPattern = {}) {
         clear();
         dimension_ = dimension;
         if (dimension_ == 0U || structuralPattern.size() != dimension_ * dimension_ ||
@@ -92,10 +95,11 @@ public:
         }
 
         // The user-visible MNA numbering follows schematic construction rather
-        // than a useful elimination order. Directly factoring that order can
-        // create several times more fill than the actual circuit graph requires.
-        // A symbolic Markowitz pass only changes the order of exact Gaussian
-        // elimination: every component, unknown and Newton equation is retained.
+        // than a useful elimination order. Keep all device-touched rows/columns
+        // at the end, then use Markowitz pivots inside the linear and nonlinear
+        // partitions. The exact linear prefix can consequently be eliminated
+        // once and reused by every Newton iteration; no component or unknown is
+        // removed from the original equations.
         std::vector<std::uint8_t> orderingFill(dimension_ * dimension_, 0U);
         for (std::size_t row = 0; row < dimension_; ++row) {
             const auto originalRow = rowPermutation_[row];
@@ -104,12 +108,26 @@ public:
                     structuralPattern[originalRow * dimension_ + column];
         }
 
+        const bool partitionNonlinear = nonlinearPattern.size() == dimension_ * dimension_;
+        std::vector<std::uint8_t> nonlinearRows(dimension_, 0U);
+        std::vector<std::uint8_t> nonlinearColumns(dimension_, 0U);
+        if (partitionNonlinear) {
+            for (std::size_t row = 0; row < dimension_; ++row) {
+                for (std::size_t column = 0; column < dimension_; ++column) {
+                    if (nonlinearPattern[row * dimension_ + column] == 0U) continue;
+                    nonlinearRows[row] = 1U;
+                    nonlinearColumns[column] = 1U;
+                }
+            }
+        }
+
         std::vector<std::uint8_t> eliminated(dimension_, 0U);
         columnPermutation_.clear();
         columnPermutation_.reserve(dimension_);
         for (std::size_t step = 0; step < dimension_; ++step) {
             std::size_t best = npos;
             std::size_t bestScore = npos;
+            bool bestNonlinear = true;
             for (std::size_t candidate = 0; candidate < dimension_; ++candidate) {
                 if (eliminated[candidate] != 0U) continue;
                 std::size_t rowDegree = 0U;
@@ -120,9 +138,14 @@ public:
                     columnDegree += orderingFill[other * dimension_ + candidate] != 0U ? 1U : 0U;
                 }
                 const auto score = rowDegree * columnDegree;
-                if (best == npos || score < bestScore) {
+                const bool nonlinear = partitionNonlinear &&
+                    (nonlinearRows[rowPermutation_[candidate]] != 0U ||
+                     nonlinearColumns[candidate] != 0U);
+                if (best == npos || (bestNonlinear && !nonlinear)
+                    || (bestNonlinear == nonlinear && score < bestScore)) {
                     best = candidate;
                     bestScore = score;
+                    bestNonlinear = nonlinear;
                 }
             }
             if (best == npos) {
@@ -148,6 +171,14 @@ public:
         const auto matchedRows = rowPermutation_;
         for (std::size_t row = 0; row < dimension_; ++row)
             rowPermutation_[row] = matchedRows[columnPermutation_[row]];
+
+        linearPrefix_ = 0U;
+        if (partitionNonlinear) {
+            while (linearPrefix_ < dimension_
+                   && nonlinearRows[rowPermutation_[linearPrefix_]] == 0U
+                   && nonlinearColumns[columnPermutation_[linearPrefix_]] == 0U)
+                ++linearPrefix_;
+        }
 
         std::vector<std::uint8_t> fill(dimension_ * dimension_, 0U);
         for (std::size_t row = 0; row < dimension_; ++row) {
@@ -203,6 +234,10 @@ public:
         originalColumns_.reserve(originalNonZeros_);
         originalSlots_.reserve(originalNonZeros_);
         originalDenseIndices_.reserve(originalNonZeros_);
+        nonlinearSlots_.clear();
+        nonlinearDenseIndices_.clear();
+        nonlinearSlots_.reserve(originalNonZeros_);
+        nonlinearDenseIndices_.reserve(originalNonZeros_);
         for (std::size_t row = 0; row < dimension_; ++row) {
             originalRowOffsets_[row] = originalColumns_.size();
             const auto originalRow = rowPermutation_[row];
@@ -213,9 +248,31 @@ public:
                 originalColumns_.push_back(originalColumn);
                 originalSlots_.push_back(slotLookup_[row * dimension_ + column]);
                 originalDenseIndices_.push_back(originalRow * dimension_ + originalColumn);
+                if (partitionNonlinear
+                    && nonlinearPattern[originalRow * dimension_ + originalColumn] != 0U) {
+                    nonlinearSlots_.push_back(slotLookup_[row * dimension_ + column]);
+                    nonlinearDenseIndices_.push_back(originalRow * dimension_ + originalColumn);
+                }
             }
         }
         originalRowOffsets_[dimension_] = originalColumns_.size();
+
+        validationRows_.clear();
+        validationRows_.reserve(dimension_);
+        nonlinearRows_.clear();
+        nonlinearRows_.reserve(dimension_);
+        if (partitionNonlinear) {
+            for (std::size_t row = 0; row < dimension_; ++row) {
+                if (nonlinearRows[rowPermutation_[row]] != 0U) {
+                    validationRows_.push_back(row);
+                    nonlinearRows_.push_back(row);
+                }
+            }
+        }
+        for (std::size_t row = 0; row < dimension_; ++row) {
+            if (!partitionNonlinear || nonlinearRows[rowPermutation_[row]] == 0U)
+                validationRows_.push_back(row);
+        }
 
         // Symbolic elimination also knows exactly which rows contain each lower
         // column. Avoid another dense row scan during every numeric factorization.
@@ -252,11 +309,90 @@ public:
         }
         eliminationOffsets_[dimension_] = eliminationRows_.size();
 
+        mutableFactorSlots_.clear();
+        mutableFactorSlots_.reserve(factorNonZeros_);
+        for (std::size_t row = linearPrefix_; row < dimension_; ++row) {
+            for (std::size_t slot = rowOffsets_[row];
+                 slot < rowOffsets_[row + 1U]; ++slot) {
+                if (columns_[slot] >= linearPrefix_)
+                    mutableFactorSlots_.push_back(slot);
+            }
+        }
+
         values_.assign(columns_.size(), 0.0f);
+        cachedLinearValues_.assign(columns_.size(), 0.0);
+        nonlinearStaticValues_.assign(nonlinearDenseIndices_.size(), 0.0f);
         workRhs_.assign(dimension_, 0.0f);
+        cachedSampleRhs_.assign(dimension_, 0.0);
+        sampleBaselineRhs_.assign(dimension_, 0.0f);
         solutionWork_.assign(dimension_, 0.0);
         available_ = true;
+        refreshStaticFactor(numericHint);
         return true;
+    }
+
+    void refreshStaticFactor(const std::vector<float>& staticMatrix) noexcept {
+        cachedLinearFactorValid_ = false;
+        cachedSampleRhsValid_ = false;
+        if (!available_ || linearPrefix_ == 0U
+            || staticMatrix.size() != dimension_ * dimension_)
+            return;
+
+        std::fill(cachedLinearValues_.begin(), cachedLinearValues_.end(), 0.0);
+        for (std::size_t index = 0; index < originalDenseIndices_.size(); ++index)
+            cachedLinearValues_[originalSlots_[index]] =
+                static_cast<double>(staticMatrix[originalDenseIndices_[index]]);
+        for (std::size_t index = 0; index < nonlinearDenseIndices_.size(); ++index)
+            nonlinearStaticValues_[index] = staticMatrix[nonlinearDenseIndices_[index]];
+
+        // This is ordinary sparse Gaussian elimination, stopped exactly where
+        // nonlinear rows or unknowns begin. Its suffix is the static Schur
+        // complement, not a reduced or approximate replacement circuit.
+        constexpr double pivotFloor = 1.0e-14;
+        for (std::size_t column = 0; column < linearPrefix_; ++column) {
+            const auto diagonalSlot = diagonalSlots_[column];
+            const double diagonal = cachedLinearValues_[diagonalSlot];
+            if (std::abs(diagonal) < pivotFloor || !std::isfinite(diagonal)) return;
+
+            for (std::size_t entry = eliminationOffsets_[column];
+                 entry < eliminationOffsets_[column + 1U]; ++entry) {
+                const auto lowerSlot = eliminationLowerSlots_[entry];
+                const double value = cachedLinearValues_[lowerSlot];
+                if (value == 0.0) continue;
+                const double factor = value / diagonal;
+                if (!std::isfinite(factor)) return;
+                cachedLinearValues_[lowerSlot] = factor;
+
+                auto target = eliminationTargetOffsets_[entry];
+                for (std::size_t index = diagonalSlot + 1U;
+                     index < rowOffsets_[column + 1U]; ++index)
+                    cachedLinearValues_[eliminationTargets_[target++]] -=
+                        factor * cachedLinearValues_[index];
+            }
+        }
+        std::copy(cachedLinearValues_.begin(), cachedLinearValues_.end(), values_.begin());
+        cachedLinearFactorValid_ = true;
+    }
+
+    void prepareSampleRhs(const std::vector<float>& rhs) noexcept {
+        cachedSampleRhsValid_ = false;
+        if (!cachedLinearFactorValid_ || rhs.size() != dimension_) return;
+
+        std::copy(rhs.begin(), rhs.end(), sampleBaselineRhs_.begin());
+        for (std::size_t row = 0; row < dimension_; ++row)
+            cachedSampleRhs_[row] = rhs[rowPermutation_[row]];
+
+        // Capacitor/source history changes per audio sample, but it does not
+        // change across that sample's Newton iterations. Apply cached linear
+        // elimination once and add only nonlinear equivalent sources later.
+        for (std::size_t column = 0; column < linearPrefix_; ++column) {
+            for (std::size_t entry = eliminationOffsets_[column];
+                 entry < eliminationOffsets_[column + 1U]; ++entry)
+                cachedSampleRhs_[eliminationRows_[entry]] -=
+                    cachedLinearValues_[eliminationLowerSlots_[entry]]
+                    * cachedSampleRhs_[column];
+        }
+        cachedSampleRhsValid_ = true;
     }
 
     bool solve(const std::vector<float>& denseMatrix,
@@ -268,18 +404,41 @@ public:
             return false;
 
         constexpr double pivotFloor = 1.0e-14;
-        std::fill(values_.begin(), values_.end(), 0.0);
-
-        for (std::size_t row = 0; row < dimension_; ++row) {
-            const auto originalRow = rowPermutation_[row];
-            workRhs_[row] = rhs[originalRow];
-            for (std::size_t index = originalRowOffsets_[row];
-                 index < originalRowOffsets_[row + 1U]; ++index) {
+        if (cachedLinearFactorValid_) {
+            for (const auto slot : mutableFactorSlots_)
+                values_[slot] = cachedLinearValues_[slot];
+            for (std::size_t index = 0; index < nonlinearDenseIndices_.size(); ++index) {
+                values_[nonlinearSlots_[index]] +=
+                    static_cast<double>(denseMatrix[nonlinearDenseIndices_[index]])
+                    - static_cast<double>(nonlinearStaticValues_[index]);
+            }
+        } else {
+            std::fill(values_.begin(), values_.end(), 0.0);
+            for (std::size_t index = 0; index < originalDenseIndices_.size(); ++index)
                 values_[originalSlots_[index]] = denseMatrix[originalDenseIndices_[index]];
+        }
+
+        const std::size_t cachedPrefix = cachedLinearFactorValid_ ? linearPrefix_ : 0U;
+        if (cachedSampleRhsValid_) {
+            std::copy(cachedSampleRhs_.begin(), cachedSampleRhs_.end(), workRhs_.begin());
+            for (const auto row : nonlinearRows_) {
+                const auto originalRow = rowPermutation_[row];
+                workRhs_[row] += static_cast<double>(rhs[originalRow])
+                    - static_cast<double>(sampleBaselineRhs_[originalRow]);
+            }
+        } else {
+            for (std::size_t row = 0; row < dimension_; ++row)
+                workRhs_[row] = rhs[rowPermutation_[row]];
+
+            for (std::size_t column = 0; column < cachedPrefix; ++column) {
+                for (std::size_t entry = eliminationOffsets_[column];
+                     entry < eliminationOffsets_[column + 1U]; ++entry)
+                    workRhs_[eliminationRows_[entry]] -=
+                        values_[eliminationLowerSlots_[entry]] * workRhs_[column];
             }
         }
 
-        for (std::size_t k = 0; k < dimension_; ++k) {
+        for (std::size_t k = cachedPrefix; k < dimension_; ++k) {
             const auto diagonalSlot = diagonalSlots_[k];
             const double diagonal = values_[diagonalSlot];
             if (std::abs(diagonal) < pivotFloor || !std::isfinite(diagonal)) return false;
@@ -336,8 +495,7 @@ public:
         // exposing it to Newton. The row-scaled backward error is dimensionless and
         // works for both millivolt pedals and hundreds-of-volts tube circuits.
         constexpr double residualFloor = 1.0e-18;
-        double worstBackwardError = 0.0;
-        for (std::size_t row = 0; row < dimension_; ++row) {
+        for (const auto row : validationRows_) {
             const auto originalRow = rowPermutation_[row];
             double residual = -static_cast<double>(rhs[originalRow]);
             double scale = std::abs(static_cast<double>(rhs[originalRow]));
@@ -350,16 +508,20 @@ public:
                 scale += std::abs(a) * std::abs(x);
             }
             const double backwardError = std::abs(residual) / std::max(residualFloor, scale);
-            if (!std::isfinite(backwardError)) return false;
-            worstBackwardError = std::max(worstBackwardError, backwardError);
+            if (!std::isfinite(backwardError)
+                || backwardError > maximumBackwardError)
+                return false;
         }
-        return worstBackwardError <= maximumBackwardError;
+        return true;
     }
 
     bool available() const noexcept { return available_; }
     std::size_t dimension() const noexcept { return dimension_; }
     std::size_t originalNonZeros() const noexcept { return originalNonZeros_; }
     std::size_t factorNonZeros() const noexcept { return factorNonZeros_; }
+    std::size_t cachedLinearUnknowns() const noexcept {
+        return cachedLinearFactorValid_ ? linearPrefix_ : 0U;
+    }
     float factorDensity() const noexcept {
         if (dimension_ == 0U) return 1.0f;
         const auto full = static_cast<double>(dimension_) * static_cast<double>(dimension_);
@@ -372,6 +534,9 @@ private:
         dimension_ = 0U;
         originalNonZeros_ = 0U;
         factorNonZeros_ = 0U;
+        linearPrefix_ = 0U;
+        cachedLinearFactorValid_ = false;
+        cachedSampleRhsValid_ = false;
         rowPermutation_.clear();
         columnPermutation_.clear();
         rowOffsets_.clear();
@@ -381,14 +546,23 @@ private:
         originalColumns_.clear();
         originalSlots_.clear();
         originalDenseIndices_.clear();
+        validationRows_.clear();
+        nonlinearRows_.clear();
+        nonlinearSlots_.clear();
+        nonlinearDenseIndices_.clear();
         eliminationOffsets_.clear();
         eliminationRows_.clear();
         eliminationLowerSlots_.clear();
         eliminationTargetOffsets_.clear();
         eliminationTargets_.clear();
+        mutableFactorSlots_.clear();
         diagonalSlots_.clear();
         values_.clear();
+        cachedLinearValues_.clear();
+        nonlinearStaticValues_.clear();
         workRhs_.clear();
+        cachedSampleRhs_.clear();
+        sampleBaselineRhs_.clear();
         solutionWork_.clear();
     }
 
@@ -396,6 +570,9 @@ private:
     std::size_t dimension_ = 0U;
     std::size_t originalNonZeros_ = 0U;
     std::size_t factorNonZeros_ = 0U;
+    std::size_t linearPrefix_ = 0U;
+    bool cachedLinearFactorValid_ = false;
+    bool cachedSampleRhsValid_ = false;
     std::vector<std::size_t> rowPermutation_;
     std::vector<std::size_t> columnPermutation_;
     std::vector<std::size_t> rowOffsets_;
@@ -405,14 +582,23 @@ private:
     std::vector<std::size_t> originalColumns_;
     std::vector<std::size_t> originalSlots_;
     std::vector<std::size_t> originalDenseIndices_;
+    std::vector<std::size_t> validationRows_;
+    std::vector<std::size_t> nonlinearRows_;
+    std::vector<std::size_t> nonlinearSlots_;
+    std::vector<std::size_t> nonlinearDenseIndices_;
     std::vector<std::size_t> eliminationOffsets_;
     std::vector<std::size_t> eliminationRows_;
     std::vector<std::size_t> eliminationLowerSlots_;
     std::vector<std::size_t> eliminationTargetOffsets_;
     std::vector<std::size_t> eliminationTargets_;
+    std::vector<std::size_t> mutableFactorSlots_;
     std::vector<std::size_t> diagonalSlots_;
     std::vector<double> values_;
+    std::vector<double> cachedLinearValues_;
+    std::vector<float> nonlinearStaticValues_;
     std::vector<double> workRhs_;
+    std::vector<double> cachedSampleRhs_;
+    std::vector<float> sampleBaselineRhs_;
     std::vector<double> solutionWork_;
 };
 

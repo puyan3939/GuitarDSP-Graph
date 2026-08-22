@@ -195,8 +195,9 @@ int main() {
                       "full TS808 prepares at the Eco oversampled rate");
         ok &= require(ts.engine().dimension() == 48
                           && ts.engine().sparseNonlinearFactorNonZeros()
-                              <= ts.engine().sparseNonlinearOriginalNonZeros() + 20,
-                      "minimum-fill ordering retains all 48 TS808 unknowns without excess fill");
+                              <= ts.engine().sparseNonlinearOriginalNonZeros() + 40
+                          && ts.engine().sparseNonlinearCachedLinearUnknowns() >= 24,
+                      "cached linear Schur prefix retains all 48 TS808 component unknowns");
         ts.engine().resetPerformanceStats();
         constexpr int samples = 1024;
         int totalIterations = 0;
@@ -253,6 +254,29 @@ int main() {
                           && quietPerformance.sparseNewtonSolves
                               >= quietPerformance.samples,
                       "strict nonlinear KCL residual terminates physically converged samples");
+
+        ts.engine().resetPerformanceStats();
+        constexpr int silentSamples = 16384;
+        int silentIterations = 0;
+        int silentUnconverged = 0;
+        for (int i = 0; i < silentSamples; ++i) {
+            const float output = ts.processSample(0.0f);
+            const auto solve = ts.lastSolveStats();
+            silentIterations += solve.iterations;
+            silentUnconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const auto silentPerformance = ts.engine().performanceStats();
+        const float averageSilentIterations = static_cast<float>(silentIterations)
+            / static_cast<float>(silentSamples);
+        std::cout << "DIAG silent-ts808 average_iterations=" << averageSilentIterations
+                  << " unconverged=" << silentUnconverged
+                  << " cached_linear_unknowns="
+                  << ts.engine().sparseNonlinearCachedLinearUnknowns()
+                  << " static_rebuilds=" << silentPerformance.staticCacheRebuilds << '\n';
+        ok &= require(averageSilentIterations < 3.0f && silentUnconverged == 0
+                          && silentPerformance.staticCacheRebuilds == 0,
+                      "prolonged silence preserves cached physical circuit operating point");
     }
 
     {

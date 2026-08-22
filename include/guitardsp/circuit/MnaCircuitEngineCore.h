@@ -282,6 +282,8 @@ public:
         const auto i = static_cast<std::size_t>(handle);
         if (i >= diodes_.size()) return false;
         diodes_[i].spec = spec;
+        diodes_[i].inverseThermalVoltage = 1.0f / std::max(1.0e-6f,
+            spec.emissionCoefficient * spec.thermalVoltage);
         return true;
     }
 
@@ -330,6 +332,9 @@ public:
         for (auto& source : ccvs_) source.branchIndex = branch++;
         for (auto& opAmp : opAmps_) opAmp.branchIndex = branch++;
         for (auto& inductor : inductors_) inductor.branchIndex = branch++;
+        for (auto& diode : diodes_)
+            diode.inverseThermalVoltage = 1.0f / std::max(1.0e-6f,
+                diode.spec.emissionCoefficient * diode.spec.thermalVoltage);
         dimension_ = branch;
         if (dimension_ == 0U) return false;
 
@@ -427,6 +432,7 @@ public:
                 || (nonlinearSolverMode_ == NonlinearSolverMode::automatic
                     && dimension_ >= 12U && sparseSolver_.factorDensity() <= 0.70f));
         if (usesPreparedSparse) {
+            sparseSolver_.prepareSampleRhs(sampleRhs_);
             if (previousSampleSolutionValid_) {
                 // Consecutive oversampled audio states are strongly correlated.
                 // A bounded first-order extrapolation is only an initial guess:
@@ -539,20 +545,26 @@ public:
             // Once the candidate is already inside the local Newton basin, a full
             // step restores quadratic convergence. The trust-region clamp remains
             // active for larger moves and startup/rail transitions.
-            const float damping = usedSparseSolve && maxDelta <= 0.25f
-                ? 1.0f : iteration < 3 ? 0.65f : 0.85f;
-            for (std::size_t i = 0; i < dimension_; ++i) {
-                const float rawDelta = solution_[i] - candidate_[i];
-                if (i < nodeCount_) {
-                    if (i < fixedVoltageNodes_.size() && fixedVoltageNodes_[i] != 0U) {
-                        candidate_[i] = solution_[i];
-                        continue;
+            if (usedSparseSolve && maxDelta <= 0.25f) {
+                // No trust-region bound can activate below the 0.25 V minimum,
+                // so a full Newton step is exactly the solved vector. Copy it
+                // directly instead of branching and clamping all 48 unknowns.
+                candidate_ = solution_;
+            } else {
+                const float damping = iteration < 3 ? 0.65f : 0.85f;
+                for (std::size_t i = 0; i < dimension_; ++i) {
+                    const float rawDelta = solution_[i] - candidate_[i];
+                    if (i < nodeCount_) {
+                        if (i < fixedVoltageNodes_.size() && fixedVoltageNodes_[i] != 0U) {
+                            candidate_[i] = solution_[i];
+                            continue;
+                        }
+                        const float scale = std::max(1.0f, std::abs(candidate_[i]));
+                        const float maximumStep = std::clamp(0.25f * scale, 0.25f, 25.0f);
+                        candidate_[i] += damping * std::clamp(rawDelta, -maximumStep, maximumStep);
+                    } else {
+                        candidate_[i] += damping * rawDelta;
                     }
-                    const float scale = std::max(1.0f, std::abs(candidate_[i]));
-                    const float maximumStep = std::clamp(0.25f * scale, 0.25f, 25.0f);
-                    candidate_[i] += damping * std::clamp(rawDelta, -maximumStep, maximumStep);
-                } else {
-                    candidate_[i] += damping * rawDelta;
                 }
             }
 
@@ -597,6 +609,9 @@ public:
     bool sparseNonlinearSolverAvailable() const noexcept { return sparseSolver_.available(); }
     std::size_t sparseNonlinearOriginalNonZeros() const noexcept { return sparseSolver_.originalNonZeros(); }
     std::size_t sparseNonlinearFactorNonZeros() const noexcept { return sparseSolver_.factorNonZeros(); }
+    std::size_t sparseNonlinearCachedLinearUnknowns() const noexcept {
+        return sparseSolver_.cachedLinearUnknowns();
+    }
     float sparseNonlinearFactorDensity() const noexcept { return sparseSolver_.factorDensity(); }
 
 private:
@@ -643,6 +658,7 @@ private:
         Node anode{}, cathode{};
         hq::DiodeSpec spec{};
         float junctionVoltage = 0.0f;
+        float inverseThermalVoltage = 0.0f;
         bool junctionVoltageValid = false;
     };
     struct Bjt { Node collector{}, base{}, emitter{}; hq::BJTSpec spec{}; };
@@ -819,6 +835,7 @@ private:
 
         staticCacheDirty_ = false;
         matrix_ = staticMatrix_;
+        if (sparseSolver_.available()) sparseSolver_.refreshStaticFactor(staticMatrix_);
         previousSampleSolutionValid_ = false;
         ++performanceStats_.staticCacheRebuilds;
         linearFactorValid_ = !hasNonlinearDevices() && factorizeStaticLinearSystem();
@@ -875,11 +892,19 @@ private:
         const float denominator = std::max(1.0e-6f,
             spec.emissionCoefficient * spec.thermalVoltage);
         const auto evaluate = [&](float voltage) noexcept {
-            const float exponential = std::exp(std::clamp(
-                voltage / denominator, -40.0f, 40.0f));
+            const float exponent = reuseJunctionVoltage
+                ? voltage * diode.inverseThermalVoltage
+                : voltage / denominator;
+            const float exponential = exponent <= -40.0f
+                ? 4.248354255291589e-18f
+                : exponent >= 40.0f
+                    ? 2.3538526683702e17f
+                    : std::exp(exponent);
             return DiodeLinearization{
                 spec.saturationCurrent * (exponential - 1.0f),
-                spec.saturationCurrent * exponential / denominator
+                reuseJunctionVoltage
+                    ? spec.saturationCurrent * exponential * diode.inverseThermalVoltage
+                    : spec.saturationCurrent * exponential / denominator
             };
         };
         // Consecutive Newton iterates and oversampled audio samples start close
@@ -1203,7 +1228,7 @@ private:
                 nonlinearMatrixIndices_.push_back(index);
         }
 
-        return sparseSolver_.prepare(dimension_, pattern, staticMatrix_);
+        return sparseSolver_.prepare(dimension_, pattern, staticMatrix_, nonlinearPattern);
     }
 
     bool factorizeStaticLinearSystem() noexcept {
