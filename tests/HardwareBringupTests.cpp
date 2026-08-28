@@ -47,6 +47,21 @@ int main() {
         ok &= require(monitor.snapshot().callbacks == 0
                           && monitor.snapshot().deadlineMisses == 0,
                       "performance diagnostics reset without changing the sample rate");
+
+        for (int callback = 0; callback < 99; ++callback)
+            monitor.recordCallback(48, 400000);
+        monitor.recordCallback(48, 1500000);
+        timing = monitor.snapshot();
+        ok &= require(timing.callbacks == 100 && timing.deadlineMisses == 1
+                          && std::abs(timing.percentile95Load - 0.40f) < 0.011f
+                          && std::abs(timing.percentile99Load - 0.40f) < 0.011f
+                          && std::abs(timing.peakLoad - 1.50f) < 1.0e-6f,
+                      "fixed allocation-free timing histogram separates p99 from a startup spike");
+        monitor.reset();
+        timing = monitor.snapshot();
+        ok &= require(timing.callbacks == 0 && timing.percentile95Load == 0.0f
+                          && timing.percentile99Load == 0.0f,
+                      "performance reset clears both realtime percentile histograms");
     }
 
     app::LiveRigSettings settings;

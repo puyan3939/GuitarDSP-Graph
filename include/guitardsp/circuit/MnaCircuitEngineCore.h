@@ -426,9 +426,9 @@ public:
             return stats;
         }
 
-        candidate_ = solution_;
+        const bool forceSparse = nonlinearSolverMode_ == NonlinearSolverMode::sparseFixedPattern;
         const bool usesPreparedSparse = sparseSolver_.available()
-            && (nonlinearSolverMode_ == NonlinearSolverMode::sparseFixedPattern
+            && (forceSparse
                 || (nonlinearSolverMode_ == NonlinearSolverMode::automatic
                     && dimension_ >= 12U && sparseSolver_.factorDensity() <= 0.70f));
         if (usesPreparedSparse) {
@@ -438,24 +438,40 @@ public:
                 // A bounded first-order extrapolation is only an initial guess:
                 // Newton still solves the unchanged component-level equations.
                 for (std::size_t i = 0; i < dimension_; ++i) {
-                    const float slope = solution_[i] - previousSampleSolution_[i];
-                    const float scale = std::max(1.0f, std::abs(solution_[i]));
-                    candidate_[i] += std::clamp(slope, -0.10f * scale, 0.10f * scale);
+                    const float current = solution_[i];
+                    const float slope = current - previousSampleSolution_[i];
+                    const float scale = std::max(1.0f, std::abs(current));
+                    candidate_[i] = current
+                        + std::clamp(slope, -0.10f * scale, 0.10f * scale);
+                    previousSampleSolution_[i] = current;
                 }
+            } else {
+                candidate_ = solution_;
+                previousSampleSolution_ = solution_;
             }
-            previousSampleSolution_ = solution_;
             previousSampleSolutionValid_ = true;
+        } else {
+            candidate_ = solution_;
         }
+        rhs_ = sampleRhs_;
+        bool candidateFromFullSparseSolve = false;
         stats.converged = false;
         for (int iteration = 0; iteration < maximumNewtonIterations; ++iteration) {
             for (const auto index : nonlinearMatrixIndices_)
                 matrix_[index] = staticMatrix_[index];
-            rhs_ = sampleRhs_;
+            if (iteration > 0) {
+                for (const auto row : nonlinearRhsIndices_)
+                    rhs_[row] = sampleRhs_[row];
+            }
             stampNonlinear(candidate_, usesPreparedSparse);
             ++performanceStats_.nonlinearAssemblies;
 
             if (iteration > 0 && usesPreparedSparse
-                && sparseSolver_.validate(matrix_, rhs_, candidate_, 3.0e-7)) {
+                && (candidateFromFullSparseSolve
+                    ? sparseSolver_.validateNonlinear(matrix_, rhs_, candidate_,
+                        nonlinearResidualTolerance_)
+                    : sparseSolver_.validate(matrix_, rhs_, candidate_,
+                        nonlinearResidualTolerance_))) {
                 // Evaluate the actual nonlinear circuit equations at the current
                 // candidate before factoring their Jacobian again. Near an
                 // op-amp operating point, float-sized voltage jitter can keep
@@ -471,11 +487,7 @@ public:
 
             bool solved = false;
             bool usedSparseSolve = false;
-            const bool forceSparse = nonlinearSolverMode_ == NonlinearSolverMode::sparseFixedPattern;
-            const bool autoSparse = nonlinearSolverMode_ == NonlinearSolverMode::automatic &&
-                                    sparseSolver_.available() && dimension_ >= 12U &&
-                                    sparseSolver_.factorDensity() <= 0.70f;
-            if ((forceSparse || autoSparse) && sparseSolver_.available()) {
+            if (usesPreparedSparse) {
                 // Double-precision fixed-pattern LU checks every pivot here. The
                 // more expensive backward-error residual is deferred until Newton
                 // is ready to accept the sample, rather than repeated for every
@@ -506,8 +518,8 @@ public:
             for (std::size_t i = 0; i < dimension_; ++i) {
                 const float delta = std::abs(solution_[i] - candidate_[i]);
                 maxDelta = std::max(maxDelta, delta);
-                const float scale = std::max({1.0f,
-                    std::abs(solution_[i]), std::abs(candidate_[i])});
+                const float scale = std::max(1.0f,
+                    std::max(std::abs(solution_[i]), std::abs(candidate_[i])));
                 maxScaledDelta = std::max(maxScaledDelta, delta / scale);
             }
             if (usedSparseSolve
@@ -528,8 +540,8 @@ public:
                 for (std::size_t i = 0; i < dimension_; ++i) {
                     const float delta = std::abs(solution_[i] - candidate_[i]);
                     maxDelta = std::max(maxDelta, delta);
-                    const float scale = std::max({1.0f,
-                        std::abs(solution_[i]), std::abs(candidate_[i])});
+                    const float scale = std::max(1.0f,
+                        std::max(std::abs(solution_[i]), std::abs(candidate_[i])));
                     maxScaledDelta = std::max(maxScaledDelta, delta / scale);
                 }
             }
@@ -550,7 +562,9 @@ public:
                 // so a full Newton step is exactly the solved vector. Copy it
                 // directly instead of branching and clamping all 48 unknowns.
                 candidate_ = solution_;
+                candidateFromFullSparseSolve = true;
             } else {
+                candidateFromFullSparseSolve = false;
                 const float damping = iteration < 3 ? 0.65f : 0.85f;
                 for (std::size_t i = 0; i < dimension_; ++i) {
                     const float rawDelta = solution_[i] - candidate_[i];
@@ -606,6 +620,13 @@ public:
     void resetPerformanceStats() noexcept { performanceStats_ = {}; }
     void setNonlinearSolverMode(NonlinearSolverMode mode) noexcept { nonlinearSolverMode_ = mode; }
     NonlinearSolverMode nonlinearSolverMode() const noexcept { return nonlinearSolverMode_; }
+    void setNonlinearResidualTolerance(float tolerance) noexcept {
+        nonlinearResidualTolerance_ = std::clamp(static_cast<double>(tolerance),
+                                                  1.0e-9, 2.0e-4);
+    }
+    float nonlinearResidualTolerance() const noexcept {
+        return static_cast<float>(nonlinearResidualTolerance_);
+    }
     bool sparseNonlinearSolverAvailable() const noexcept { return sparseSolver_.available(); }
     std::size_t sparseNonlinearOriginalNonZeros() const noexcept { return sparseSolver_.originalNonZeros(); }
     std::size_t sparseNonlinearFactorNonZeros() const noexcept { return sparseSolver_.factorNonZeros(); }
@@ -920,7 +941,19 @@ private:
             const float residual = vj + rs * junction.current - terminalVoltage;
             const float derivative = 1.0f + rs * junction.conductance;
             const float step = residual / std::max(1.0e-12f, derivative);
-            vj -= std::clamp(step, -0.5f, 0.5f);
+            const float nextJunctionVoltage = vj - std::clamp(step, -0.5f, 0.5f);
+            if (nextJunctionVoltage == vj) {
+                // The last Newton correction is below float resolution. Its
+                // already-computed exponential is exactly the final junction
+                // evaluation; recomputing exp at the identical bit pattern only
+                // wastes time on quiet, biased semiconductor operating points.
+                diode.junctionVoltage = vj;
+                diode.junctionVoltageValid = std::isfinite(vj);
+                return {junction.current,
+                        junction.conductance /
+                            std::max(1.0e-12f, 1.0f + rs * junction.conductance)};
+            }
+            vj = nextJunctionVoltage;
             if (std::abs(step) < 1.0e-7f) break;
         }
         diode.junctionVoltage = vj;
@@ -1223,9 +1256,18 @@ private:
 
         nonlinearMatrixIndices_.clear();
         nonlinearMatrixIndices_.reserve(pattern.size());
+        nonlinearRhsIndices_.clear();
+        nonlinearRhsIndices_.reserve(dimension_);
+        std::size_t previousNonlinearRow = dimension_;
         for (std::size_t index = 0; index < nonlinearPattern.size(); ++index) {
-            if (nonlinearPattern[index] != 0U)
+            if (nonlinearPattern[index] != 0U) {
                 nonlinearMatrixIndices_.push_back(index);
+                const auto row = index / dimension_;
+                if (row != previousNonlinearRow) {
+                    nonlinearRhsIndices_.push_back(row);
+                    previousNonlinearRow = row;
+                }
+            }
         }
 
         return sparseSolver_.prepare(dimension_, pattern, staticMatrix_, nonlinearPattern);
@@ -1351,6 +1393,7 @@ private:
     bool staticCacheDirty_ = true;
     bool linearFactorValid_ = false;
     NonlinearSolverMode nonlinearSolverMode_ = NonlinearSolverMode::automatic;
+    double nonlinearResidualTolerance_ = 3.0e-7;
     SolveStats lastStats_{};
     PerformanceStats performanceStats_{};
 
@@ -1384,6 +1427,7 @@ private:
     std::vector<float> linearLu_;
     std::vector<std::size_t> linearPivots_;
     std::vector<std::size_t> nonlinearMatrixIndices_;
+    std::vector<std::size_t> nonlinearRhsIndices_;
     std::vector<std::uint8_t> fixedVoltageNodes_;
     bool previousSampleSolutionValid_ = false;
     FixedPatternSparseSolver sparseSolver_;

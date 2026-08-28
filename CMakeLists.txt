@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.34.0 LANGUAGES C CXX)
+project(GuitarDSPGraph VERSION 0.35.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,8 @@ endif()
 if (GUITARDSP_BUILD_BENCHMARKS)
     add_executable(GuitarDSPMnaBenchmark bench/MnaBenchmark.cpp)
     target_link_libraries(GuitarDSPMnaBenchmark PRIVATE GuitarDSPGraphCore)
+    add_executable(GuitarDSPLiveRigBenchmark bench/LiveRigBenchmark.cpp)
+    target_link_libraries(GuitarDSPLiveRigBenchmark PRIVATE GuitarDSPGraphCore)
 endif()
 
 if (GUITARDSP_BUILD_AUDIO_APP)

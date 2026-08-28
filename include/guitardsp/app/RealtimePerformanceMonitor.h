@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 namespace guitardsp::app {
@@ -14,6 +16,8 @@ struct RealtimePerformanceSnapshot {
     std::uint64_t latestBudgetNanoseconds = 0;
     float averageLoad = 0.0f;
     float peakLoad = 0.0f;
+    float percentile95Load = 0.0f;
+    float percentile99Load = 0.0f;
 };
 
 // One audio-thread producer and a message-thread observer. Timing values are
@@ -34,6 +38,8 @@ public:
         latestBudgetNanoseconds_.store(0, std::memory_order_relaxed);
         averageLoad_.store(0.0f, std::memory_order_relaxed);
         peakLoad_.store(0.0f, std::memory_order_relaxed);
+        for (auto& bucket : loadHistogram_)
+            bucket.store(0, std::memory_order_relaxed);
     }
 
     void recordCallback(int samples, std::uint64_t elapsedNanoseconds) noexcept {
@@ -62,23 +68,53 @@ public:
         peakLoad_.store(std::max(peakLoad_.load(std::memory_order_relaxed), load),
                         std::memory_order_relaxed);
 
+        // One fixed atomic increment is sufficient on the realtime thread. The
+        // message thread performs the histogram scan when it refreshes the UI;
+        // no callback allocates, locks, or sorts timing samples.
+        const auto bucket = static_cast<std::size_t>(std::min(
+            load * 100.0f, static_cast<float>(histogramBucketCount - 1U)));
+        loadHistogram_[bucket].fetch_add(1, std::memory_order_relaxed);
+
         if (elapsedNanoseconds > budget)
             deadlineMisses_.fetch_add(1, std::memory_order_relaxed);
     }
 
     [[nodiscard]] RealtimePerformanceSnapshot snapshot() const noexcept {
+        const auto callbackCount = callbacks_.load(std::memory_order_relaxed);
+        float percentile95 = 0.0f;
+        float percentile99 = 0.0f;
+        if (callbackCount != 0U) {
+            const auto rank95 = callbackCount - callbackCount / 20U;
+            const auto rank99 = callbackCount - callbackCount / 100U;
+            std::uint64_t observed = 0;
+            bool found95 = false;
+            for (std::size_t bucket = 0; bucket < histogramBucketCount; ++bucket) {
+                observed += loadHistogram_[bucket].load(std::memory_order_relaxed);
+                if (!found95 && observed >= rank95) {
+                    percentile95 = static_cast<float>(bucket) * 0.01f;
+                    found95 = true;
+                }
+                if (observed >= rank99) {
+                    percentile99 = static_cast<float>(bucket) * 0.01f;
+                    break;
+                }
+            }
+        }
         return {
-            callbacks_.load(std::memory_order_relaxed),
+            callbackCount,
             deadlineMisses_.load(std::memory_order_relaxed),
             latestDurationNanoseconds_.load(std::memory_order_relaxed),
             peakDurationNanoseconds_.load(std::memory_order_relaxed),
             latestBudgetNanoseconds_.load(std::memory_order_relaxed),
             averageLoad_.load(std::memory_order_relaxed),
-            peakLoad_.load(std::memory_order_relaxed)
+            peakLoad_.load(std::memory_order_relaxed),
+            percentile95,
+            percentile99
         };
     }
 
 private:
+    static constexpr std::size_t histogramBucketCount = 512U;
     std::atomic<double> sampleRate_{48000.0};
     std::atomic<std::uint64_t> callbacks_{0};
     std::atomic<std::uint64_t> deadlineMisses_{0};
@@ -87,6 +123,7 @@ private:
     std::atomic<std::uint64_t> latestBudgetNanoseconds_{0};
     std::atomic<float> averageLoad_{0.0f};
     std::atomic<float> peakLoad_{0.0f};
+    std::array<std::atomic<std::uint64_t>, histogramBucketCount> loadHistogram_{};
 };
 
 } // namespace guitardsp::app

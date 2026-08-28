@@ -277,6 +277,17 @@ int main() {
         ok &= require(averageSilentIterations < 3.0f && silentUnconverged == 0
                           && silentPerformance.staticCacheRebuilds == 0,
                       "prolonged silence preserves cached physical circuit operating point");
+
+        ts.engine().resetPerformanceStats();
+        ts.setControls(0.90f, 0.85f, 0.15f);
+        for (int sample = 0; sample < 512; ++sample)
+            ok &= std::isfinite(ts.processSample(0.02f));
+        const auto gesture = ts.engine().performanceStats();
+        ok &= require(std::abs(ts.appliedDrive() - 0.90f) < 1.0e-5f
+                          && std::abs(ts.appliedTone() - 0.85f) < 1.0e-5f
+                          && std::abs(ts.appliedLevel() - 0.15f) < 1.0e-5f
+                          && gesture.staticCacheRebuilds < 90,
+                      "ultrasonic-rate smoothed pots preserve exact endpoints without per-sample matrix rebuilds");
     }
 
     {

@@ -392,6 +392,13 @@ public:
                     cachedLinearValues_[eliminationLowerSlots_[entry]]
                     * cachedSampleRhs_[column];
         }
+
+        // Suffix factorization never changes an already-eliminated linear row.
+        // Install that immutable prefix once per audio sample instead of copying
+        // it again for every Newton iteration of the same component circuit.
+        std::copy(cachedSampleRhs_.begin(),
+                  cachedSampleRhs_.begin() + static_cast<std::ptrdiff_t>(linearPrefix_),
+                  workRhs_.begin());
         cachedSampleRhsValid_ = true;
     }
 
@@ -420,7 +427,9 @@ public:
 
         const std::size_t cachedPrefix = cachedLinearFactorValid_ ? linearPrefix_ : 0U;
         if (cachedSampleRhsValid_) {
-            std::copy(cachedSampleRhs_.begin(), cachedSampleRhs_.end(), workRhs_.begin());
+            const auto suffix = static_cast<std::ptrdiff_t>(cachedPrefix);
+            std::copy(cachedSampleRhs_.begin() + suffix,
+                      cachedSampleRhs_.end(), workRhs_.begin() + suffix);
             for (const auto row : nonlinearRows_) {
                 const auto originalRow = rowPermutation_[row];
                 workRhs_[row] += static_cast<double>(rhs[originalRow])
@@ -471,7 +480,9 @@ public:
                 const auto column = columns_[index];
                 sum -= values_[index] * solutionWork_[column];
             }
-            if (std::abs(diagonal) < pivotFloor || !std::isfinite(diagonal)) return false;
+            // Prefix pivots were verified when its exact factor was cached;
+            // every mutable suffix pivot was checked above before elimination.
+            // No subsequent operation can mutate an already-eliminated pivot.
             solutionWork_[row] = sum / diagonal;
             if (!std::isfinite(solutionWork_[row])) return false;
         }
@@ -486,6 +497,41 @@ public:
                   const std::vector<float>& rhs,
                   const std::vector<float>& solution,
                   double maximumBackwardError = 2.0e-4) const noexcept {
+        return validateRows(denseMatrix, rhs, solution, validationRows_,
+                            maximumBackwardError);
+    }
+
+    // A complete sparse Newton solve already satisfies every invariant linear
+    // equation. Only device-touched rows change when its candidate is restamped,
+    // so checking those rows is the same nonlinear KCL convergence test without
+    // re-evaluating the eliminated linear prefix.
+    bool validateNonlinear(const std::vector<float>& denseMatrix,
+                           const std::vector<float>& rhs,
+                           const std::vector<float>& solution,
+                           double maximumBackwardError = 2.0e-4) const noexcept {
+        return validateRows(denseMatrix, rhs, solution, nonlinearRows_,
+                            maximumBackwardError);
+    }
+
+    bool available() const noexcept { return available_; }
+    std::size_t dimension() const noexcept { return dimension_; }
+    std::size_t originalNonZeros() const noexcept { return originalNonZeros_; }
+    std::size_t factorNonZeros() const noexcept { return factorNonZeros_; }
+    std::size_t cachedLinearUnknowns() const noexcept {
+        return cachedLinearFactorValid_ ? linearPrefix_ : 0U;
+    }
+    float factorDensity() const noexcept {
+        if (dimension_ == 0U) return 1.0f;
+        const auto full = static_cast<double>(dimension_) * static_cast<double>(dimension_);
+        return static_cast<float>(static_cast<double>(factorNonZeros_) / full);
+    }
+
+private:
+    bool validateRows(const std::vector<float>& denseMatrix,
+                      const std::vector<float>& rhs,
+                      const std::vector<float>& solution,
+                      const std::vector<std::size_t>& rows,
+                      double maximumBackwardError) const noexcept {
         if (!available_ || denseMatrix.size() != dimension_ * dimension_ ||
             rhs.size() != dimension_ || solution.size() != dimension_)
             return false;
@@ -495,7 +541,7 @@ public:
         // exposing it to Newton. The row-scaled backward error is dimensionless and
         // works for both millivolt pedals and hundreds-of-volts tube circuits.
         constexpr double residualFloor = 1.0e-18;
-        for (const auto row : validationRows_) {
+        for (const auto row : rows) {
             const auto originalRow = rowPermutation_[row];
             double residual = -static_cast<double>(rhs[originalRow]);
             double scale = std::abs(static_cast<double>(rhs[originalRow]));
@@ -514,21 +560,6 @@ public:
         }
         return true;
     }
-
-    bool available() const noexcept { return available_; }
-    std::size_t dimension() const noexcept { return dimension_; }
-    std::size_t originalNonZeros() const noexcept { return originalNonZeros_; }
-    std::size_t factorNonZeros() const noexcept { return factorNonZeros_; }
-    std::size_t cachedLinearUnknowns() const noexcept {
-        return cachedLinearFactorValid_ ? linearPrefix_ : 0U;
-    }
-    float factorDensity() const noexcept {
-        if (dimension_ == 0U) return 1.0f;
-        const auto full = static_cast<double>(dimension_) * static_cast<double>(dimension_);
-        return static_cast<float>(static_cast<double>(factorNonZeros_) / full);
-    }
-
-private:
     void clear() {
         available_ = false;
         dimension_ = 0U;

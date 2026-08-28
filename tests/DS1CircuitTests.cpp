@@ -148,5 +148,52 @@ int main() {
         ok &= require(finite, "DS-1 circuit graph node processes finite audio");
     }
 
+    {
+        circuit::DS1Circuit ds;
+        constexpr double oversampledRate = 96000.0;
+        ok &= require(ds.prepare(oversampledRate) && ds.engine().dimension() == 57
+                          && ds.engine().sparseNonlinearCachedLinearUnknowns() >= 25,
+                      "Eco DS-1 retains all 57 component unknowns and its exact linear prefix");
+
+        ds.engine().resetPerformanceStats();
+        constexpr int quietSamples = 8192;
+        int quietIterations = 0;
+        int quietUnconverged = 0;
+        for (int sample = 0; sample < quietSamples; ++sample) {
+            ok &= std::isfinite(ds.processSample(0.0f));
+            const auto solve = ds.lastSolveStats();
+            quietIterations += solve.iterations;
+            quietUnconverged += solve.converged ? 0 : 1;
+        }
+        const auto quiet = ds.engine().performanceStats();
+        const float quietAverage = static_cast<float>(quietIterations)
+            / static_cast<float>(quietSamples);
+        std::cout << "DIAG quiet-ds1 average_iterations=" << quietAverage
+                  << " unconverged=" << quietUnconverged
+                  << " residual_convergences=" << quiet.nonlinearResidualConvergences
+                  << '\n';
+        ok &= require(quietAverage < 2.0f && quietUnconverged == 0
+                          && quiet.nonlinearResidualConvergences > 0,
+                      "matched 20 ppm DS-1 residual removes silent 40-step Newton limit cycles");
+
+        ds.engine().resetPerformanceStats();
+        constexpr int drivenSamples = 8192;
+        int drivenIterations = 0;
+        int drivenUnconverged = 0;
+        for (int sample = 0; sample < drivenSamples; ++sample) {
+            const float phase = static_cast<float>(sample) * 0.0143989663f;
+            ok &= std::isfinite(ds.processSample(0.10f * std::sin(phase)));
+            const auto solve = ds.lastSolveStats();
+            drivenIterations += solve.iterations;
+            drivenUnconverged += solve.converged ? 0 : 1;
+        }
+        const float drivenAverage = static_cast<float>(drivenIterations)
+            / static_cast<float>(drivenSamples);
+        std::cout << "DIAG driven-ds1 average_iterations=" << drivenAverage
+                  << " unconverged=" << drivenUnconverged << '\n';
+        ok &= require(drivenAverage < 3.5f && drivenUnconverged < drivenSamples / 50,
+                      "driven component-level DS-1 converges quickly at its full 2x audio rate");
+    }
+
     return ok ? 0 : 1;
 }

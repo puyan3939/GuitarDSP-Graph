@@ -738,10 +738,13 @@ private:
         const double driverCpu = 100.0 * std::max(0.0, deviceManager_.getCpuUsage());
         const double callbackCpu = 100.0 * static_cast<double>(stats.performance.averageLoad);
         const double callbackPeak = 100.0 * static_cast<double>(stats.performance.peakLoad);
+        const double callbackP99 = 100.0
+            * static_cast<double>(stats.performance.percentile99Load);
         const int xruns = std::max(0, deviceManager_.getXRunCount() - xRunBaseline_);
         performanceLabel_.setText(
             "Driver CPU: " + juce::String(driverCpu, 1)
-                + "%    Callback average: " + juce::String(callbackCpu, 1)
+                + "%    Callback avg: " + juce::String(callbackCpu, 1)
+                + "%    P99: " + juce::String(callbackP99, 1)
                 + "%    Peak: " + juce::String(callbackPeak, 1)
                 + "%    Deadline misses: "
                 + juce::String(static_cast<juce::int64>(stats.performance.deadlineMisses))
@@ -767,7 +770,7 @@ private:
 
         const bool fault = xruns > 0 || stats.performance.deadlineMisses > 0
             || stats.nonFiniteInputSamples > 0 || stats.nonFiniteOutputSamples > 0;
-        const bool overload = driverCpu > 80.0 || callbackPeak > 90.0;
+        const bool overload = driverCpu > 80.0 || callbackP99 > 90.0;
         safetyLabel_.setColour(juce::Label::textColourId,
             fault ? juce::Colours::orangered
                   : overload || mute_.getToggleState() ? juce::Colours::orange
@@ -1161,7 +1164,7 @@ public:
 class GuitarDSPApplication final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "GuitarDSP Graph"; }
-    const juce::String getApplicationVersion() override { return "0.34.0"; }
+    const juce::String getApplicationVersion() override { return "0.35.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override {
