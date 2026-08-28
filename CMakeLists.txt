@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.35.0 LANGUAGES C CXX)
+project(GuitarDSPGraph VERSION 0.36.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,6 +35,11 @@ else()
     if (GUITARDSP_GRAPH_WARNINGS_AS_ERRORS)
         target_compile_options(GuitarDSPGraphCore PRIVATE -Werror)
     endif()
+endif()
+if (GUITARDSP_NATIVE_CPU)
+    target_compile_definitions(GuitarDSPGraphCore PUBLIC GUITARDSP_NATIVE_CPU_ENABLED=1)
+else()
+    target_compile_definitions(GuitarDSPGraphCore PUBLIC GUITARDSP_NATIVE_CPU_ENABLED=0)
 endif()
 
 if (GUITARDSP_BUILD_BENCHMARKS)

@@ -218,11 +218,54 @@ int main() {
                   << " unconverged=" << unconverged
                   << " sparse=" << performance.sparseNewtonSolves
                   << " fallback=" << performance.sparseFallbackSolves << '\n';
-        ok &= require(averageIterations < 4.0f && unconverged < 8,
-                      "double-precision sparse Newton converges rapidly at 2x guitar rate");
+        ok &= require(averageIterations < 1.25f && unconverged == 0,
+                      "matched residual keeps driven TS808 near one Newton solve per sample");
         ok &= require(performance.sampleRhsAssemblies == performance.samples
                           && performance.sparseNewtonSolves > 0,
                       "TS808 assembles sample history once while preserving full sparse MNA");
+
+        // Compare the matched 20 ppm residual against the previous generic
+        // 0.3 ppm residual using two otherwise identical component circuits.
+        // This guards the optimization with an actual audio waveform comparison,
+        // not only convergence counters.
+        circuit::TS808Circuit strictResidual;
+        circuit::TS808Circuit matchedResidual;
+        ok &= require(strictResidual.prepare(oversampledRate)
+                          && matchedResidual.prepare(oversampledRate),
+                      "TS808 residual comparison circuits prepare");
+        strictResidual.engine().setNonlinearResidualTolerance(3.0e-7f);
+        matchedResidual.engine().setNonlinearResidualTolerance(2.0e-5f);
+        for (int i = -4096; i < 0; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 173.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float input = 0.11f * std::sin(phase)
+                + 0.027f * std::sin(phase * 2.71f);
+            (void)strictResidual.processSample(input);
+            (void)matchedResidual.processSample(input);
+        }
+        double squaredReference = 0.0;
+        double squaredError = 0.0;
+        float maximumError = 0.0f;
+        constexpr int comparisonSamples = 16384;
+        for (int i = 0; i < comparisonSamples; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 173.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float input = 0.11f * std::sin(phase)
+                + 0.027f * std::sin(phase * 2.71f);
+            const float reference = strictResidual.processSample(input);
+            const float optimized = matchedResidual.processSample(input);
+            const float error = optimized - reference;
+            squaredReference += static_cast<double>(reference)
+                * static_cast<double>(reference);
+            squaredError += static_cast<double>(error) * static_cast<double>(error);
+            maximumError = std::max(maximumError, std::abs(error));
+        }
+        const double relativeRmsError = std::sqrt(squaredError
+            / std::max(1.0e-30, squaredReference));
+        std::cout << "DIAG ts808-residual-match relative_rms_error="
+                  << relativeRmsError << " maximum_error=" << maximumError << '\n';
+        ok &= require(relativeRmsError < 2.0e-4 && maximumError < 3.0e-4f,
+                      "20 ppm TS808 residual matches strict-reference waveform");
 
         // Quiet input is the real hardware worst case: the high-gain op-amp can
         // alternate between adjacent float-sized operating points after KCL has
@@ -248,12 +291,12 @@ int main() {
                   << " unconverged=" << quietUnconverged
                   << " residual_convergences="
                   << quietPerformance.nonlinearResidualConvergences << '\n';
-        ok &= require(averageQuietIterations < 3.0f && quietUnconverged == 0,
+        ok &= require(averageQuietIterations < 1.25f && quietUnconverged == 0,
                       "quiet guitar input converges without Newton-limit cycles");
         ok &= require(quietPerformance.nonlinearResidualConvergences > 0
                           && quietPerformance.sparseNewtonSolves
                               >= quietPerformance.samples,
-                      "strict nonlinear KCL residual terminates physically converged samples");
+                      "matched nonlinear KCL residual terminates physically converged samples");
 
         ts.engine().resetPerformanceStats();
         constexpr int silentSamples = 16384;
@@ -274,7 +317,7 @@ int main() {
                   << " cached_linear_unknowns="
                   << ts.engine().sparseNonlinearCachedLinearUnknowns()
                   << " static_rebuilds=" << silentPerformance.staticCacheRebuilds << '\n';
-        ok &= require(averageSilentIterations < 3.0f && silentUnconverged == 0
+        ok &= require(averageSilentIterations < 1.25f && silentUnconverged == 0
                           && silentPerformance.staticCacheRebuilds == 0,
                       "prolonged silence preserves cached physical circuit operating point");
 

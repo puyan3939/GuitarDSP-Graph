@@ -158,6 +158,13 @@ public:
         // Once the DC neighborhood is established, return to the automatic solver
         // so normal audio processing can use the prepared sparse nonlinear path.
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
+        // The audio-rate Newton voltage criterion is 20 ppm. Requiring the
+        // separately row-scaled KCL residual to reach the engine's generic
+        // 0.3 ppm default forced a second factorization after the component
+        // equations were already within the circuit's accepted precision. Match
+        // both criteria exactly, as the DS-1 path does, while retaining the full
+        // 48-unknown circuit and its unchanged nonlinear stamps.
+        engine_.setNonlinearResidualTolerance(2.0e-5f);
 
         const auto warmSamples = static_cast<std::size_t>(
             std::clamp(sampleRate_ * 0.08, 512.0, 8192.0));

@@ -764,7 +764,12 @@ private:
                     + " ms    DSP: "
                     + juce::String(toMilliseconds(stats.graphLatencySamples), 2)
                     + " ms    Reported total: "
-                    + juce::String(toMilliseconds(totalReportedLatency), 2) + " ms",
+                    + juce::String(toMilliseconds(totalReportedLatency), 2) + " ms"
+#if GUITARDSP_NATIVE_CPU_ENABLED
+                    + "    Build: Native CPU",
+#else
+                    + "    Build: Portable",
+#endif
                 juce::dontSendNotification);
         }
 
