@@ -42,10 +42,10 @@ jobs:
           # Optional: Trigger when specific user is assigned to an issue
           # assignee_trigger: "claude-bot"
 
-          # Allow read-only repo/PR inspection commands so Claude can review
-          # and sequence the Phase 1-6 PRs (see issue #10).
+          # Allow the repo/PR inspection and local merge commands Claude needs
+          # to review and sequence the Phase 1-6 PRs onto main (see issue #10).
           claude_args: |
-            --allowedTools "Bash(git fetch:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*)"
+            --allowedTools "Bash(git fetch:*),Bash(git checkout:*),Bash(git merge:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*)"
 
           # Optional: further customize Claude's behavior with CLI arguments
           # claude_args: |
