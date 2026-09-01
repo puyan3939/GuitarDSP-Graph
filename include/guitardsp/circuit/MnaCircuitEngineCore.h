@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace guitardsp::circuit {
@@ -416,6 +417,34 @@ public:
 
         candidate_ = solution_;
         stats.converged = false;
+        // A fixed damping factor turns the Newton update into a deterministic,
+        // time-invariant map. Around a high-gain feedback stage (e.g. a ~22x
+        // distortion op-amp) that map can have a locally repelling fixed point,
+        // so instead of converging it can settle into an exact repeating cycle
+        // (observed bit-identical periods of up to a dozen-plus iterations) no
+        // matter how many extra iterations are allowed. A single exact repeat
+        // against history is ambiguous by itself: even an ordinarily converging
+        // solve can briefly revisit a nearby state once by coincidence, and
+        // reacting to that would needlessly slow well-behaved circuits. So a
+        // repeat only becomes a *candidate* period; it is confirmed only if the
+        // same fingerprint reappears again exactly one more period later,
+        // proving the trajectory is genuinely retracing itself rather than
+        // passing through by chance. Only a confirmed cycle collapses and then
+        // keeps decaying the damping every further iteration, which makes the
+        // map non-autonomous and structurally rules out a stable cycle, forcing
+        // a shrinking-step (Cauchy) sequence that settles near the true
+        // operating point.
+        constexpr std::size_t kCycleHistoryCapacity = 32;
+        constexpr float kDampingCollapseOnConfirm = 0.25f;
+        constexpr float kDampingDecayPerIteration = 0.6f;
+        std::array<std::uint64_t, kCycleHistoryCapacity> cycleFingerprints{};
+        std::size_t cycleFingerprintCount = 0;
+        std::size_t cycleHistoryHead = 0;
+        int pendingCyclePeriod = 0;
+        int pendingCycleConfirmIteration = -1;
+        std::uint64_t pendingCycleFingerprint = 0;
+        bool cycleConfirmed = false;
+        float dampingDecay = 1.0f;
         for (int iteration = 0; iteration < maximumNewtonIterations; ++iteration) {
             matrix_ = staticMatrix_;
             rhs_ = staticRhs_;
@@ -461,7 +490,7 @@ public:
             // next sample's dynamic history. The step limit scales with the current
             // node magnitude, so low-voltage semiconductor junctions stay tightly
             // controlled while tube/transformer nodes can still move by tens of volts.
-            const float damping = iteration < 3 ? 0.65f : 0.85f;
+            const float damping = (iteration < 3 ? 0.65f : 0.85f) * dampingDecay;
             for (std::size_t i = 0; i < dimension_; ++i) {
                 const float rawDelta = solution_[i] - candidate_[i];
                 if (i < nodeCount_) {
@@ -476,6 +505,43 @@ public:
                     candidate_[i] += damping * rawDelta;
                 }
             }
+            std::uint64_t fingerprint = 1469598103934665603ULL;
+            for (std::size_t i = 0; i < dimension_; ++i) {
+                std::uint32_t bits;
+                std::memcpy(&bits, &candidate_[i], sizeof(bits));
+                fingerprint ^= bits;
+                fingerprint *= 1099511628211ULL;
+            }
+            if (!cycleConfirmed) {
+                if (pendingCyclePeriod > 0 && iteration == pendingCycleConfirmIteration) {
+                    if (fingerprint == pendingCycleFingerprint) {
+                        cycleConfirmed = true;
+                        dampingDecay *= kDampingCollapseOnConfirm;
+                    } else {
+                        pendingCyclePeriod = 0;
+                    }
+                }
+                if (!cycleConfirmed && pendingCyclePeriod == 0) {
+                    const std::size_t entries = std::min(cycleFingerprintCount, kCycleHistoryCapacity);
+                    for (std::size_t k = 0; k < entries; ++k) {
+                        const std::size_t age = k + 1;
+                        const std::size_t idx =
+                            (cycleHistoryHead + kCycleHistoryCapacity - age) % kCycleHistoryCapacity;
+                        if (cycleFingerprints[idx] == fingerprint) {
+                            pendingCyclePeriod = static_cast<int>(age);
+                            pendingCycleFingerprint = fingerprint;
+                            pendingCycleConfirmIteration = iteration + pendingCyclePeriod;
+                            break;
+                        }
+                    }
+                }
+                if (!cycleConfirmed) {
+                    cycleFingerprints[cycleHistoryHead] = fingerprint;
+                    cycleHistoryHead = (cycleHistoryHead + 1) % kCycleHistoryCapacity;
+                    ++cycleFingerprintCount;
+                }
+            }
+            if (cycleConfirmed) dampingDecay *= kDampingDecayPerIteration;
 
             stats.iterations = iteration + 1;
             if (maxDelta <= tolerance) {
