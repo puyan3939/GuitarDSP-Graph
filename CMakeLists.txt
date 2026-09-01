@@ -16,6 +16,7 @@ add_library(GuitarDSPGraphCore
     src/graph/CompiledAudioGraph.cpp
     src/graph/NodeRegistry.cpp
     src/graph/GraphBuilder.cpp
+    src/graph/RigTopologyBuilder.cpp
     src/graph/RealtimeGraphHost.cpp
     src/app/LiveRig.cpp
     src/app/RealtimeAudioEngine.cpp
@@ -110,6 +111,9 @@ add_test(NAME node_library COMMAND GuitarDSPNodeLibraryTests)
 add_executable(GuitarDSPGraphDocumentTests tests/GraphDocumentTests.cpp)
 target_link_libraries(GuitarDSPGraphDocumentTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME graph_document COMMAND GuitarDSPGraphDocumentTests)
+add_executable(GuitarDSPRigTopologyBuilderTests tests/RigTopologyBuilderTests.cpp)
+target_link_libraries(GuitarDSPRigTopologyBuilderTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME rig_topology_builder COMMAND GuitarDSPRigTopologyBuilderTests)
 add_executable(GuitarDSPAdvancedNodeTests tests/AdvancedNodeTests.cpp)
 target_link_libraries(GuitarDSPAdvancedNodeTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME advanced_nodes COMMAND GuitarDSPAdvancedNodeTests)
