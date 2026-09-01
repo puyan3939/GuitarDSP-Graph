@@ -107,6 +107,40 @@ int main() {
     }
 
     {
+        circuit::CircuitNetlist netlist;
+        const auto plateSupply = netlist.addNode("plate_supply");
+        const auto screenSupply = netlist.addNode("screen_supply");
+        const auto grid = netlist.addNode("grid");
+        const auto plate = netlist.addNode("plate");
+        const auto screen = netlist.addNode("screen");
+
+        netlist.addVoltageSource(plateSupply, circuit::circuitGround, 420.0f);
+        netlist.addVoltageSource(screenSupply, circuit::circuitGround, 420.0f);
+        netlist.addVoltageSource(grid, circuit::circuitGround, -20.0f);
+        hq::ResistorSpec plateLoad{};
+        plateLoad.resistanceOhms = 4000.0f;
+        hq::ResistorSpec screenLoad{};
+        screenLoad.resistanceOhms = 470.0f;
+        netlist.addResistor(plateSupply, plate, plateLoad);
+        netlist.addResistor(screenSupply, screen, screenLoad);
+        const auto pentodeId = netlist.addPentodeParasitic(plate, grid, screen, circuit::circuitGround,
+                                                            hq::component_presets::pentodeEl34());
+
+        circuit::CompiledCircuit compiled;
+        std::string error;
+        ok &= require(netlist.compile(48000.0, compiled, &error),
+                      "netlist compiles a pentode parasitic subcircuit");
+        ok &= require(compiled.pentodeParasitic(pentodeId) != nullptr,
+                      "normal pentode netlist definition owns Cgp/Cgk/Cpk/Csk parasitics");
+        compiled.engine.processSample(40, 1.0e-5f);
+        circuit::Node plateNode{};
+        ok &= require(compiled.findNode(plate, plateNode), "compiled circuit resolves pentode plate node");
+        ok &= require(compiled.engine.voltage(plateNode) > 0.0f &&
+                      compiled.engine.voltage(plateNode) < 420.0f,
+                      "compiled pentode power stage settles below the plate supply rail");
+    }
+
+    {
         circuit::CircuitNetlist invalid;
         const auto validNode = invalid.addNode();
         hq::ResistorSpec resistor{};

@@ -24,6 +24,7 @@ using JfetHandle = std::uint16_t;
 using MosfetHandle = std::uint16_t;
 using OpAmpHandle = std::uint16_t;
 using TriodeHandle = std::uint16_t;
+using PentodeHandle = std::uint16_t;
 using ControlledSourceHandle = std::uint16_t;
 inline constexpr Node ground = 0;
 
@@ -166,6 +167,12 @@ public:
         prepared_ = false;
         triodes_.push_back({plate, grid, cathode, spec});
         return static_cast<TriodeHandle>(triodes_.size() - 1U);
+    }
+
+    PentodeHandle addPentode(Node plate, Node grid, Node screen, Node cathode, hq::PentodeSpec spec) {
+        prepared_ = false;
+        pentodes_.push_back({plate, grid, screen, cathode, spec});
+        return static_cast<PentodeHandle>(pentodes_.size() - 1U);
     }
 
     bool setVoltageSource(SourceHandle handle, float volts) noexcept {
@@ -320,6 +327,13 @@ public:
         const auto i = static_cast<std::size_t>(handle);
         if (i >= triodes_.size()) return false;
         triodes_[i].spec = spec;
+        return true;
+    }
+
+    bool setPentodeSpec(PentodeHandle handle, hq::PentodeSpec spec) noexcept {
+        const auto i = static_cast<std::size_t>(handle);
+        if (i >= pentodes_.size()) return false;
+        pentodes_[i].spec = spec;
         return true;
     }
 
@@ -574,7 +588,13 @@ public:
                             continue;
                         }
                         const float scale = std::max(1.0f, std::abs(candidate_[i]));
-                        const float maximumStep = std::clamp(0.25f * scale, 0.25f, 25.0f);
+                        // Raised from 25 V to 60 V (issue #27) so pentode/beam-tetrode
+                        // power stages, whose plate/screen rails sit at 400-800 V, still
+                        // reach their operating point within a handful of cold-start
+                        // samples. The clamp only engages once |candidate| exceeds ~100 V
+                        // (0.25 * scale > 25), so low-voltage diode/BJT/JFET junctions see
+                        // no change from this and keep their original tight step limit.
+                        const float maximumStep = std::clamp(0.25f * scale, 0.25f, 60.0f);
                         candidate_[i] += damping * std::clamp(rawDelta, -maximumStep, maximumStep);
                     } else {
                         candidate_[i] += damping * rawDelta;
@@ -691,6 +711,7 @@ private:
         std::size_t branchIndex = 0;
     };
     struct Triode { Node plate{}, grid{}, cathode{}; hq::TriodeSpec spec{}; };
+    struct Pentode { Node plate{}, grid{}, screen{}, cathode{}; hq::PentodeSpec spec{}; };
 
     struct JacobianTerm { Node node{}; float derivative = 0.0f; };
     struct DiodeLinearization { float current = 0.0f; float conductance = 0.0f; };
@@ -707,7 +728,7 @@ private:
 
     bool hasNonlinearDevices() const noexcept {
         return !diodes_.empty() || !bjts_.empty() || !jfets_.empty() ||
-               !mosfets_.empty() || !triodes_.empty();
+               !mosfets_.empty() || !triodes_.empty() || !pentodes_.empty();
     }
 
     std::size_t voltageSourceBranch(SourceHandle handle) const noexcept {
@@ -1118,6 +1139,67 @@ private:
         stampLinearizedCurrent(device.plate, device.cathode, current, guess, jac);
     }
 
+    void stampPentode(const Pentode& device, const std::vector<float>& guess) noexcept {
+        const float vp = nodeVoltage(guess, device.plate);
+        const float vg = nodeVoltage(guess, device.grid);
+        const float vs = nodeVoltage(guess, device.screen);
+        const float vk = nodeVoltage(guess, device.cathode);
+        const float vpk = vp - vk;
+        const float vgk = vg - vk;
+        const float vsk = vs - vk;
+
+        const auto plateFor = [&](float gridToCathode, float plateToCathode,
+                                  float screenToCathode) noexcept {
+            return std::clamp(
+                device.spec.model.plateCurrent(gridToCathode, plateToCathode, screenToCathode),
+                0.0f, 0.40f);
+        };
+        const auto screenFor = [&](float gridToCathode, float screenToCathode) noexcept {
+            return std::clamp(device.spec.model.screenCurrent(gridToCathode, screenToCathode),
+                              0.0f, 0.15f);
+        };
+
+        const float plateCurrent = plateFor(vgk, vpk, vsk);
+        const float screenCurrent = screenFor(vgk, vsk);
+
+        constexpr float gridStep = 1.0e-3f;
+        const float plateStep = std::max(0.05f, std::abs(vpk) * 1.0e-4f);
+        const float screenStep = std::max(0.05f, std::abs(vsk) * 1.0e-4f);
+
+        // Central-difference Jacobian, mirroring stampTriode's gm/gp construction
+        // and extending it with a third partial (gscreen) for the screen node.
+        const float gm = (plateFor(vgk + gridStep, vpk, vsk) - plateFor(vgk - gridStep, vpk, vsk)) /
+                         (2.0f * gridStep);
+        const float gp = (plateFor(vgk, vpk + plateStep, vsk) - plateFor(vgk, vpk - plateStep, vsk)) /
+                         (2.0f * plateStep);
+        const float gscreen = (plateFor(vgk, vpk, vsk + screenStep) - plateFor(vgk, vpk, vsk - screenStep)) /
+                              (2.0f * screenStep);
+
+        const float safeGm = std::clamp(gm, -1.0f, 1.0f);
+        const float safeGp = std::clamp(gp, -1.0f, 1.0f);
+        const float safeGscreen = std::clamp(gscreen, -1.0f, 1.0f);
+        const std::array<JacobianTerm, 4> plateJac{{
+            {device.plate, safeGp},
+            {device.grid, safeGm},
+            {device.screen, safeGscreen},
+            {device.cathode, -(safeGp + safeGm + safeGscreen)}
+        }};
+        stampLinearizedCurrent(device.plate, device.cathode, plateCurrent, guess, plateJac);
+
+        const float gsGrid = (screenFor(vgk + gridStep, vsk) - screenFor(vgk - gridStep, vsk)) /
+                             (2.0f * gridStep);
+        const float gsScreen = (screenFor(vgk, vsk + screenStep) - screenFor(vgk, vsk - screenStep)) /
+                               (2.0f * screenStep);
+        const float safeGsGrid = std::clamp(gsGrid, -1.0f, 1.0f);
+        const float safeGsScreen = std::clamp(gsScreen, -1.0f, 1.0f);
+        const std::array<JacobianTerm, 3> screenJac{{
+            {device.grid, safeGsGrid},
+            {device.screen, safeGsScreen},
+            {device.cathode, -(safeGsGrid + safeGsScreen)}
+        }};
+        stampLinearizedCurrent(device.screen, device.cathode, screenCurrent, guess, screenJac);
+    }
+
     void stampNonlinear(const std::vector<float>& guess,
                         bool reuseJunctionVoltage) noexcept {
         for (auto& d : diodes_) {
@@ -1132,6 +1214,7 @@ private:
         for (const auto& jfet : jfets_) stampJfet(jfet, guess);
         for (const auto& mosfet : mosfets_) stampMosfet(mosfet, guess);
         for (const auto& triode : triodes_) stampTriode(triode, guess);
+        for (const auto& pentode : pentodes_) stampPentode(pentode, guess);
     }
 
     void markPattern(std::vector<std::uint8_t>& pattern, std::size_t row,
@@ -1176,6 +1259,18 @@ private:
     void markThreeTerminalPattern(std::vector<std::uint8_t>& pattern,
                                   Node a, Node b, Node c) const noexcept {
         const std::array<Node, 3> nodes{{a, b, c}};
+        for (const auto rowNode : nodes) {
+            if (rowNode == ground) continue;
+            for (const auto columnNode : nodes) {
+                if (columnNode != ground)
+                    markPattern(pattern, nodeIndex(rowNode), nodeIndex(columnNode));
+            }
+        }
+    }
+
+    void markFourTerminalPattern(std::vector<std::uint8_t>& pattern,
+                                 Node a, Node b, Node c, Node d) const noexcept {
+        const std::array<Node, 4> nodes{{a, b, c, d}};
         for (const auto rowNode : nodes) {
             if (rowNode == ground) continue;
             for (const auto columnNode : nodes) {
@@ -1252,6 +1347,10 @@ private:
         for (const auto& triode : triodes_) {
             markThreeTerminalPattern(pattern, triode.plate, triode.grid, triode.cathode);
             markThreeTerminalPattern(nonlinearPattern, triode.plate, triode.grid, triode.cathode);
+        }
+        for (const auto& pentode : pentodes_) {
+            markFourTerminalPattern(pattern, pentode.plate, pentode.grid, pentode.screen, pentode.cathode);
+            markFourTerminalPattern(nonlinearPattern, pentode.plate, pentode.grid, pentode.screen, pentode.cathode);
         }
 
         nonlinearMatrixIndices_.clear();
@@ -1413,6 +1512,7 @@ private:
     std::vector<Mosfet> mosfets_;
     std::vector<OpAmp> opAmps_;
     std::vector<Triode> triodes_;
+    std::vector<Pentode> pentodes_;
 
     std::vector<float> staticMatrix_;
     std::vector<float> staticRhs_;
