@@ -99,5 +99,36 @@ int main() {
         ok &= require(lit < dark, "optocoupler LDR resistance falls under illumination");
     }
 
+    {
+        const auto el34 = hq::PentodeModel::el34();
+        ok &= require(el34.plateCurrent(-4.0f, 0.0f, 250.0f) == 0.0f,
+                      "pentode plate current is zero at Vpk == 0 (plate-voltage knee floor)");
+        const float lowPlate = el34.plateCurrent(-4.0f, 20.0f, 250.0f);
+        const float highPlate = el34.plateCurrent(-4.0f, 300.0f, 250.0f);
+        const float veryHighPlate = el34.plateCurrent(-4.0f, 3000.0f, 250.0f);
+        ok &= require(highPlate > lowPlate,
+                      "pentode plate current rises with plate voltage through the knee region");
+        ok &= require(std::abs(veryHighPlate - highPlate) < 0.10f * highPlate,
+                      "pentode plate current saturates and grows only weakly with plate voltage "
+                      "far beyond the knee (defining pentode trait: a 10x plate-voltage increase "
+                      "changes current by well under 10%)");
+
+        const float screenCurrent = el34.screenCurrent(-4.0f, 250.0f);
+        ok &= require(screenCurrent > 0.0f && screenCurrent < highPlate,
+                      "pentode screen current is positive and a minority fraction of plate current "
+                      "at a typical bias point");
+        const float strongerDriveScreen = el34.screenCurrent(-2.0f, 250.0f);
+        ok &= require(strongerDriveScreen > screenCurrent,
+                      "pentode screen current rises with stronger grid drive, same as plate current");
+
+        const float cutoffCurrent = el34.plateCurrent(-150.0f, 300.0f, 250.0f);
+        ok &= require(cutoffCurrent >= 0.0f && cutoffCurrent < 1.0e-6f,
+                      "deeply negative grid drive cuts off pentode plate current");
+
+        const float lowScreenDrive = el34.plateCurrent(-4.0f, 300.0f, 0.0f);
+        ok &= require(std::isfinite(lowScreenDrive) && lowScreenDrive >= 0.0f,
+                      "pentode drive term stays finite as screen voltage collapses toward zero");
+    }
+
     return ok ? 0 : 1;
 }

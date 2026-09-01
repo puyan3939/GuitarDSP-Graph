@@ -3,6 +3,7 @@
 #include "ActiveDeviceParasiticSubcircuits.h"
 #include "DynamicOpAmpSubcircuit.h"
 #include "MnaCircuitEngine.h"
+#include "PentodeParasiticSubcircuit.h"
 #include "SwitchRelaySubcircuit.h"
 #include "TransformerSubcircuit.h"
 #include "TriodeParasiticSubcircuit.h"
@@ -39,6 +40,8 @@ enum class CircuitComponentKind : std::uint8_t {
     dynamicOpAmp,
     triode,
     triodeParasitic,
+    pentode,
+    pentodeParasitic,
     transformer,
     switchComponent,
     relay
@@ -70,6 +73,8 @@ struct DynamicOpAmpDefinition {
 };
 struct TriodeDefinition { CircuitComponentId id{}; CircuitNodeId plate{}, grid{}, cathode{}; hq::TriodeSpec spec{}; };
 struct TriodeParasiticDefinition { CircuitComponentId id{}; CircuitNodeId plate{}, grid{}, cathode{}; hq::TriodeSpec spec{}; };
+struct PentodeDefinition { CircuitComponentId id{}; CircuitNodeId plate{}, grid{}, screen{}, cathode{}; hq::PentodeSpec spec{}; };
+struct PentodeParasiticDefinition { CircuitComponentId id{}; CircuitNodeId plate{}, grid{}, screen{}, cathode{}; hq::PentodeSpec spec{}; };
 struct TransformerDefinition { CircuitComponentId id{}; CircuitNodeId primaryP{}, primaryN{}, secondaryP{}, secondaryN{}; hq::TransformerSpec spec{}; };
 struct SwitchDefinition {
     CircuitComponentId id{};
@@ -102,6 +107,8 @@ using CircuitComponentDefinition = std::variant<
     DynamicOpAmpDefinition,
     TriodeDefinition,
     TriodeParasiticDefinition,
+    PentodeDefinition,
+    PentodeParasiticDefinition,
     TransformerDefinition,
     SwitchDefinition,
     RelayDefinition>;
@@ -115,6 +122,7 @@ struct CompiledCircuit {
     std::unordered_map<CircuitComponentId, MosfetParasiticSubcircuit> mosfetParasitics;
     std::unordered_map<CircuitComponentId, DynamicOpAmpSubcircuit> dynamicOpAmps;
     std::unordered_map<CircuitComponentId, TriodeParasiticSubcircuit> triodeParasitics;
+    std::unordered_map<CircuitComponentId, PentodeParasiticSubcircuit> pentodeParasitics;
     std::unordered_map<CircuitComponentId, TransformerSubcircuit> transformers;
     std::unordered_map<CircuitComponentId, SwitchSubcircuit> switches;
     std::unordered_map<CircuitComponentId, RelaySubcircuit> relays;
@@ -149,6 +157,11 @@ struct CompiledCircuit {
     const MosfetParasiticSubcircuit* mosfetParasitic(CircuitComponentId id) const noexcept {
         const auto it = mosfetParasitics.find(id);
         return it == mosfetParasitics.end() ? nullptr : &it->second;
+    }
+
+    const PentodeParasiticSubcircuit* pentodeParasitic(CircuitComponentId id) const noexcept {
+        const auto it = pentodeParasitics.find(id);
+        return it == pentodeParasitics.end() ? nullptr : &it->second;
     }
 
     const TransformerSubcircuit* transformer(CircuitComponentId id) const noexcept {
@@ -252,6 +265,14 @@ public:
     CircuitComponentId addTriodeParasitic(CircuitNodeId plate, CircuitNodeId grid,
                                           CircuitNodeId cathode, hq::TriodeSpec spec) {
         return addDefinition(TriodeParasiticDefinition{nextComponentId_, plate, grid, cathode, spec});
+    }
+    CircuitComponentId addPentode(CircuitNodeId plate, CircuitNodeId grid, CircuitNodeId screen,
+                                  CircuitNodeId cathode, hq::PentodeSpec spec) {
+        return addDefinition(PentodeDefinition{nextComponentId_, plate, grid, screen, cathode, spec});
+    }
+    CircuitComponentId addPentodeParasitic(CircuitNodeId plate, CircuitNodeId grid, CircuitNodeId screen,
+                                           CircuitNodeId cathode, hq::PentodeSpec spec) {
+        return addDefinition(PentodeParasiticDefinition{nextComponentId_, plate, grid, screen, cathode, spec});
     }
     CircuitComponentId addTransformer(CircuitNodeId primaryP, CircuitNodeId primaryN,
                                       CircuitNodeId secondaryP, CircuitNodeId secondaryN,
@@ -413,6 +434,21 @@ public:
                             addTriodeParasiticSubcircuit(built.engine, a, b, c, definition.spec));
                         built.bindings.emplace(definition.id,
                             CircuitComponentBinding{CircuitComponentKind::triodeParasitic, 0});
+                    }
+                } else if constexpr (std::is_same_v<T, PentodeDefinition>) {
+                    componentOk = resolve(definition.plate, a) && resolve(definition.grid, b) &&
+                                  resolve(definition.screen, c) && resolve(definition.cathode, d);
+                    if (componentOk) built.bindings.emplace(definition.id,
+                        CircuitComponentBinding{CircuitComponentKind::pentode,
+                            built.engine.addPentode(a, b, c, d, definition.spec)});
+                } else if constexpr (std::is_same_v<T, PentodeParasiticDefinition>) {
+                    componentOk = resolve(definition.plate, a) && resolve(definition.grid, b) &&
+                                  resolve(definition.screen, c) && resolve(definition.cathode, d);
+                    if (componentOk) {
+                        built.pentodeParasitics.emplace(definition.id,
+                            addPentodeParasiticSubcircuit(built.engine, a, b, c, d, definition.spec));
+                        built.bindings.emplace(definition.id,
+                            CircuitComponentBinding{CircuitComponentKind::pentodeParasitic, 0});
                     }
                 } else if constexpr (std::is_same_v<T, TransformerDefinition>) {
                     componentOk = resolve(definition.primaryP, a) && resolve(definition.primaryN, b) &&

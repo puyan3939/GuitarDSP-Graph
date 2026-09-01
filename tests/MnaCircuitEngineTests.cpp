@@ -281,6 +281,108 @@ int main() {
                       "12AT7 replacement changes the same circuit operating point");
     }
 
+    // A pentode power-tube stage swings its plate/screen nodes from a cold 0 V start
+    // to several hundred volts, well beyond the per-iteration trust-region step the
+    // Newton solver uses to protect low-voltage semiconductor junctions elsewhere.
+    // Reaching the operating point is expected to take a few processSample() calls
+    // (much like the charge-up transient in a real amplifier's B+ supply) rather than
+    // fully settling within a single 40-iteration Newton solve from a cold state; this
+    // helper runs that short settling window and returns the final sample's stats.
+    const auto settlePentode = [](circuit::MnaCircuitEngine& engine, int warmupSamples) {
+        circuit::MnaCircuitEngine::SolveStats stats{};
+        for (int i = 0; i < warmupSamples; ++i) stats = engine.processSample(40, 1.0e-5f);
+        return stats;
+    };
+
+    {
+        circuit::MnaCircuitEngine c;
+        const auto plateSupply = c.addNode();
+        const auto screenSupply = c.addNode();
+        const auto grid = c.addNode();
+        const auto plate = c.addNode();
+        const auto screen = c.addNode();
+        hq::ResistorSpec plateLoad{};
+        plateLoad.resistanceOhms = 4000.0f;
+        hq::ResistorSpec screenLoad{};
+        screenLoad.resistanceOhms = 470.0f;
+        c.addVoltageSource(plateSupply, circuit::ground, 420.0f);
+        c.addVoltageSource(screenSupply, circuit::ground, 420.0f);
+        c.addVoltageSource(grid, circuit::ground, -20.0f);
+        c.addResistor(plateSupply, plate, plateLoad);
+        c.addResistor(screenSupply, screen, screenLoad);
+        const auto tube = c.addPentode(plate, grid, screen, circuit::ground,
+                                       hq::component_presets::pentodeEl34());
+        ok &= require(c.prepare(48000.0), "MNA prepares pentode plate-grid-screen-cathode stamp");
+        const auto stats = settlePentode(c, 5);
+        ok &= require(!stats.singular && stats.converged, "EL34 pentode nonlinear MNA stamp converges");
+        const float plateVoltage = c.voltage(plate);
+        const float screenVoltage = c.voltage(screen);
+        ok &= require(plateVoltage > 0.0f && plateVoltage < 420.0f,
+                      "pentode plate settles to a loaded operating point below the supply rail");
+        ok &= require(screenVoltage > 0.0f && screenVoltage < 420.0f,
+                      "pentode screen settles to a loaded operating point below the supply rail");
+        ok &= require(c.setPentodeSpec(tube, hq::component_presets::pentodeKt88()),
+                      "pentode handle accepts tube-family replacement");
+        settlePentode(c, 5);
+        ok &= require(std::abs(c.voltage(plate) - plateVoltage) > 0.5f,
+                      "KT88 replacement changes the same circuit operating point");
+    }
+
+    {
+        // High-voltage power-stage convergence check (issue #27): pentode/beam-tetrode
+        // power tubes run their plate/screen rails at 400-800 V, well above the small-
+        // signal triode operating range. Newton's trust region must still land here
+        // (within the short cold-start settling window above).
+        circuit::MnaCircuitEngine c;
+        const auto plateSupply = c.addNode();
+        const auto screenSupply = c.addNode();
+        const auto grid = c.addNode();
+        const auto plate = c.addNode();
+        const auto screen = c.addNode();
+        hq::ResistorSpec plateLoad{};
+        plateLoad.resistanceOhms = 6000.0f;
+        hq::ResistorSpec screenLoad{};
+        screenLoad.resistanceOhms = 1000.0f;
+        c.addVoltageSource(plateSupply, circuit::ground, 800.0f);
+        c.addVoltageSource(screenSupply, circuit::ground, 800.0f);
+        c.addVoltageSource(grid, circuit::ground, -35.0f);
+        c.addResistor(plateSupply, plate, plateLoad);
+        c.addResistor(screenSupply, screen, screenLoad);
+        c.addPentode(plate, grid, screen, circuit::ground, hq::component_presets::pentodeKt88());
+        ok &= require(c.prepare(48000.0), "MNA prepares an 800 V pentode power stage");
+        const auto stats = settlePentode(c, 8);
+        ok &= require(!stats.singular && stats.converged,
+                      "pentode Newton solve converges at an 800 V plate/screen rail");
+        ok &= require(std::isfinite(c.voltage(plate)) && std::isfinite(c.voltage(screen)),
+                      "pentode high-voltage operating point stays finite");
+    }
+
+    {
+        // Boundary test: grid driven hard negative should cut the pentode off, leaving
+        // plate and screen close to their unloaded supply rails.
+        circuit::MnaCircuitEngine c;
+        const auto plateSupply = c.addNode();
+        const auto screenSupply = c.addNode();
+        const auto grid = c.addNode();
+        const auto plate = c.addNode();
+        const auto screen = c.addNode();
+        hq::ResistorSpec plateLoad{};
+        plateLoad.resistanceOhms = 4000.0f;
+        hq::ResistorSpec screenLoad{};
+        screenLoad.resistanceOhms = 470.0f;
+        c.addVoltageSource(plateSupply, circuit::ground, 420.0f);
+        c.addVoltageSource(screenSupply, circuit::ground, 420.0f);
+        c.addVoltageSource(grid, circuit::ground, -150.0f);
+        c.addResistor(plateSupply, plate, plateLoad);
+        c.addResistor(screenSupply, screen, screenLoad);
+        c.addPentode(plate, grid, screen, circuit::ground, hq::component_presets::pentodeEl34());
+        ok &= require(c.prepare(48000.0), "MNA prepares a cutoff-biased pentode stage");
+        const auto stats = settlePentode(c, 5);
+        ok &= require(!stats.singular && stats.converged, "cutoff-biased pentode still converges");
+        ok &= require(c.voltage(plate) > 415.0f,
+                      "deep grid cutoff leaves the pentode plate near the unloaded supply rail");
+    }
+
     {
         circuit::MnaCircuitEngine c;
         const auto in = c.addNode();

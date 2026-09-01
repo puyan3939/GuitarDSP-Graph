@@ -30,6 +30,7 @@ enum class ComponentCategory : std::uint8_t {
     mosfet,
     opAmp,
     triode,
+    pentode,
     powerTube,
     transformer,
     optocoupler,
@@ -215,6 +216,26 @@ struct TriodeSpec {
     float gridCurrentEmissionCoefficient = 1.6f;
 };
 
+struct PentodeSpec {
+    std::string_view name = "EL34";
+    PentodeModel model = PentodeModel::el34();
+    float heaterVoltage = 6.3f;
+    float nominalPlateVoltage = 425.0f;
+    float maxPlateVoltage = 800.0f;
+    float nominalScreenVoltage = 425.0f;
+    float maxScreenVoltage = 500.0f;
+    float maxPlateDissipationWatts = 25.0f;
+    float maxScreenDissipationWatts = 8.0f;
+    // The screen grid electrostatically shields the control grid from the
+    // plate, so gridPlateCapacitanceFarads is much smaller than a triode's.
+    float gridPlateCapacitanceFarads = 0.6e-12f;
+    float gridCathodeCapacitanceFarads = 11.0e-12f;
+    float plateCathodeCapacitanceFarads = 8.0e-12f;
+    float screenCathodeCapacitanceFarads = 6.0e-12f;
+    float gridCurrentSaturationAmps = 1.0e-12f;
+    float gridCurrentEmissionCoefficient = 1.6f;
+};
+
 struct PowerTubeSpec {
     std::string_view name = "EL34";
     PowerTubeType type = PowerTubeType::el34;
@@ -348,6 +369,37 @@ inline TriodeSpec twelveAT7() noexcept {
     spec.gridPlateCapacitanceFarads = 1.5e-12f;
     spec.gridCathodeCapacitanceFarads = 2.3e-12f;
     spec.plateCathodeCapacitanceFarads = 0.4e-12f;
+    spec.gridCurrentSaturationAmps = 1.0e-12f;
+    spec.gridCurrentEmissionCoefficient = 1.6f;
+    return spec;
+}
+
+inline PentodeSpec pentodeEl34() noexcept {
+    PentodeSpec spec{"EL34", PentodeModel::el34(), 6.3f, 425.0f, 800.0f, 425.0f, 500.0f, 25.0f, 8.0f};
+    spec.gridPlateCapacitanceFarads = 0.6e-12f;
+    spec.gridCathodeCapacitanceFarads = 11.0e-12f;
+    spec.plateCathodeCapacitanceFarads = 8.0e-12f;
+    spec.screenCathodeCapacitanceFarads = 6.0e-12f;
+    spec.gridCurrentSaturationAmps = 1.0e-12f;
+    spec.gridCurrentEmissionCoefficient = 1.6f;
+    return spec;
+}
+inline PentodeSpec pentodeSixL6GC() noexcept {
+    PentodeSpec spec{"6L6GC", PentodeModel::sixL6GC(), 6.3f, 450.0f, 500.0f, 425.0f, 450.0f, 30.0f, 6.0f};
+    spec.gridPlateCapacitanceFarads = 0.7e-12f;
+    spec.gridCathodeCapacitanceFarads = 9.5e-12f;
+    spec.plateCathodeCapacitanceFarads = 11.5e-12f;
+    spec.screenCathodeCapacitanceFarads = 5.0e-12f;
+    spec.gridCurrentSaturationAmps = 1.0e-12f;
+    spec.gridCurrentEmissionCoefficient = 1.6f;
+    return spec;
+}
+inline PentodeSpec pentodeKt88() noexcept {
+    PentodeSpec spec{"KT88", PentodeModel::kt88(), 6.3f, 500.0f, 800.0f, 400.0f, 450.0f, 42.0f, 10.0f};
+    spec.gridPlateCapacitanceFarads = 0.9e-12f;
+    spec.gridCathodeCapacitanceFarads = 14.0e-12f;
+    spec.plateCathodeCapacitanceFarads = 13.5e-12f;
+    spec.screenCathodeCapacitanceFarads = 7.5e-12f;
     spec.gridCurrentSaturationAmps = 1.0e-12f;
     spec.gridCurrentEmissionCoefficient = 1.6f;
     return spec;
