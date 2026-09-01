@@ -4,7 +4,6 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
 
 jobs:
   build-and-test:
@@ -17,10 +16,42 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGUITARDSP_GRAPH_WARNINGS_AS_ERRORS=ON
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGUITARDSP_GRAPH_WARNINGS_AS_ERRORS=ON -DGUITARDSP_BUILD_BENCHMARKS=ON
 
       - name: Build
         run: cmake --build build --parallel
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  build-audio-app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install JUCE Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libasound2-dev \
+            libjack-jackd2-dev \
+            libx11-dev \
+            libxext-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxcomposite-dev \
+            libxrender-dev \
+            libxi-dev \
+            libfreetype6-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev
+
+      - name: Configure standalone host
+        run: cmake -S . -B build-app -G Ninja -DCMAKE_BUILD_TYPE=Release -DGUITARDSP_BUILD_AUDIO_APP=ON -DGUITARDSP_FETCH_JUCE=ON
+
+      - name: Build standalone host
+        run: cmake --build build-app --target GuitarDSPApp --parallel

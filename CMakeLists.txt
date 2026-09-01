@@ -1,23 +1,27 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.1.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.36.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
 option(GUITARDSP_GRAPH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(GUITARDSP_BUILD_BENCHMARKS "Build local benchmark executables" OFF)
+option(GUITARDSP_BUILD_AUDIO_APP "Build the JUCE standalone realtime guitar host" OFF)
+option(GUITARDSP_FETCH_JUCE "Fetch the pinned JUCE release when building the audio app" OFF)
+option(GUITARDSP_NATIVE_CPU "Optimize DSP code for the CPU building this executable" OFF)
+set(GUITARDSP_JUCE_PATH "" CACHE PATH "Path to a JUCE source checkout containing CMakeLists.txt")
 
 add_library(GuitarDSPGraphCore
     src/graph/Graph.cpp
+    src/graph/CompiledAudioGraph.cpp
+    src/graph/NodeRegistry.cpp
+    src/graph/GraphBuilder.cpp
+    src/graph/RealtimeGraphHost.cpp
+    src/app/LiveRig.cpp
+    src/app/RealtimeAudioEngine.cpp
 )
-
-target_include_directories(GuitarDSPGraphCore
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
+target_include_directories(GuitarDSPGraphCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(GuitarDSPGraphCore PUBLIC cxx_std_20)
-
 if (MSVC)
     target_compile_options(GuitarDSPGraphCore PRIVATE /W4)
     if (GUITARDSP_GRAPH_WARNINGS_AS_ERRORS)
@@ -25,15 +29,180 @@ if (MSVC)
     endif()
 else()
     target_compile_options(GuitarDSPGraphCore PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    if (GUITARDSP_NATIVE_CPU)
+        target_compile_options(GuitarDSPGraphCore PRIVATE -march=native)
+    endif()
     if (GUITARDSP_GRAPH_WARNINGS_AS_ERRORS)
         target_compile_options(GuitarDSPGraphCore PRIVATE -Werror)
     endif()
 endif()
+if (GUITARDSP_NATIVE_CPU)
+    target_compile_definitions(GuitarDSPGraphCore PUBLIC GUITARDSP_NATIVE_CPU_ENABLED=1)
+else()
+    target_compile_definitions(GuitarDSPGraphCore PUBLIC GUITARDSP_NATIVE_CPU_ENABLED=0)
+endif()
+
+if (GUITARDSP_BUILD_BENCHMARKS)
+    add_executable(GuitarDSPMnaBenchmark bench/MnaBenchmark.cpp)
+    target_link_libraries(GuitarDSPMnaBenchmark PRIVATE GuitarDSPGraphCore)
+    add_executable(GuitarDSPLiveRigBenchmark bench/LiveRigBenchmark.cpp)
+    target_link_libraries(GuitarDSPLiveRigBenchmark PRIVATE GuitarDSPGraphCore)
+endif()
+
+if (GUITARDSP_BUILD_AUDIO_APP)
+    if (NOT TARGET juce::juce_audio_utils)
+        if (GUITARDSP_JUCE_PATH AND EXISTS "${GUITARDSP_JUCE_PATH}/CMakeLists.txt")
+            add_subdirectory("${GUITARDSP_JUCE_PATH}" "${CMAKE_BINARY_DIR}/JUCE")
+        else()
+            find_package(JUCE CONFIG QUIET)
+        endif()
+    endif()
+
+    if (NOT TARGET juce::juce_audio_utils AND GUITARDSP_FETCH_JUCE)
+        include(FetchContent)
+        FetchContent_Declare(
+            JUCE
+            GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+            GIT_TAG 9.0.0
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(JUCE)
+    endif()
+
+    if (NOT TARGET juce::juce_audio_utils)
+        message(FATAL_ERROR
+            "GUITARDSP_BUILD_AUDIO_APP=ON requires JUCE. Set GUITARDSP_JUCE_PATH, install a JUCE CMake package, or add -DGUITARDSP_FETCH_JUCE=ON.")
+    endif()
+
+    juce_add_gui_app(GuitarDSPApp
+        PRODUCT_NAME "GuitarDSP Graph"
+        COMPANY_NAME "GuitarDSP"
+    )
+    target_sources(GuitarDSPApp PRIVATE apps/GuitarDSPApp/Main.cpp)
+    if (GUITARDSP_NATIVE_CPU AND NOT MSVC)
+        target_compile_options(GuitarDSPApp PRIVATE -march=native)
+    endif()
+    target_compile_definitions(GuitarDSPApp PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+    target_link_libraries(GuitarDSPApp PRIVATE
+        GuitarDSPGraphCore
+        juce::juce_audio_utils
+        juce::juce_audio_formats
+        juce::juce_gui_extra
+    )
+endif()
 
 enable_testing()
-
-add_executable(GuitarDSPGraphTests
-    tests/GraphTests.cpp
-)
+add_executable(GuitarDSPGraphTests tests/GraphTests.cpp)
 target_link_libraries(GuitarDSPGraphTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME graph_core COMMAND GuitarDSPGraphTests)
+add_executable(GuitarDSPAudioRuntimeTests tests/AudioRuntimeTests.cpp)
+target_link_libraries(GuitarDSPAudioRuntimeTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME audio_runtime COMMAND GuitarDSPAudioRuntimeTests)
+add_executable(GuitarDSPNodeTests tests/DSPNodeTests.cpp)
+target_link_libraries(GuitarDSPNodeTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME dsp_nodes COMMAND GuitarDSPNodeTests)
+add_executable(GuitarDSPNodeLibraryTests tests/NodeLibraryTests.cpp)
+target_link_libraries(GuitarDSPNodeLibraryTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME node_library COMMAND GuitarDSPNodeLibraryTests)
+add_executable(GuitarDSPGraphDocumentTests tests/GraphDocumentTests.cpp)
+target_link_libraries(GuitarDSPGraphDocumentTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME graph_document COMMAND GuitarDSPGraphDocumentTests)
+add_executable(GuitarDSPAdvancedNodeTests tests/AdvancedNodeTests.cpp)
+target_link_libraries(GuitarDSPAdvancedNodeTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME advanced_nodes COMMAND GuitarDSPAdvancedNodeTests)
+add_executable(GuitarDSPRealtimeHostTests tests/RealtimeGraphHostTests.cpp)
+target_link_libraries(GuitarDSPRealtimeHostTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME realtime_host COMMAND GuitarDSPRealtimeHostTests)
+add_executable(GuitarDSPMultiOutputTests tests/MultiOutputTests.cpp)
+target_link_libraries(GuitarDSPMultiOutputTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME multi_output COMMAND GuitarDSPMultiOutputTests)
+add_executable(GuitarDSPHQDSPTests tests/HQDSPTests.cpp)
+target_link_libraries(GuitarDSPHQDSPTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hq_dsp COMMAND GuitarDSPHQDSPTests)
+add_executable(GuitarDSPHQFoundationTests tests/HQFoundationTests.cpp)
+target_link_libraries(GuitarDSPHQFoundationTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hq_foundation COMMAND GuitarDSPHQFoundationTests)
+add_executable(GuitarDSPHQNumericalRegressionTests tests/HQNumericalRegressionTests.cpp)
+target_link_libraries(GuitarDSPHQNumericalRegressionTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hq_numerical_regression COMMAND GuitarDSPHQNumericalRegressionTests)
+add_executable(GuitarDSPDS1TopologyTests tests/DS1TopologyTests.cpp)
+target_link_libraries(GuitarDSPDS1TopologyTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME ds1_topology COMMAND GuitarDSPDS1TopologyTests)
+add_executable(GuitarDSPTS808TopologyTests tests/TS808TopologyTests.cpp)
+target_link_libraries(GuitarDSPTS808TopologyTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME ts808_topology COMMAND GuitarDSPTS808TopologyTests)
+add_executable(GuitarDSPTopologyExpansionTests tests/TopologyExpansionTests.cpp)
+target_link_libraries(GuitarDSPTopologyExpansionTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME topology_expansion COMMAND GuitarDSPTopologyExpansionTests)
+add_executable(GuitarDSPMeasuredFitHarnessTests tests/MeasuredFitHarnessTests.cpp)
+target_link_libraries(GuitarDSPMeasuredFitHarnessTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME measured_fit_harness COMMAND GuitarDSPMeasuredFitHarnessTests)
+add_executable(GuitarDSPHQCalibrationAndSpeakerTests tests/HQCalibrationAndSpeakerTests.cpp)
+target_link_libraries(GuitarDSPHQCalibrationAndSpeakerTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hq_calibration_speaker COMMAND GuitarDSPHQCalibrationAndSpeakerTests)
+add_executable(GuitarDSPYehSmithToneStackTests tests/YehSmithToneStackTests.cpp)
+target_link_libraries(GuitarDSPYehSmithToneStackTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME yeh_smith_tonestack COMMAND GuitarDSPYehSmithToneStackTests)
+add_executable(GuitarDSPAampDriverCabChainTests tests/AmpDriverCabChainTests.cpp)
+target_link_libraries(GuitarDSPAampDriverCabChainTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME amp_driver_cab_chain COMMAND GuitarDSPAampDriverCabChainTests)
+add_executable(GuitarDSPComponentCatalogTests tests/ComponentCatalogTests.cpp)
+target_link_libraries(GuitarDSPComponentCatalogTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME component_catalog COMMAND GuitarDSPComponentCatalogTests)
+add_executable(GuitarDSPMnaCircuitEngineTests tests/MnaCircuitEngineTests.cpp)
+target_link_libraries(GuitarDSPMnaCircuitEngineTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME mna_circuit_engine COMMAND GuitarDSPMnaCircuitEngineTests)
+add_executable(GuitarDSPMnaControlledSourceTests tests/MnaControlledSourceTests.cpp)
+target_link_libraries(GuitarDSPMnaControlledSourceTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME mna_controlled_sources COMMAND GuitarDSPMnaControlledSourceTests)
+add_executable(GuitarDSPCircuitUpdateQueueTests tests/CircuitUpdateQueueTests.cpp)
+target_link_libraries(GuitarDSPCircuitUpdateQueueTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME circuit_update_queue COMMAND GuitarDSPCircuitUpdateQueueTests)
+add_executable(GuitarDSPTransformerSubcircuitTests tests/TransformerSubcircuitTests.cpp)
+target_link_libraries(GuitarDSPTransformerSubcircuitTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME transformer_subcircuit COMMAND GuitarDSPTransformerSubcircuitTests)
+add_executable(GuitarDSPCircuitNetlistTests tests/CircuitNetlistTests.cpp)
+target_link_libraries(GuitarDSPCircuitNetlistTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME circuit_netlist COMMAND GuitarDSPCircuitNetlistTests)
+add_executable(GuitarDSPCircuitElectromechanicalTests tests/CircuitElectromechanicalTests.cpp)
+target_link_libraries(GuitarDSPCircuitElectromechanicalTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME circuit_electromechanical COMMAND GuitarDSPCircuitElectromechanicalTests)
+add_executable(GuitarDSPMnaAccelerationTests tests/MnaAccelerationTests.cpp)
+target_link_libraries(GuitarDSPMnaAccelerationTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME mna_acceleration COMMAND GuitarDSPMnaAccelerationTests)
+add_executable(GuitarDSPActiveDeviceFidelityTests tests/ActiveDeviceFidelityTests.cpp)
+target_link_libraries(GuitarDSPActiveDeviceFidelityTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME active_device_fidelity COMMAND GuitarDSPActiveDeviceFidelityTests)
+add_executable(GuitarDSPMnaSparseNonlinearTests tests/MnaSparseNonlinearTests.cpp)
+target_link_libraries(GuitarDSPMnaSparseNonlinearTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME mna_sparse_nonlinear COMMAND GuitarDSPMnaSparseNonlinearTests)
+add_executable(GuitarDSPPedalCircuitReadinessTests tests/PedalCircuitReadinessTests.cpp)
+target_link_libraries(GuitarDSPPedalCircuitReadinessTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME pedal_circuit_readiness COMMAND GuitarDSPPedalCircuitReadinessTests)
+add_executable(GuitarDSPTS808CircuitTests tests/TS808CircuitTests.cpp)
+target_link_libraries(GuitarDSPTS808CircuitTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME ts808_circuit COMMAND GuitarDSPTS808CircuitTests)
+add_executable(GuitarDSPDS1CircuitTests tests/DS1CircuitTests.cpp)
+target_link_libraries(GuitarDSPDS1CircuitTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME ds1_circuit COMMAND GuitarDSPDS1CircuitTests)
+add_executable(GuitarDSPAudioReadinessTests tests/AudioReadinessTests.cpp)
+target_link_libraries(GuitarDSPAudioReadinessTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME audio_readiness COMMAND GuitarDSPAudioReadinessTests)
+add_executable(GuitarDSPLiveRigTests tests/LiveRigTests.cpp)
+target_link_libraries(GuitarDSPLiveRigTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME live_rig COMMAND GuitarDSPLiveRigTests)
+add_executable(GuitarDSPRealtimeAudioEngineTests tests/RealtimeAudioEngineTests.cpp)
+target_link_libraries(GuitarDSPRealtimeAudioEngineTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME realtime_audio_engine COMMAND GuitarDSPRealtimeAudioEngineTests)
+add_executable(GuitarDSPHardwareBringupTests tests/HardwareBringupTests.cpp)
+target_link_libraries(GuitarDSPHardwareBringupTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME hardware_bringup COMMAND GuitarDSPHardwareBringupTests)
+add_executable(GuitarDSPParallelBassRigTests tests/ParallelBassRigTests.cpp)
+target_link_libraries(GuitarDSPParallelBassRigTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME parallel_bass_routing COMMAND GuitarDSPParallelBassRigTests)
+add_executable(GuitarDSPCabinetCalibrationTests tests/CabinetCalibrationTests.cpp)
+target_link_libraries(GuitarDSPCabinetCalibrationTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME cabinet_calibration COMMAND GuitarDSPCabinetCalibrationTests)
