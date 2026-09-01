@@ -1,11 +1,14 @@
 cmake_minimum_required(VERSION 3.21)
-project(GuitarDSPGraph VERSION 0.30.0 LANGUAGES CXX)
+project(GuitarDSPGraph VERSION 0.31.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(GUITARDSP_GRAPH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(GUITARDSP_BUILD_BENCHMARKS "Build local benchmark executables" OFF)
+option(GUITARDSP_BUILD_AUDIO_APP "Build the JUCE standalone realtime guitar host" OFF)
+option(GUITARDSP_FETCH_JUCE "Fetch the pinned JUCE release when building the audio app" OFF)
+set(GUITARDSP_JUCE_PATH "" CACHE PATH "Path to a JUCE source checkout containing CMakeLists.txt")
 
 add_library(GuitarDSPGraphCore
     src/graph/Graph.cpp
@@ -13,6 +16,8 @@ add_library(GuitarDSPGraphCore
     src/graph/NodeRegistry.cpp
     src/graph/GraphBuilder.cpp
     src/graph/RealtimeGraphHost.cpp
+    src/app/LiveRig.cpp
+    src/app/RealtimeAudioEngine.cpp
 )
 target_include_directories(GuitarDSPGraphCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(GuitarDSPGraphCore PUBLIC cxx_std_20)
@@ -31,6 +36,48 @@ endif()
 if (GUITARDSP_BUILD_BENCHMARKS)
     add_executable(GuitarDSPMnaBenchmark bench/MnaBenchmark.cpp)
     target_link_libraries(GuitarDSPMnaBenchmark PRIVATE GuitarDSPGraphCore)
+endif()
+
+if (GUITARDSP_BUILD_AUDIO_APP)
+    if (NOT TARGET juce::juce_audio_utils)
+        if (GUITARDSP_JUCE_PATH AND EXISTS "${GUITARDSP_JUCE_PATH}/CMakeLists.txt")
+            add_subdirectory("${GUITARDSP_JUCE_PATH}" "${CMAKE_BINARY_DIR}/JUCE")
+        else()
+            find_package(JUCE CONFIG QUIET)
+        endif()
+    endif()
+
+    if (NOT TARGET juce::juce_audio_utils AND GUITARDSP_FETCH_JUCE)
+        include(FetchContent)
+        FetchContent_Declare(
+            JUCE
+            GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+            GIT_TAG 9.0.0
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(JUCE)
+    endif()
+
+    if (NOT TARGET juce::juce_audio_utils)
+        message(FATAL_ERROR
+            "GUITARDSP_BUILD_AUDIO_APP=ON requires JUCE. Set GUITARDSP_JUCE_PATH, install a JUCE CMake package, or add -DGUITARDSP_FETCH_JUCE=ON.")
+    endif()
+
+    juce_add_gui_app(GuitarDSPApp
+        PRODUCT_NAME "GuitarDSP Graph"
+        COMPANY_NAME "GuitarDSP"
+    )
+    target_sources(GuitarDSPApp PRIVATE apps/GuitarDSPApp/Main.cpp)
+    target_compile_definitions(GuitarDSPApp PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+    target_link_libraries(GuitarDSPApp PRIVATE
+        GuitarDSPGraphCore
+        juce::juce_audio_utils
+        juce::juce_audio_formats
+        juce::juce_gui_extra
+    )
 endif()
 
 enable_testing()
@@ -130,3 +177,9 @@ add_test(NAME ds1_circuit COMMAND GuitarDSPDS1CircuitTests)
 add_executable(GuitarDSPAudioReadinessTests tests/AudioReadinessTests.cpp)
 target_link_libraries(GuitarDSPAudioReadinessTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME audio_readiness COMMAND GuitarDSPAudioReadinessTests)
+add_executable(GuitarDSPLiveRigTests tests/LiveRigTests.cpp)
+target_link_libraries(GuitarDSPLiveRigTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME live_rig COMMAND GuitarDSPLiveRigTests)
+add_executable(GuitarDSPRealtimeAudioEngineTests tests/RealtimeAudioEngineTests.cpp)
+target_link_libraries(GuitarDSPRealtimeAudioEngineTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME realtime_audio_engine COMMAND GuitarDSPRealtimeAudioEngineTests)
