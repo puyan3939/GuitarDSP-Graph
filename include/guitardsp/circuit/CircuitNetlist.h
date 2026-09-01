@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ActiveDeviceParasiticSubcircuits.h"
 #include "DynamicOpAmpSubcircuit.h"
 #include "MnaCircuitEngine.h"
 #include "SwitchRelaySubcircuit.h"
@@ -109,6 +110,9 @@ struct CompiledCircuit {
     MnaCircuitEngine engine;
     std::unordered_map<CircuitNodeId, Node> nodes;
     std::unordered_map<CircuitComponentId, CircuitComponentBinding> bindings;
+    std::unordered_map<CircuitComponentId, BjtParasiticSubcircuit> bjtParasitics;
+    std::unordered_map<CircuitComponentId, JfetParasiticSubcircuit> jfetParasitics;
+    std::unordered_map<CircuitComponentId, MosfetParasiticSubcircuit> mosfetParasitics;
     std::unordered_map<CircuitComponentId, DynamicOpAmpSubcircuit> dynamicOpAmps;
     std::unordered_map<CircuitComponentId, TriodeParasiticSubcircuit> triodeParasitics;
     std::unordered_map<CircuitComponentId, TransformerSubcircuit> transformers;
@@ -130,6 +134,21 @@ struct CompiledCircuit {
     const CircuitComponentBinding* binding(CircuitComponentId id) const noexcept {
         const auto it = bindings.find(id);
         return it == bindings.end() ? nullptr : &it->second;
+    }
+
+    const BjtParasiticSubcircuit* bjtParasitic(CircuitComponentId id) const noexcept {
+        const auto it = bjtParasitics.find(id);
+        return it == bjtParasitics.end() ? nullptr : &it->second;
+    }
+
+    const JfetParasiticSubcircuit* jfetParasitic(CircuitComponentId id) const noexcept {
+        const auto it = jfetParasitics.find(id);
+        return it == jfetParasitics.end() ? nullptr : &it->second;
+    }
+
+    const MosfetParasiticSubcircuit* mosfetParasitic(CircuitComponentId id) const noexcept {
+        const auto it = mosfetParasitics.find(id);
+        return it == mosfetParasitics.end() ? nullptr : &it->second;
     }
 
     const TransformerSubcircuit* transformer(CircuitComponentId id) const noexcept {
@@ -155,7 +174,9 @@ struct CompiledCircuit {
 
 // Control-thread representation of a schematic-like circuit. Stable node/component
 // IDs are separate from solver indexes so a future UI/JSON format can retain IDs
-// while the compiled MNA layout changes.
+// while the compiled MNA layout changes. Normal BJT/JFET/MOSFET definitions compile
+// to their high-fidelity parasitic subcircuits; callers do not need a second device
+// type merely to make catalog capacitances participate in the actual solve.
 class CircuitNetlist {
 public:
     CircuitNodeId addNode(std::string name = {}) {
@@ -332,21 +353,36 @@ public:
                 } else if constexpr (std::is_same_v<T, BjtDefinition>) {
                     componentOk = resolve(definition.collector, a) && resolve(definition.base, b) &&
                                   resolve(definition.emitter, c);
-                    if (componentOk) built.bindings.emplace(definition.id,
-                        CircuitComponentBinding{CircuitComponentKind::bjt,
-                            built.engine.addBjt(a, b, c, definition.spec)});
+                    if (componentOk) {
+                        const auto handles = addBjtParasiticSubcircuit(
+                            built.engine, a, b, c, definition.spec);
+                        built.bjtParasitics.emplace(definition.id, handles);
+                        built.bindings.emplace(definition.id,
+                            CircuitComponentBinding{CircuitComponentKind::bjt,
+                                handles.transistor});
+                    }
                 } else if constexpr (std::is_same_v<T, JfetDefinition>) {
                     componentOk = resolve(definition.drain, a) && resolve(definition.gate, b) &&
                                   resolve(definition.source, c);
-                    if (componentOk) built.bindings.emplace(definition.id,
-                        CircuitComponentBinding{CircuitComponentKind::jfet,
-                            built.engine.addJfet(a, b, c, definition.spec)});
+                    if (componentOk) {
+                        const auto handles = addJfetParasiticSubcircuit(
+                            built.engine, a, b, c, definition.spec);
+                        built.jfetParasitics.emplace(definition.id, handles);
+                        built.bindings.emplace(definition.id,
+                            CircuitComponentBinding{CircuitComponentKind::jfet,
+                                handles.transistor});
+                    }
                 } else if constexpr (std::is_same_v<T, MosfetDefinition>) {
                     componentOk = resolve(definition.drain, a) && resolve(definition.gate, b) &&
                                   resolve(definition.source, c);
-                    if (componentOk) built.bindings.emplace(definition.id,
-                        CircuitComponentBinding{CircuitComponentKind::mosfet,
-                            built.engine.addMosfet(a, b, c, definition.spec)});
+                    if (componentOk) {
+                        const auto handles = addMosfetParasiticSubcircuit(
+                            built.engine, a, b, c, definition.spec);
+                        built.mosfetParasitics.emplace(definition.id, handles);
+                        built.bindings.emplace(definition.id,
+                            CircuitComponentBinding{CircuitComponentKind::mosfet,
+                                handles.transistor});
+                    }
                 } else if constexpr (std::is_same_v<T, OpAmpDefinition>) {
                     componentOk = resolve(definition.output, a) && resolve(definition.nonInverting, b) &&
                                   resolve(definition.inverting, c) && resolve(definition.reference, d);
