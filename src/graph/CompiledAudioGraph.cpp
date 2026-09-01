@@ -9,18 +9,31 @@ const CompiledAudioGraph::NodeRuntime* CompiledAudioGraph::runtime(NodeId id)con
 
 bool CompiledAudioGraph::build(Graph& graph,double sampleRate,int maxBlockSize,int channels,ProcessingQuality quality){
     if(maxBlockSize<=0||channels<=0)return false;
+
+    // First compile validates topology and gives us a deterministic preparation
+    // order. Node latency is allowed to depend on PrepareSpec (quality, sample rate,
+    // partition size, oversampling factor), so this first pass is NOT used for PDC.
     const auto validation=graph.compile();if(!validation.ok)return false;
-    maxBlockSize_=maxBlockSize;channels_=channels;totalLatencySamples_=graph.maximumGraphLatencySamples();order_=graph.schedule();nodes_.clear();runtimeIndex_.clear();sinks_.clear();nodes_.reserve(order_.size());
+    maxBlockSize_=maxBlockSize;channels_=channels;order_=graph.schedule();nodes_.clear();runtimeIndex_.clear();sinks_.clear();nodes_.reserve(order_.size());
     const PrepareSpec spec{sampleRate,maxBlockSize,channels,quality};
 
     for(const NodeId id:order_){
         auto* node=graph.node(id);if(!node)return false;NodeRuntime r;r.id=id;r.node=node;
         r.inputs.resize(static_cast<std::size_t>(std::max(0,node->inputPortCount())));
         r.outputs.resize(static_cast<std::size_t>(std::max(0,node->outputPortCount())));
+        r.inputPointers.reserve(r.inputs.size());
+        r.outputPointers.reserve(r.outputs.size());
         for(auto& in:r.inputs)in.mix.resize(channels,maxBlockSize);
         for(auto& out:r.outputs)out.resize(channels,maxBlockSize);
         node->prepare(spec);runtimeIndex_[id]=nodes_.size();nodes_.push_back(std::move(r));
     }
+
+    // Recompile after prepare so quality-dependent latency is the value used by
+    // every edge and sink compensation delay. This closes a subtle PDC bug where an
+    // unprepared oversampling node reported zero latency during the old single pass.
+    const auto preparedValidation=graph.compile();if(!preparedValidation.ok)return false;
+    order_=graph.schedule();
+    totalLatencySamples_=graph.maximumGraphLatencySamples();
 
     for(auto& r:nodes_){
         for(int port=0;port<static_cast<int>(r.inputs.size());++port){
@@ -41,7 +54,13 @@ bool CompiledAudioGraph::build(Graph& graph,double sampleRate,int maxBlockSize,i
             SinkRuntime sink;sink.source=id;sink.sourcePort=port;sink.busIndex=std::max(0,node->physicalOutputBusIndex());sink.compensation.prepare(channels,totalLatencySamples_,maxBlockSize);sink.compensation.setDelaySamples(totalLatencySamples_-graph.cumulativeLatencySamples(id).value_or(0));sinks_.push_back(std::move(sink));
         }
     }
-    reset();return !nodes_.empty()&&!sinks_.empty();
+
+    // Do not call reset() here. prepare() is the control-thread point at which a
+    // nonlinear node is allowed to establish its operating point and dynamic initial
+    // conditions. Resetting immediately after prepare used to erase that bias state
+    // before the first audio callback. Newly prepared mix/output/PDC buffers are
+    // already zero-initialized by resize()/prepare().
+    return !nodes_.empty()&&!sinks_.empty();
 }
 
 void CompiledAudioGraph::reset()noexcept{
