@@ -32,6 +32,21 @@ The goal is not to clone a particular artist rig. The goal is to model real sign
 
 Nonlinear nodes should own their quality policy. Clean utility nodes stay at 1x where possible; clipping, fuzz, amp and pitch nodes can request higher internal rates. The long-term target is adaptive oversampling, high-quality resampling filters, optional ADAA for suitable nonlinearities, latency-aware parallel routing, and explicit quality modes for live vs studio use.
 
+## Current hardware milestone
+
+The JUCE standalone host now supports component-level TS808/DS-1 pedals, three
+guitar-amp families, measured guitar cabinet IR loading, speaker dynamics,
+phase-aligned IR mix and independently editable amplifier topology controls.
+Its routing page can switch between a serial guitar rig, a full-band parallel
+octave/bass-amp branch and a complementary crossover octave/bass branch. The
+octave divider is explicitly monophonic, and both fallback cabinet responses are
+clearly identified as synthetic rather than measured captures.
+
+Structural changes are prepared away from the audio callback. Existing graph
+delay compensation aligns parallel paths, and first-callback regression tests
+verify zero heap allocations for both serial and dual-cabinet graphs. See
+`docs/REALTIME_AUDIO_HOST.md` for controls, safety behavior and Linux bring-up.
+
 ## Build
 
 ```bash

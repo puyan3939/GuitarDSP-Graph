@@ -48,6 +48,27 @@ int main() {
     }
     ok &= require(adaaFinite, "ADAA tanh is finite under hard drive");
 
+    // The antiderivative must stay quiet around guitar-note decay. Evaluating
+    // log(cosh(x)) in float used to create an error larger than the entire
+    // wanted -60 dBFS sine at this amplitude.
+    adaa.reset();
+    double quietErrorPower = 0.0;
+    double quietSignalPower = 0.0;
+    float previousQuiet = 0.0f;
+    for (int i = 0; i < 4096; ++i) {
+        const float x = 0.001f * std::sin(0.0291456318f * static_cast<float>(i));
+        const float y = adaa.process(x);
+        if (i > 0) {
+            const double expected = std::tanh(0.5 * static_cast<double>(x + previousQuiet));
+            const double error = static_cast<double>(y) - expected;
+            quietErrorPower += error * error;
+            quietSignalPower += expected * expected;
+        }
+        previousQuiet = x;
+    }
+    ok &= require(quietErrorPower < quietSignalPower * 1.0e-10,
+                  "ADAA tanh preserves -60 dBFS audio without cancellation noise");
+
     hq::DynamicTriodeStage triode;
     hq::TransformerStage transformer;
     triode.prepare(48000.0); transformer.prepare(48000.0);

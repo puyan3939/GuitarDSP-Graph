@@ -150,6 +150,7 @@ public:
         targetDrive_ = appliedDrive_ = defaultDrive;
         targetTone_ = appliedTone_ = defaultTone;
         targetLevel_ = appliedLevel_ = defaultLevel;
+        controlUpdateCountdown_ = 0;
         lastSolve_ = {};
 
         if (!primeOperatingPoint()) return false;
@@ -157,6 +158,13 @@ public:
         // Once the DC neighborhood is established, return to the automatic solver
         // so normal audio processing can use the prepared sparse nonlinear path.
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
+        // The audio-rate Newton voltage criterion is 20 ppm. Requiring the
+        // separately row-scaled KCL residual to reach the engine's generic
+        // 0.3 ppm default forced a second factorization after the component
+        // equations were already within the circuit's accepted precision. Match
+        // both criteria exactly, as the DS-1 path does, while retaining the full
+        // 48-unknown circuit and its unchanged nonlinear stamps.
+        engine_.setNonlinearResidualTolerance(2.0e-5f);
 
         const auto warmSamples = static_cast<std::size_t>(
             std::clamp(sampleRate_ * 0.08, 512.0, 8192.0));
@@ -173,6 +181,7 @@ public:
         targetDrive_ = appliedDrive_ = defaultDrive;
         targetTone_ = appliedTone_ = defaultTone;
         targetLevel_ = appliedLevel_ = defaultLevel;
+        controlUpdateCountdown_ = 0;
         engine_.setPotentiometerPosition(drivePot_, 1.0f - appliedDrive_);
         engine_.setPotentiometerPosition(tonePot_, 1.0f - appliedTone_);
         engine_.setPotentiometerPosition(levelPot_, appliedLevel_);
@@ -233,13 +242,26 @@ private:
     }
 
     void applySmoothedControls() noexcept {
-        // About 5 ms for a full-scale knob jump at any sample rate. This is fast
-        // enough to feel immediate but prevents a preset/UI discontinuity from
-        // replacing the MNA conductance matrix with a radically different one in a
-        // single Newton step. All three edits happen before processSample(), so at
-        // most one static-cache rebuild occurs for that audio sample.
-        const float maximumStep = 1.0f /
+        if (appliedDrive_ == targetDrive_ && appliedTone_ == targetTone_
+            && appliedLevel_ == targetLevel_) {
+            controlUpdateCountdown_ = 0;
+            return;
+        }
+        if (controlUpdateCountdown_ > 0) {
+            --controlUpdateCountdown_;
+            return;
+        }
+
+        // Potentiometers are control signals, not oversampled audio sources.
+        // Update at no less than 24 kHz while retaining the original 5 ms ramp;
+        // the complete circuit still runs at its full 2x/4x/8x/16x audio rate.
+        // This prevents a GUI gesture from unnecessarily refactorizing the
+        // identical physical matrix once per oversampled audio sample.
+        const int updateInterval = std::max(1,
+            static_cast<int>(sampleRate_ / 24000.0));
+        const float maximumStep = static_cast<float>(updateInterval) /
             static_cast<float>(std::max(1.0, sampleRate_ * 0.005));
+        controlUpdateCountdown_ = updateInterval - 1;
 
         const float nextDrive = approach(appliedDrive_, targetDrive_, maximumStep);
         const float nextTone = approach(appliedTone_, targetTone_, maximumStep);
@@ -367,6 +389,7 @@ private:
     float appliedDrive_ = defaultDrive;
     float appliedTone_ = defaultTone;
     float appliedLevel_ = defaultLevel;
+    int controlUpdateCountdown_ = 0;
 };
 
 } // namespace guitardsp::circuit

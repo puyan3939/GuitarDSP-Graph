@@ -206,11 +206,18 @@ public:
         targetDistortion_ = appliedDistortion_ = defaultDistortion;
         targetTone_ = appliedTone_ = defaultTone;
         targetLevel_ = appliedLevel_ = defaultLevel;
+        controlUpdateCountdown_ = 0;
         lastSolve_ = {};
 
         if (!primeOperatingPoint()) return false;
 
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
+        // The 57-unknown DS-1 combines three transistor macros with a high-gain
+        // op-amp. Its Newton voltage tolerance is already 20 ppm; demanding a
+        // second 0.3 ppm row-scaled residual below the circuit's float-resolution
+        // floor caused endless 40-step limit cycles even at silence. Match both
+        // convergence criteria while retaining every component and exact stamp.
+        engine_.setNonlinearResidualTolerance(2.0e-5f);
         const auto warmSamples = static_cast<std::size_t>(
             std::clamp(sampleRate_ * 0.06, 512.0, 4096.0));
         for (std::size_t i = 0; i < warmSamples; ++i) {
@@ -226,6 +233,7 @@ public:
         targetDistortion_ = appliedDistortion_ = defaultDistortion;
         targetTone_ = appliedTone_ = defaultTone;
         targetLevel_ = appliedLevel_ = defaultLevel;
+        controlUpdateCountdown_ = 0;
         engine_.setPotentiometerPosition(drivePot_, 1.0f - appliedDistortion_);
         engine_.setPotentiometerPosition(tonePot_, appliedTone_);
         engine_.setPotentiometerPosition(levelPot_, appliedLevel_);
@@ -287,11 +295,24 @@ private:
     }
 
     void applySmoothedControls() noexcept {
-        // Five milliseconds for a full knob excursion. Matrix-affecting pot edits
-        // are therefore bounded and all happen before processSample(), so a sample
-        // incurs at most one static-cache rebuild even if several controls move.
-        const float maximumStep = 1.0f /
+        if (appliedDistortion_ == targetDistortion_ && appliedTone_ == targetTone_
+            && appliedLevel_ == targetLevel_) {
+            controlUpdateCountdown_ = 0;
+            return;
+        }
+        if (controlUpdateCountdown_ > 0) {
+            --controlUpdateCountdown_;
+            return;
+        }
+
+        // Preserve the five-millisecond physical pot ramp, but run the control
+        // trajectory at >=24 kHz instead of the much higher circuit audio rate.
+        // All three edited pots still rebuild one exact MNA matrix together.
+        const int updateInterval = std::max(1,
+            static_cast<int>(sampleRate_ / 24000.0));
+        const float maximumStep = static_cast<float>(updateInterval) /
             static_cast<float>(std::max(1.0, sampleRate_ * 0.005));
+        controlUpdateCountdown_ = updateInterval - 1;
 
         const float nextDistortion = approach(appliedDistortion_, targetDistortion_, maximumStep);
         const float nextTone = approach(appliedTone_, targetTone_, maximumStep);
@@ -431,6 +452,7 @@ private:
     float appliedDistortion_ = defaultDistortion;
     float appliedTone_ = defaultTone;
     float appliedLevel_ = defaultLevel;
+    int controlUpdateCountdown_ = 0;
 };
 
 } // namespace guitardsp::circuit

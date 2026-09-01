@@ -189,6 +189,151 @@ int main() {
     }
 
     {
+        circuit::TS808Circuit ts;
+        constexpr double oversampledRate = 88200.0;
+        ok &= require(ts.prepare(oversampledRate),
+                      "full TS808 prepares at the Eco oversampled rate");
+        ok &= require(ts.engine().dimension() == 48
+                          && ts.engine().sparseNonlinearFactorNonZeros()
+                              <= ts.engine().sparseNonlinearOriginalNonZeros() + 40
+                          && ts.engine().sparseNonlinearCachedLinearUnknowns() >= 24,
+                      "cached linear Schur prefix retains all 48 TS808 component unknowns");
+        ts.engine().resetPerformanceStats();
+        constexpr int samples = 1024;
+        int totalIterations = 0;
+        int unconverged = 0;
+        for (int i = 0; i < samples; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 220.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float output = ts.processSample(0.15f * std::sin(phase));
+            const auto solve = ts.lastSolveStats();
+            totalIterations += solve.iterations;
+            unconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const float averageIterations = static_cast<float>(totalIterations)
+            / static_cast<float>(samples);
+        const auto performance = ts.engine().performanceStats();
+        std::cout << "DIAG optimized-ts808 average_iterations=" << averageIterations
+                  << " unconverged=" << unconverged
+                  << " sparse=" << performance.sparseNewtonSolves
+                  << " fallback=" << performance.sparseFallbackSolves << '\n';
+        ok &= require(averageIterations < 1.25f && unconverged == 0,
+                      "matched residual keeps driven TS808 near one Newton solve per sample");
+        ok &= require(performance.sampleRhsAssemblies == performance.samples
+                          && performance.sparseNewtonSolves > 0,
+                      "TS808 assembles sample history once while preserving full sparse MNA");
+
+        // Compare the matched 20 ppm residual against the previous generic
+        // 0.3 ppm residual using two otherwise identical component circuits.
+        // This guards the optimization with an actual audio waveform comparison,
+        // not only convergence counters.
+        circuit::TS808Circuit strictResidual;
+        circuit::TS808Circuit matchedResidual;
+        ok &= require(strictResidual.prepare(oversampledRate)
+                          && matchedResidual.prepare(oversampledRate),
+                      "TS808 residual comparison circuits prepare");
+        strictResidual.engine().setNonlinearResidualTolerance(3.0e-7f);
+        matchedResidual.engine().setNonlinearResidualTolerance(2.0e-5f);
+        for (int i = -4096; i < 0; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 173.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float input = 0.11f * std::sin(phase)
+                + 0.027f * std::sin(phase * 2.71f);
+            (void)strictResidual.processSample(input);
+            (void)matchedResidual.processSample(input);
+        }
+        double squaredReference = 0.0;
+        double squaredError = 0.0;
+        float maximumError = 0.0f;
+        constexpr int comparisonSamples = 16384;
+        for (int i = 0; i < comparisonSamples; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 173.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float input = 0.11f * std::sin(phase)
+                + 0.027f * std::sin(phase * 2.71f);
+            const float reference = strictResidual.processSample(input);
+            const float optimized = matchedResidual.processSample(input);
+            const float error = optimized - reference;
+            squaredReference += static_cast<double>(reference)
+                * static_cast<double>(reference);
+            squaredError += static_cast<double>(error) * static_cast<double>(error);
+            maximumError = std::max(maximumError, std::abs(error));
+        }
+        const double relativeRmsError = std::sqrt(squaredError
+            / std::max(1.0e-30, squaredReference));
+        std::cout << "DIAG ts808-residual-match relative_rms_error="
+                  << relativeRmsError << " maximum_error=" << maximumError << '\n';
+        ok &= require(relativeRmsError < 2.0e-4 && maximumError < 3.0e-4f,
+                      "20 ppm TS808 residual matches strict-reference waveform");
+
+        // Quiet input is the real hardware worst case: the high-gain op-amp can
+        // alternate between adjacent float-sized operating points after KCL has
+        // already converged. A voltage-delta-only test previously spent all 40
+        // Newton steps on many silent samples and caused continuous audio XRUNs.
+        ts.engine().resetPerformanceStats();
+        constexpr int quietSamples = 8192;
+        int quietIterations = 0;
+        int quietUnconverged = 0;
+        for (int i = 0; i < quietSamples; ++i) {
+            const float phase = 2.0f * 3.14159265358979323846f * 220.0f
+                * static_cast<float>(i) / static_cast<float>(oversampledRate);
+            const float output = ts.processSample(0.0035f * std::sin(phase));
+            const auto solve = ts.lastSolveStats();
+            quietIterations += solve.iterations;
+            quietUnconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const float averageQuietIterations = static_cast<float>(quietIterations)
+            / static_cast<float>(quietSamples);
+        const auto quietPerformance = ts.engine().performanceStats();
+        std::cout << "DIAG quiet-ts808 average_iterations=" << averageQuietIterations
+                  << " unconverged=" << quietUnconverged
+                  << " residual_convergences="
+                  << quietPerformance.nonlinearResidualConvergences << '\n';
+        ok &= require(averageQuietIterations < 1.25f && quietUnconverged == 0,
+                      "quiet guitar input converges without Newton-limit cycles");
+        ok &= require(quietPerformance.nonlinearResidualConvergences > 0
+                          && quietPerformance.sparseNewtonSolves
+                              >= quietPerformance.samples,
+                      "matched nonlinear KCL residual terminates physically converged samples");
+
+        ts.engine().resetPerformanceStats();
+        constexpr int silentSamples = 16384;
+        int silentIterations = 0;
+        int silentUnconverged = 0;
+        for (int i = 0; i < silentSamples; ++i) {
+            const float output = ts.processSample(0.0f);
+            const auto solve = ts.lastSolveStats();
+            silentIterations += solve.iterations;
+            silentUnconverged += solve.converged ? 0 : 1;
+            ok &= std::isfinite(output) && !solve.singular;
+        }
+        const auto silentPerformance = ts.engine().performanceStats();
+        const float averageSilentIterations = static_cast<float>(silentIterations)
+            / static_cast<float>(silentSamples);
+        std::cout << "DIAG silent-ts808 average_iterations=" << averageSilentIterations
+                  << " unconverged=" << silentUnconverged
+                  << " cached_linear_unknowns="
+                  << ts.engine().sparseNonlinearCachedLinearUnknowns()
+                  << " static_rebuilds=" << silentPerformance.staticCacheRebuilds << '\n';
+        ok &= require(averageSilentIterations < 1.25f && silentUnconverged == 0
+                          && silentPerformance.staticCacheRebuilds == 0,
+                      "prolonged silence preserves cached physical circuit operating point");
+
+        ts.engine().resetPerformanceStats();
+        ts.setControls(0.90f, 0.85f, 0.15f);
+        for (int sample = 0; sample < 512; ++sample)
+            ok &= std::isfinite(ts.processSample(0.02f));
+        const auto gesture = ts.engine().performanceStats();
+        ok &= require(std::abs(ts.appliedDrive() - 0.90f) < 1.0e-5f
+                          && std::abs(ts.appliedTone() - 0.85f) < 1.0e-5f
+                          && std::abs(ts.appliedLevel() - 0.15f) < 1.0e-5f
+                          && gesture.staticCacheRebuilds < 90,
+                      "ultrasonic-rate smoothed pots preserve exact endpoints without per-sample matrix rebuilds");
+    }
+
+    {
         hq::TS808CircuitNode node;
         graph::PrepareSpec spec{};
         spec.sampleRate = 48000.0;

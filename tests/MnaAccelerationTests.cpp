@@ -93,6 +93,8 @@ int main() {
                       "nonlinear source updates preserve cached linear base matrix");
         ok &= require(nonlinear.nonlinearAssemblies >= nonlinear.samples,
                       "nonlinear path restamps only Newton-dependent device terms");
+        ok &= require(nonlinear.sampleRhsAssemblies == nonlinear.samples,
+                      "capacitor/source history is assembled once per nonlinear sample");
         ok &= require(nonlinear.generalLinearSolves == nonlinear.nonlinearAssemblies &&
                       nonlinear.cachedLinearSolves == 0,
                       "nonlinear Newton iterations use general solves over cached base stamps");

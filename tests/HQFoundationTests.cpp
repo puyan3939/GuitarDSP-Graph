@@ -101,6 +101,17 @@ int main() {
         const auto triode = hq::TriodeModel::twelveAX7();
         const float plate = triode.plateCurrent(-1.0f, 250.0f);
         ok &= require(std::isfinite(plate) && plate >= 0.0f, "12AX7 component model finite");
+        const auto linear = triode.linearizePlate(-1.35f, 180.0f);
+        constexpr float derivativeStep = 0.10f;
+        const float numericalConductance =
+            (triode.plateCurrent(-1.35f, 180.0f + derivativeStep)
+                - triode.plateCurrent(-1.35f, 180.0f - derivativeStep))
+            / (2.0f * derivativeStep);
+        ok &= require(std::abs(linear.current - triode.plateCurrent(-1.35f, 180.0f))
+                              < 1.0e-7f
+                          && std::abs(linear.conductance - numericalConductance)
+                              < std::abs(numericalConductance) * 0.01f,
+                      "analytic triode derivative matches the unchanged physical tube law");
 
         hq::CathodeBiasState bias;
         bias.setTimeConstant(48000.0, 40.0f);

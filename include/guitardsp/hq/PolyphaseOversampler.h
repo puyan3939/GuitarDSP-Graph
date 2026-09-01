@@ -38,12 +38,12 @@ public:
             latencySamples_ = (highRateRoundTripDelay - decimationPhase_) / factor_;
         }
 
-        const int historySize = std::max(2, (taps_ + factor_ - 1) / factor_ + 2);
+        upHistorySize_ = std::max(2, (taps_ + factor_ - 1) / factor_ + 2);
         upHistory_.assign(static_cast<std::size_t>(channels_),
-                          std::vector<float>(static_cast<std::size_t>(historySize), 0.0f));
+                          std::vector<float>(static_cast<std::size_t>(2 * upHistorySize_), 0.0f));
         upWrite_.assign(static_cast<std::size_t>(channels_), 0);
         downHistory_.assign(static_cast<std::size_t>(channels_),
-                            std::vector<float>(static_cast<std::size_t>(taps_), 0.0f));
+                            std::vector<float>(static_cast<std::size_t>(2 * taps_), 0.0f));
         downWrite_.assign(static_cast<std::size_t>(channels_), 0);
         work_.resize(channels_, maxBlock_ * factor_);
     }
@@ -82,20 +82,21 @@ public:
             int& write = upWrite_[static_cast<std::size_t>(ch)];
 
             for (int n = 0; n < numSamples; ++n) {
-                history[static_cast<std::size_t>(write)] = in[n];
+                const float sample = in[n];
+                history[static_cast<std::size_t>(write)] = sample;
+                history[static_cast<std::size_t>(write + upHistorySize_)] = sample;
+                const float* recent = history.data() + write + upHistorySize_;
                 for (int phase = 0; phase < factor_; ++phase) {
                     double acc = 0.0;
-                    int r = write;
                     const auto& coeffs = phases_[static_cast<std::size_t>(phase)];
-                    for (float c : coeffs) {
-                        acc += static_cast<double>(c) *
-                               static_cast<double>(history[static_cast<std::size_t>(r)]);
-                        if (--r < 0) r = static_cast<int>(history.size()) - 1;
-                    }
+                    const float* samples = recent;
+                    for (float coefficient : coeffs)
+                        acc += static_cast<double>(coefficient)
+                            * static_cast<double>(*samples--);
                     hi[n * factor_ + phase] =
                         static_cast<float>(acc * static_cast<double>(factor_));
                 }
-                if (++write >= static_cast<int>(history.size())) write = 0;
+                if (++write >= upHistorySize_) write = 0;
             }
 
             for (int i = 0; i < highSamples; ++i) hi[i] = processor(ch, hi[i]);
@@ -103,19 +104,23 @@ public:
             float* out = output.channel(ch);
             auto& down = downHistory_[static_cast<std::size_t>(ch)];
             int& dw = downWrite_[static_cast<std::size_t>(ch)];
+            int phase = 0;
+            int outputIndex = 0;
             for (int i = 0; i < highSamples; ++i) {
-                down[static_cast<std::size_t>(dw)] = hi[i];
-                if ((i % factor_) == decimationPhase_) {
+                const float sample = hi[i];
+                down[static_cast<std::size_t>(dw)] = sample;
+                down[static_cast<std::size_t>(dw + taps_)] = sample;
+                if (phase == decimationPhase_) {
                     double acc = 0.0;
-                    int r = dw;
+                    const float* samples = down.data() + dw + taps_;
                     for (int k = 0; k < taps_; ++k) {
                         acc += static_cast<double>(kernel_[static_cast<std::size_t>(k)]) *
-                               static_cast<double>(down[static_cast<std::size_t>(r)]);
-                        if (--r < 0) r = taps_ - 1;
+                               static_cast<double>(*samples--);
                     }
-                    out[i / factor_] = static_cast<float>(acc);
+                    out[outputIndex++] = static_cast<float>(acc);
                 }
                 if (++dw >= taps_) dw = 0;
+                if (++phase >= factor_) phase = 0;
             }
         }
     }
@@ -159,6 +164,7 @@ private:
     int maxBlock_ = 512;
     int factor_ = 1;
     int taps_ = 31;
+    int upHistorySize_ = 0;
     int decimationPhase_ = 0;
     int latencySamples_ = 0;
     std::vector<float> kernel_;
