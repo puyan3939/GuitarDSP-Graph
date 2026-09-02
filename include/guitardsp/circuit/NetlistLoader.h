@@ -23,6 +23,7 @@
 #include "DynamicOpAmpSubcircuit.h"
 #include "JsonValue.h"
 #include "MnaCircuitEngine.h"
+#include "TriodeParasiticSubcircuit.h"
 
 #include <algorithm>
 #include <cmath>
@@ -139,8 +140,12 @@ public:
         controlUpdateCountdown_ = 0;
         lastSolve_ = {};
 
-        if (hasSupply && hasVref) {
-            if (!primeOperatingPoint()) return fail("failed to prime DC operating point");
+        // A vref rail is only needed by circuits whose active devices bias
+        // around a mid-supply virtual ground (TS808/DS1's transistor/op-amp
+        // stages). A self-biased triode stage returns to true ground instead,
+        // so priming only requires the supply rail to be present.
+        if (hasSupply) {
+            if (!primeOperatingPoint(hasVref)) return fail("failed to prime DC operating point");
         }
 
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
@@ -355,6 +360,22 @@ private:
         return spec;
     }
 
+    hq::TriodeSpec triodeSpecFrom(const JsonValue& op) {
+        hq::TriodeSpec spec = op.has("preset") ? presetTriode(op["preset"].asString()) : hq::TriodeSpec{};
+        const JsonValue& overrides = op.has("spec") ? op["spec"] : op["overrides"];
+        if (overrides.has("name")) spec.name = intern(overrides["name"].asString());
+        if (overrides.has("heaterVoltage")) spec.heaterVoltage = overrides["heaterVoltage"].asFloat();
+        if (overrides.has("nominalPlateVoltage")) spec.nominalPlateVoltage = overrides["nominalPlateVoltage"].asFloat();
+        if (overrides.has("maxPlateVoltage")) spec.maxPlateVoltage = overrides["maxPlateVoltage"].asFloat();
+        if (overrides.has("maxPlateDissipationWatts")) spec.maxPlateDissipationWatts = overrides["maxPlateDissipationWatts"].asFloat();
+        if (overrides.has("gridPlateCapacitanceFarads")) spec.gridPlateCapacitanceFarads = overrides["gridPlateCapacitanceFarads"].asFloat();
+        if (overrides.has("gridCathodeCapacitanceFarads")) spec.gridCathodeCapacitanceFarads = overrides["gridCathodeCapacitanceFarads"].asFloat();
+        if (overrides.has("plateCathodeCapacitanceFarads")) spec.plateCathodeCapacitanceFarads = overrides["plateCathodeCapacitanceFarads"].asFloat();
+        if (overrides.has("gridCurrentSaturationAmps")) spec.gridCurrentSaturationAmps = overrides["gridCurrentSaturationAmps"].asFloat();
+        if (overrides.has("gridCurrentEmissionCoefficient")) spec.gridCurrentEmissionCoefficient = overrides["gridCurrentEmissionCoefficient"].asFloat();
+        return spec;
+    }
+
     static hq::DiodeSpec presetDiode(const std::string& name) noexcept {
         if (name == "1n34a") return hq::component_presets::oneN34A();
         if (name == "redLed") return hq::component_presets::redLed();
@@ -367,6 +388,10 @@ private:
     static hq::OpAmpSpec presetOpAmp(const std::string& name) noexcept {
         if (name == "tl072") return hq::component_presets::tl072();
         return hq::component_presets::jrc4558();
+    }
+    static hq::TriodeSpec presetTriode(const std::string& name) noexcept {
+        if (name == "12at7") return hq::component_presets::twelveAT7();
+        return hq::component_presets::twelveAX7();
     }
 
     bool applyOp(const JsonValue& op, std::string* error) {
@@ -462,6 +487,14 @@ private:
             addDiodeParasiticSubcircuit(engine_, anode, cathode, diodeSpecFrom(op));
             return true;
         }
+        if (kind == "triodeParasitic") {
+            const Node plate = requireNode(op, "plate", ok);
+            const Node grid = requireNode(op, "grid", ok);
+            const Node cathode = requireNode(op, "cathode", ok);
+            if (!ok) return fail("triodeParasitic references unknown node");
+            addTriodeParasiticSubcircuit(engine_, plate, grid, cathode, triodeSpecFrom(op));
+            return true;
+        }
         return fail("unknown netlist op '" + kind + "'");
     }
 
@@ -481,11 +514,11 @@ private:
         if (sim.has("vrefVolts")) sim_.vrefVolts = sim["vrefVolts"].asFloat(sim_.vrefVolts);
     }
 
-    bool primeOperatingPoint() noexcept {
+    bool primeOperatingPoint(bool hasVref) noexcept {
         for (int step = 1; step <= sim_.sourceSteps; ++step) {
             const float t = static_cast<float>(step) / static_cast<float>(sim_.sourceSteps);
             engine_.setVoltageSource(supplySource_, sim_.supplyVolts * t);
-            engine_.setVoltageSource(vrefSource_, sim_.vrefVolts * t);
+            if (hasVref) engine_.setVoltageSource(vrefSource_, sim_.vrefVolts * t);
             engine_.setVoltageSource(inputSource_, 0.0f);
             for (int settle = 0; settle < sim_.solvesPerStep; ++settle) {
                 lastSolve_ = engine_.processSample(40, 1.0e-6f);

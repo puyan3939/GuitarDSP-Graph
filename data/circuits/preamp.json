@@ -1,0 +1,62 @@
+{
+  "name": "Preamp",
+  "description": "Component-level single-stage 12AX7 common-cathode preamp plus a simplified passive Bass/Treble tone stack. Parity reference: guitardsp::circuit::PreampCircuit (include/guitardsp/circuit/PreampCircuit.h).",
+  "ops": [
+    { "op": "node", "name": "supply" },
+    { "op": "node", "name": "inputJack" },
+    { "op": "node", "name": "inputCoupled" },
+    { "op": "node", "name": "grid" },
+    { "op": "node", "name": "plate" },
+    { "op": "node", "name": "cathode" },
+    { "op": "node", "name": "toneIn" },
+    { "op": "node", "name": "bassNode" },
+    { "op": "node", "name": "trebleNode" },
+    { "op": "node", "name": "toneOut" },
+    { "op": "node", "name": "outputCouplingInput" },
+    { "op": "node", "name": "outputNode" },
+
+    { "op": "voltageSource", "name": "supplySource", "p": "supply", "n": "ground", "volts": 0.0 },
+    { "op": "voltageSource", "name": "inputSource", "p": "inputJack", "n": "ground", "volts": 0.0 },
+
+    { "op": "capacitor", "a": "inputJack", "b": "inputCoupled", "farads": 22.0e-9, "voltageRating": 400.0, "technology": "film" },
+    { "op": "resistor", "a": "inputCoupled", "b": "grid", "ohms": 1500.0 },
+    { "op": "resistor", "a": "grid", "b": "ground", "ohms": 1.0e6 },
+
+    { "op": "triodeParasitic", "name": "triode", "plate": "plate", "grid": "grid", "cathode": "cathode", "preset": "12ax7" },
+    { "op": "resistor", "a": "supply", "b": "plate", "ohms": 100000.0 },
+    { "op": "resistor", "a": "cathode", "b": "ground", "ohms": 1500.0 },
+    { "op": "capacitor", "a": "cathode", "b": "ground", "farads": 25.0e-6, "voltageRating": 10.0, "technology": "electrolytic" },
+
+    { "op": "capacitor", "a": "plate", "b": "toneIn", "farads": 22.0e-9, "voltageRating": 400.0, "technology": "film" },
+    { "op": "resistor", "a": "toneIn", "b": "ground", "ohms": 1.0e6 },
+
+    { "op": "resistor", "a": "toneIn", "b": "bassNode", "ohms": 10000.0 },
+    { "op": "capacitor", "a": "bassNode", "b": "ground", "farads": 100.0e-9, "voltageRating": 50.0, "technology": "film" },
+    { "op": "potentiometer", "name": "bassPot", "high": "bassNode", "wiper": "toneOut", "low": "ground",
+      "ohms": 100000.0, "taper": "audio", "position": 0.50 },
+
+    { "op": "capacitor", "a": "toneIn", "b": "trebleNode", "farads": 500.0e-12, "voltageRating": 50.0, "technology": "ceramic" },
+    { "op": "potentiometer", "name": "treblePot", "high": "trebleNode", "wiper": "toneOut", "low": "ground",
+      "ohms": 100000.0, "taper": "audio", "position": 0.50 },
+
+    { "op": "capacitor", "a": "toneOut", "b": "outputCouplingInput", "farads": 1.0e-6, "voltageRating": 50.0, "technology": "electrolytic" },
+    { "op": "resistor", "a": "outputCouplingInput", "b": "outputNode", "ohms": 100.0 },
+    { "op": "resistor", "a": "outputNode", "b": "ground", "ohms": 100000.0 }
+  ],
+  "ports": { "input": "inputSource", "supply": "supplySource", "output": "outputNode" },
+  "controls": {
+    "bass": { "pot": "bassPot", "invert": false },
+    "treble": { "pot": "treblePot", "invert": false }
+  },
+  "simulation": {
+    "sourceSteps": 200,
+    "solvesPerStep": 3,
+    "warmupSecondsFraction": 0.6,
+    "warmupMinSamples": 8192,
+    "warmupMaxSamples": 65536,
+    "nonlinearResidualTolerance": 2.0e-5,
+    "newtonMaxIterations": 40,
+    "newtonTolerance": 2.0e-5,
+    "supplyVolts": 300.0
+  }
+}

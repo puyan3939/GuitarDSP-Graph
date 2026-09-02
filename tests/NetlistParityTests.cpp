@@ -12,6 +12,7 @@
 
 #include "guitardsp/circuit/DS1Circuit.h"
 #include "guitardsp/circuit/NetlistLoader.h"
+#include "guitardsp/circuit/PreampCircuit.h"
 #include "guitardsp/circuit/TS808Circuit.h"
 
 #include <array>
@@ -143,6 +144,44 @@ bool checkDs1Parity(float distortion, float tone, float level) {
     return require(cmp.ok && cmp.maxAbsReference > 1.0e-4f, label);
 }
 
+bool checkPreampParity(float bass, float treble) {
+    circuit::PreampCircuit reference;
+    if (!reference.prepare(sampleRate)) return require(false, "Preamp reference prepare()");
+    reference.setControls(bass, treble);
+
+    circuit::NetlistCircuit candidate;
+    std::string error;
+    if (!candidate.loadFromFile(std::string(GUITARDSP_NETLIST_DATA_DIR) + "/preamp.json", &error))
+        return require(false, "Preamp netlist load: " + error);
+    if (!candidate.prepare(sampleRate, &error))
+        return require(false, "Preamp netlist prepare(): " + error);
+    candidate.setControl("bass", bass);
+    candidate.setControl("treble", treble);
+
+    // A guitar-level burst, long enough to carry both sides through the same
+    // potentiometer ramp and coupling-capacitor transient before comparing.
+    const auto settle = sineBurst(4000, 0.12f, 220.0);
+    for (float x : settle) {
+        reference.processSample(x);
+        candidate.processSample(x);
+    }
+
+    const auto probe = sineBurst(2000, 0.12f, 220.0, 4000);
+    std::vector<float> referenceOut(probe.size());
+    std::vector<float> candidateOut(probe.size());
+    for (std::size_t i = 0; i < probe.size(); ++i) {
+        referenceOut[i] = reference.processSample(probe[i]);
+        candidateOut[i] = candidate.processSample(probe[i]);
+    }
+
+    const auto cmp = compare(referenceOut, candidateOut, 5.0e-4f);
+    const std::string label = "Preamp parity bass=" + std::to_string(bass) +
+        " treble=" + std::to_string(treble) +
+        " (maxDiff=" + std::to_string(cmp.maxAbsDifference) +
+        ", maxRef=" + std::to_string(cmp.maxAbsReference) + ")";
+    return require(cmp.ok && cmp.maxAbsReference > 1.0e-4f, label);
+}
+
 } // namespace
 
 int main() {
@@ -179,6 +218,19 @@ int main() {
         {1.0f, 1.0f, 1.0f},
     }};
     for (const auto& s : ds1Settings) ok &= checkDs1Parity(s[0], s[1], s[2]);
+
+    // PreampCircuit::setBass/setTreble clamp a hairline away from the exact
+    // 0.0/1.0 mechanical endpoints (see PreampCircuit::clampPotPosition), so
+    // the parity sweep mirrors that clamped range rather than the raw [0,1]
+    // NetlistCircuit::setControl() would otherwise apply literally.
+    constexpr std::array<std::array<float, 2>, 5> preampSettings{{
+        {0.01f, 0.01f},
+        {0.25f, 0.25f},
+        {circuit::PreampCircuit::defaultBass, circuit::PreampCircuit::defaultTreble},
+        {0.75f, 0.75f},
+        {0.99f, 0.99f},
+    }};
+    for (const auto& s : preampSettings) ok &= checkPreampParity(s[0], s[1]);
 
     return ok ? 0 : 1;
 }
