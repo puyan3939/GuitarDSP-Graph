@@ -19,14 +19,68 @@ Long-term vision (see `docs/ARCHITECTURE.md` for the full phase roadmap):
 3. **Phase 3** — port the platform to dedicated hardware (e.g. SHARC/PIC
    targets).
 
-**Current state of the code (important):** the repository is still early —
-Phase 0 of the roadmap below. Today it contains only the directed audio graph
-kernel (topology, validation, deterministic scheduling, latency analysis) as a
-dependency-free C++ library. There is **no JUCE integration, no MNA circuit
-engine, and no circuit/netlist data files yet** — those belong to later
-phases. When working in this repo, check what actually exists in `include/`,
-`src/` and `tests/` rather than assuming later-phase pieces (amp/cabinet
-simulation, netlist JSON loading, benchmarks) are already implemented.
+**Current state of the code (important):** the graph kernel is done and a real
+MNA circuit engine, two component-level pedal circuits, a JSON netlist format
+for them, and an optional JUCE standalone host have all landed on `main`.
+Concretely:
+
+- **Graph kernel** (`include/guitardsp/graph/`, `src/graph/`) — topology,
+  validation, deterministic scheduling, latency analysis, hot-swappable
+  compiled plans via `RealtimeGraphHost`. This was the original Phase 0 scope
+  and is unchanged in spirit, just built out further (node registry, graph
+  documents, rig topology builder).
+- **MNA circuit engine** (`include/guitardsp/circuit/`, principally
+  `MnaCircuitEngine.h` / `MnaCircuitEngineCore.h`) — a real Modified Nodal
+  Analysis solver: R/C/L with trapezoidal companion models, potentiometers,
+  ideal sources, all four controlled-source families, Shockley diodes,
+  BJT/JFET/MOSFET, algebraic and dynamic op-amps, nonlinear **triode and
+  pentode** stamps with Miller/Cgk/Cpk (and pentode Csk) parasitic subcircuits
+  and positive-grid-current branches, transformer subcircuits with saturation,
+  and switch/electromechanical-relay subcircuits — plus a fixed-pattern sparse
+  solver path (`FixedPatternSparseSolver.h`) for realtime performance. See
+  `docs/CIRCUIT_ENGINE_ARCHITECTURE.md` for the authoritative design doc,
+  including what's still an "engineering model" rather than a
+  measured/manufacturer-equivalent one.
+- **TS808/DS-1 at component level** — `TS808Circuit.h` / `DS1Circuit.h` are
+  hand-written C++ classes that build the real op-amp/BJT/diode pedal topology
+  directly on `MnaCircuitEngine`. `data/circuits/ts808.json` / `ds1.json` are
+  the *same* circuits transcribed op-for-op into a JSON netlist format, loaded
+  via `NetlistLoader.h` (`guitardsp::circuit::NetlistCircuit`). See
+  `docs/CIRCUIT_NETLIST_FORMAT.md` for the format spec and
+  `tests/NetlistParityTests.cpp`, which asserts sample-by-sample agreement
+  between each hand-written class and its JSON netlist. Do not confuse this
+  format with `CircuitNetlist.h` below — different layer, different purpose.
+- **`CircuitNetlist.h`** — a separate, in-memory, stable-ID schematic layer
+  above the engine (stable node/component IDs independent of solver indices,
+  compiling to a `CompiledCircuit`). It's the intended compile target for a
+  future Circuit Mode UI. It is programmatic C++ today; JSON
+  serialization/import of *this* layer (as opposed to the narrower
+  TS808/DS-1-parity format above) is still future work — see "Next engine
+  work" in `docs/CIRCUIT_ENGINE_ARCHITECTURE.md`.
+- **Amps and cabinets are still behavioral, not circuit-level.** Everything
+  under `include/guitardsp/hq/` for amps (`ReferenceAmpTopologyNode.h`,
+  `AmpFamilyNodes.h`, power-tube/tone-stack families, etc.) and cabinets
+  (`CabinetChainNode.h`, speaker dynamics + measured-IR convolution) is a
+  parameterized DSP-stage composition, not an MNA netlist. Component-level
+  (element-by-element) modelling of amps/cabinets has **not** started; see
+  the "Amp/cabinet netlist status" section at the bottom of
+  `docs/CIRCUIT_NETLIST_FORMAT.md`. Don't assume a netlist-ified amp/cab
+  exists just because TS808/DS-1 have one.
+- **JUCE standalone host** — `apps/GuitarDSPApp/Main.cpp`,
+  `include/guitardsp/app/`, `src/app/` (`RealtimeAudioEngine`, `LiveRig`,
+  performance monitor, cabinet IR loading). Built behind the
+  `GUITARDSP_BUILD_AUDIO_APP` CMake option (CI builds it in a separate
+  `build-audio-app` job); not built by default. See
+  `docs/REALTIME_AUDIO_HOST.md`. This does **not** change the "keep the core
+  JUCE-free" rule below — the adapter depends on the core, never the reverse.
+- **`bench/`** — `MnaBenchmark.cpp` and `LiveRigBenchmark.cpp`, built behind
+  `GUITARDSP_BUILD_BENCHMARKS` (CI enables this for the main build/test job).
+
+When working in this repo, check what actually exists in `include/`, `src/`,
+`apps/`, `bench/`, `data/` and `tests/` rather than trusting a summary like
+this one at face value — this file has gone stale before as the codebase grew
+past what it described; re-verify claims about what is/isn't implemented
+against the code before relying on them.
 
 ## Architecture
 
@@ -37,27 +91,104 @@ simulation, netlist JSON loading, benchmarks) are already implemented.
   class: owns node instances, connections, topological scheduling, cycle
   detection and cumulative-latency analysis. `Graph::compile()` validates and
   builds the execution plan.
-- `tests/GraphTests.cpp` — unit tests for the graph core, run via CTest.
+- `include/guitardsp/circuit/` — the MNA circuit engine and its subcircuit
+  helpers (`MnaCircuitEngine.h`, `MnaCircuitEngineCore.h`,
+  `TriodeParasiticSubcircuit.h`, `PentodeParasiticSubcircuit.h`,
+  `TransformerSubcircuit.h`, `CircuitUpdateQueue.h` for realtime component
+  edits, `NetlistLoader.h`, `CircuitNetlist.h`, `TS808Circuit.h`,
+  `DS1Circuit.h`, `OperatingPointContinuation.h` for DC-priming continuation).
+  `docs/CIRCUIT_ENGINE_ARCHITECTURE.md` and `docs/CIRCUIT_NETLIST_FORMAT.md`
+  are the authoritative design docs for this layer — read them before adding
+  a new circuit element or pedal.
+- `include/guitardsp/hq/` — higher-quality DSP nodes: amp/cabinet families,
+  pedal topology nodes, oversampling/ADAA/measurement infrastructure. See
+  `docs/HQ_DSP.md`.
+- `apps/GuitarDSPApp/`, `include/guitardsp/app/`, `src/app/` — the optional
+  JUCE standalone host adapter (`GUITARDSP_BUILD_AUDIO_APP`). See
+  `docs/REALTIME_AUDIO_HOST.md`.
+- `bench/` — benchmark executables (`GUITARDSP_BUILD_BENCHMARKS`).
+- `tests/GraphTests.cpp` and the rest of `tests/` — unit tests for the graph
+  core, circuit engine, HQ nodes and app layer, run via CTest.
 - `docs/ARCHITECTURE.md` — the authoritative design document: connection
   semantics (split/merge/tap/send-return), the real-time contract, node
   families, quality/oversampling policy, and the full phase roadmap. Read this
   before making architectural changes.
 
 **Key constraint — keep the core JUCE-free.** `GuitarDSPGraphCore` (everything
-under `include/guitardsp/` and `src/`) is intentionally free of JUCE and any
-other heavyweight dependency so it stays portable and unit-testable without a
-GUI or audio device, and so it can eventually be ported to embedded targets
-(SHARC/PIC). When a JUCE host/app shell is added (Phase 2 of the roadmap in
-`docs/ARCHITECTURE.md`), it must live in a separate adapter layer that depends
-on the core, never the other way around. Be careful about introducing *any*
-new third-party dependency into the core — prefer the standard library.
+under `include/guitardsp/` and `src/`, including the circuit engine and HQ
+nodes) is intentionally free of JUCE and any other heavyweight dependency so
+it stays portable and unit-testable without a GUI or audio device, and so it
+can eventually be ported to embedded targets (SHARC/PIC). The JUCE host shell
+now lives in `apps/GuitarDSPApp/` as a separate adapter layer that depends on
+the core — never the other way around; do not let JUCE types leak back into
+`include/guitardsp/` or `src/graph/`, `src/app/` etc. that are part of
+`GuitarDSPGraphCore`. Be careful about introducing *any* new third-party
+dependency into the core — prefer the standard library.
 
-**Real-time contract.** The audio callback path (`AudioNode::process` and
-anything reachable from it) must not allocate, lock, touch the filesystem,
-parse JSON, or rebuild graph topology. Graph edits happen off the audio
-thread; a compiled, immutable execution plan is swapped in at a safe block
-boundary. Keep this invariant in mind for any change inside `src/graph/` or
-new DSP nodes.
+**Real-time contract.** The audio callback path (`AudioNode::process`,
+`MnaCircuitEngine::processSample`, `NetlistCircuit::processSample` and
+anything reachable from them) must not allocate, lock, touch the filesystem,
+parse JSON, or rebuild graph/circuit topology. Graph and circuit edits happen
+off the audio thread (e.g. `CircuitUpdateQueue` for topology-preserving
+component edits, `NetlistLoader`'s `loadFromFile`/`loadFromJson`/`prepare` for
+loading a netlist); a compiled, immutable execution plan/prepared circuit is
+swapped in at a safe block boundary. Keep this invariant in mind for any
+change inside `src/graph/`, `include/guitardsp/circuit/` or new DSP nodes.
+
+## Nonlinear solver design (read before adding a new nonlinear circuit element)
+
+`MnaCircuitEngineCore::processSample()` (in
+`include/guitardsp/circuit/MnaCircuitEngineCore.h`) globalizes each Newton
+step with a **backtracking line search**, not a fixed damping schedule.
+
+Why this matters for anyone adding a new nonlinear device stamp: an earlier
+version used a fixed damping factor (0.65 for the first 3 iterations, then
+0.85). That made the damped update a deterministic, time-invariant map, and
+around a high-gain feedback stage that map could have a locally repelling
+fixed point — so the Newton iterate could settle into an exact repeating
+limit cycle no matter how many iterations were allowed. This was reported as
+DS-1 silent-input hiss (issue #14) and later found to be a structural
+property of fixed damping itself, not specific to any one circuit (issue
+#16).
+
+The current design instead:
+
+- Computes a candidate full Newton step, then **halves the step (up to
+  `kMaxLineSearchBacktracks = 6` times)** until the trial state's residual
+  norm is non-increasing relative to the current candidate's. Because every
+  accepted step never increases the merit value, no state can exactly recur —
+  this rules out limit cycles structurally rather than by detecting one after
+  the fact. "Non-increasing" (not strictly decreasing) is deliberate: once a
+  circuit is within float precision of its operating point there's nothing
+  left to shrink, and a strict `<` would reject every alpha on noise alone.
+- Applies a **single shared scalar trust-region clamp** per iteration
+  (computed once across all node unknowns), rather than an independent
+  per-node clamp — an independent per-node clamp can break an exact linear
+  identity between two coupled unknowns (e.g. a floating voltage source's
+  `V_pos - V_neg = V_source` row, or a subcircuit's zero-volt current-sense
+  source) until the solve fully converges. The clamp's ceiling was raised
+  from 25 V to 60 V (issue #27) so pentode/beam-tetrode power stages with
+  400–800 V plate/screen rails still reach their operating point within a
+  handful of cold-start samples; low-voltage diode/BJT/JFET junctions are
+  unaffected since the clamp only engages above ~100 V candidates.
+- Falls back to the old fixed-damping step **only** when no backtrack finds a
+  non-increasing residual at all — i.e. the Newton direction genuinely wasn't
+  a descent direction (e.g. a JFET/MOSFET candidate sitting exactly on its
+  pinch-off/threshold kink, where the model's derivative collapses near
+  zero). This keeps that corner case exactly as robust as before line search
+  existed, without weakening the general limit-cycle guarantee.
+
+**Implication for new nonlinear elements:** don't add a bespoke fixed-damping
+schedule for a new device stamp — that's the exact class of bug this
+mechanism was built to eliminate structurally, and a local damping hack can
+silently reintroduce a limit cycle around a different feedback topology. New
+nonlinear stamps should rely on the shared line-search/trust-region machinery
+already in `MnaCircuitEngineCore.h`; if a new device needs special handling,
+extend that shared mechanism rather than special-casing damping per element.
+`OperatingPointContinuation.h` (source-stepping DC priming before audio-rate
+solving) is the separate mechanism for getting a circuit to a plausible
+starting operating point in the first place — it's not a substitute for the
+per-sample line search.
 
 ## Build, test
 
@@ -68,19 +199,47 @@ ctest --test-dir build --output-on-failure
 ```
 
 CI (`.github/workflows/ci.yml`) additionally configures with
-`-DGUITARDSP_GRAPH_WARNINGS_AS_ERRORS=ON`; consider building the same way
-locally before pushing:
+`-DGUITARDSP_GRAPH_WARNINGS_AS_ERRORS=ON -DGUITARDSP_BUILD_BENCHMARKS=ON`;
+consider building the same way locally before pushing:
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGUITARDSP_GRAPH_WARNINGS_AS_ERRORS=ON
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGUITARDSP_GRAPH_WARNINGS_AS_ERRORS=ON -DGUITARDSP_BUILD_BENCHMARKS=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-There is no `bench/` directory yet — benchmark targets referenced in future
-plans (e.g. live-rig or MNA-solver benchmarks) do not exist in the codebase
-today. If you add benchmarks, wire them into CMake and document how to run
-them here.
+CI also has a separate `build-audio-app` job that configures with
+`-DGUITARDSP_BUILD_AUDIO_APP=ON -DGUITARDSP_FETCH_JUCE=ON` and builds the
+`GuitarDSPApp` target; it's not part of the default configure above since it
+pulls in JUCE. Use the same flags locally (or `-DGUITARDSP_JUCE_PATH=...` to
+point at an existing JUCE checkout instead of fetching) if you're touching
+`apps/GuitarDSPApp/`, `include/guitardsp/app/` or `src/app/`.
+
+### Loading a JSON circuit netlist
+
+TS808/DS-1 can be driven from their JSON netlists (`data/circuits/ts808.json`,
+`ds1.json`) instead of the hand-written C++ classes, via
+`include/guitardsp/circuit/NetlistLoader.h`:
+
+```cpp
+#include "guitardsp/circuit/NetlistLoader.h"
+
+guitardsp::circuit::NetlistCircuit circuit;
+std::string error;
+if (!circuit.loadFromFile("data/circuits/ts808.json", &error)) { /* handle error */ }
+if (!circuit.prepare(48000.0, &error)) { /* handle error */ }
+circuit.setControl("drive", 0.6f);
+const float y = circuit.processSample(x); // real-time safe from here on
+```
+
+`loadFromFile`/`loadFromJson`/`prepare` are control-thread-only, same as any
+other circuit's `prepare()` — see the real-time contract above. Full format
+spec, op list and the `preset`/`spec` device-override mechanism are in
+`docs/CIRCUIT_NETLIST_FORMAT.md`. `tests/NetlistParityTests.cpp` is the
+regression that keeps a netlist and its hand-written equivalent numerically
+identical; if you add or edit a netlist op, keep both in mind. Note this
+format is a narrow, pedal-parity-focused schema — it is not the general
+`CircuitNetlist.h` schematic layer (see "Current state" above).
 
 ## Development rules
 
