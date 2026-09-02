@@ -57,15 +57,25 @@ Concretely:
   serialization/import of *this* layer (as opposed to the narrower
   TS808/DS-1-parity format above) is still future work — see "Next engine
   work" in `docs/CIRCUIT_ENGINE_ARCHITECTURE.md`.
-- **Amps and cabinets are still behavioral, not circuit-level.** Everything
-  under `include/guitardsp/hq/` for amps (`ReferenceAmpTopologyNode.h`,
-  `AmpFamilyNodes.h`, power-tube/tone-stack families, etc.) and cabinets
-  (`CabinetChainNode.h`, speaker dynamics + measured-IR convolution) is a
-  parameterized DSP-stage composition, not an MNA netlist. Component-level
-  (element-by-element) modelling of amps/cabinets has **not** started; see
-  the "Amp/cabinet netlist status" section at the bottom of
-  `docs/CIRCUIT_NETLIST_FORMAT.md`. Don't assume a netlist-ified amp/cab
-  exists just because TS808/DS-1 have one.
+- **Component-level amp stages exist and are netlist-ified, but the
+  `include/guitardsp/hq/` amp/cabinet families are not.**
+  `PreampCircuit.h`/`PowerAmpCircuit.h` (12AX7 common-cathode preamp +
+  Bass/Treble tone stack; EL34 single-ended power stage with output
+  transformer) are hand-written `guitardsp::circuit` classes built directly
+  on `MnaCircuitEngine`, the same pattern as TS808/DS-1, with JSON netlist
+  equivalents (`data/circuits/preamp.json`, `poweramp.json`) and parity tests
+  in `tests/NetlistParityTests.cpp`. `FullAmpCircuit.h` cascades the two as
+  independent engines rather than one combined netlist (see its header
+  comment for why). See "New amp work" below for the policy this sets for
+  future amp stages. This does *not* extend to `include/guitardsp/hq/`'s amp
+  families (`ReferenceAmpTopologyNode.h`, `AmpFamilyNodes.h`,
+  power-tube/tone-stack families, etc.) or cabinets (`CabinetChainNode.h`,
+  speaker dynamics + measured-IR convolution) — those are still parameterized
+  DSP-stage compositions, not MNA netlists, and re-modelling them at the
+  component level has **not** started; see the "Amp/cabinet netlist status"
+  section at the bottom of `docs/CIRCUIT_NETLIST_FORMAT.md`. Don't assume a
+  netlist-ified equivalent of one of those `hq/` amp families exists just
+  because PreampCircuit/PowerAmpCircuit/TS808/DS-1 have one.
 - **JUCE standalone host** — `apps/GuitarDSPApp/Main.cpp`,
   `include/guitardsp/app/`, `src/app/` (`RealtimeAudioEngine`, `LiveRig`,
   performance monitor, cabinet IR loading). Built behind the
@@ -240,6 +250,34 @@ regression that keeps a netlist and its hand-written equivalent numerically
 identical; if you add or edit a netlist op, keep both in mind. Note this
 format is a narrow, pedal-parity-focused schema — it is not the general
 `CircuitNetlist.h` schematic layer (see "Current state" above).
+
+## New amp work: MNA-first policy
+
+(Established in issue #43, superseding an earlier scoping call in issue #24
+that treated amp netlist-ification as out of scope — at that point the only
+amp models in the repo were `include/guitardsp/hq/`'s parameterized DSP-stage
+compositions, which genuinely aren't representable in the netlist format.
+`PreampCircuit`/`PowerAmpCircuit` didn't exist yet.)
+
+**New amp stages should be implemented as component-level MNA circuits
+following the `PreampCircuit`/`PowerAmpCircuit` pattern** — a hand-written
+`guitardsp::circuit` class built directly on `MnaCircuitEngine` and its
+subcircuit helpers (`TriodeParasiticSubcircuit.h`,
+`PentodeParasiticSubcircuit.h`, `TransformerSubcircuit.h`, etc.), the same
+discipline TS808/DS-1 already follow — **with a JSON netlist
+(`data/circuits/*.json`) and a `tests/NetlistParityTests.cpp` parity check
+added in the same change**, not deferred as follow-up work. See
+`docs/CIRCUIT_NETLIST_FORMAT.md` for the `triodeParasitic`/
+`pentodeParasitic`/`transformer` ops this requires.
+
+This does not retroactively require netlist-ifying (or otherwise touching)
+the existing behavioral `include/guitardsp/hq/` amp families
+(`ReferenceAmpTopologyNode.h`, `AmpFamilyNodes.h`, etc.) — re-modelling those
+at the component level is a separate, larger effort and out of scope here.
+A multi-stage amp that cascades independently-prepared circuits (see
+`FullAmpCircuit.h`) does not need one combined netlist either: cascading two
+separately-loaded `NetlistCircuit`s reproduces the same signal path (see
+"Amp/cabinet netlist status" in `docs/CIRCUIT_NETLIST_FORMAT.md`).
 
 ## Development rules
 

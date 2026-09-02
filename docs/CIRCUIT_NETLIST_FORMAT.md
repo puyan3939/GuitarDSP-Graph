@@ -3,7 +3,7 @@
 This document specifies the JSON format loaded by
 `include/guitardsp/circuit/NetlistLoader.h` (`guitardsp::circuit::NetlistCircuit`)
 and used by `data/circuits/ts808.json` / `data/circuits/ds1.json` /
-`data/circuits/preamp.json`.
+`data/circuits/preamp.json` / `data/circuits/poweramp.json`.
 
 ## Why this format exists
 
@@ -78,6 +78,8 @@ ground node is always available as `"ground"`.
 | `bjtEbersMoll`  | `name`, `collector`, `base`, `emitter`, `preset`\|`spec` (with `overrides`)| (none) |
 | `diodeParasitic`| `name`, `anode`, `cathode`, `preset`\|`spec` (with `overrides`)          | (none) |
 | `triodeParasitic`| `name`, `plate`, `grid`, `cathode`, `preset`\|`spec` (with `overrides`) | (none) |
+| `pentodeParasitic`| `name`, `plate`, `grid`, `screen`, `cathode`, `preset`\|`spec` (with `overrides`) | (none) |
+| `transformer`   | `name`, `primaryPositive`, `primaryNegative`, `secondaryPositive`, `secondaryNegative`, `spec` | (none) |
 
 Notes:
 
@@ -99,6 +101,23 @@ Notes:
   grid/cathode Koren-model triode stamp plus its Cgp/Cgk/Cpk parasitic
   capacitances and positive-grid-current diode, exactly as PreampCircuit uses
   it. Built-in presets: `"12ax7"`, `"12at7"`.
+- `pentodeParasitic` compiles to `addPentodeParasiticSubcircuit` — the plate/
+  grid/screen/cathode pentode stamp plus its Cgp/Cgk/Cpk/Csk parasitic
+  capacitances and positive-grid-current diode, exactly as PowerAmpCircuit
+  uses it. Built-in presets: `"el34"`, `"6l6gc"`, `"kt88"`.
+- `transformer` compiles to `addTransformerSubcircuit` — primary/secondary
+  leakage and winding resistance, a magnetizing inductance, an ideal-ratio
+  VCVS+CCCS pair, a zero-volt secondary current sensor and an interwinding
+  capacitor, exactly as PowerAmpCircuit's output transformer uses it. Unlike
+  the other nonlinear ops it has no catalog preset (`hq::TransformerSpec` has
+  no `component_presets` entry), so `spec` must supply every field explicitly
+  — see `data/circuits/poweramp.json`. `NetlistCircuit::processSample()`
+  (and its silent warm-up in `prepare()`) re-saturates every declared
+  transformer's magnetizing inductance after each sample, mirroring
+  `PowerAmpCircuit::updateOutputTransformerSaturation()` exactly, including
+  the "only push an update through when it moved more than float noise"
+  guard that avoids forcing a static-matrix-cache rebuild every sample at
+  idle.
 - `technology` (capacitor) is one of `"generic"`, `"ceramic"`, `"film"`,
   `"electrolytic"`, `"tantalum"`. `taper` (potentiometer) is one of
   `"linear"`, `"audio"`, `"reverseAudio"`.
@@ -200,11 +219,24 @@ same as any other circuit's `prepare()`.
 ## Amp/cabinet netlist status
 
 This format was designed to bring TS808/DS-1 to numerical parity as the
-first data-driven pedals (see the issue discussion for why amps/cabinets are
-a separate, larger effort): amp models under `include/guitardsp/hq/`
+first data-driven pedals; component-level amp stages built directly on
+`MnaCircuitEngine` (`PreampCircuit`, `PowerAmpCircuit`) have since reached the
+same parity, via `data/circuits/preamp.json` / `poweramp.json` and the
+`triodeParasitic`/`pentodeParasitic`/`transformer` ops above (see issue #43).
+`FullAmpCircuit` (`include/guitardsp/circuit/FullAmpCircuit.h`) cascades
+`PreampCircuit`'s and `PowerAmpCircuit`'s `processSample()` calls rather than
+sharing one `MnaCircuitEngine`, so it is netlist-ified today as two separate
+netlists driven in series (load `preamp.json` and `poweramp.json` into two
+`NetlistCircuit` instances and feed one's output into the other's input) —
+there is no single combined `fullamp.json` document, and adding one would
+require merging both circuits into one `MnaCircuitEngine` (see
+`FullAmpCircuit.h`'s comment on why that was deferred).
+
+What is still out of scope: amp models under `include/guitardsp/hq/`
 (`ReferenceAmpTopologyNode.h`, `AmpFamilyNodes.h`, etc.) are parameterized DSP
 stage compositions, not `guitardsp::circuit` MNA netlists, so they are not
 representable in this format without first re-modelling them at the
-component level. Cabinets (`CabinetChainNode.h`) are speaker-dynamics plus
-measured-impulse-response convolution, not a circuit network, so they are
-out of scope for netlist-ification entirely.
+component level — see the policy in `CLAUDE.md` for new amp work. Cabinets
+(`CabinetChainNode.h`) are speaker-dynamics plus measured-impulse-response
+convolution, not a circuit network, so they are out of scope for
+netlist-ification entirely.

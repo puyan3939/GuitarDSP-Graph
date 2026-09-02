@@ -23,6 +23,8 @@
 #include "DynamicOpAmpSubcircuit.h"
 #include "JsonValue.h"
 #include "MnaCircuitEngine.h"
+#include "PentodeParasiticSubcircuit.h"
+#include "TransformerSubcircuit.h"
 #include "TriodeParasiticSubcircuit.h"
 
 #include <algorithm>
@@ -99,6 +101,7 @@ public:
         voltageSources_.clear();
         namePool_.clear();
         potInitialPosition_.clear();
+        transformers_.clear();
         nodes_.emplace("ground", ground);
 
         const JsonValue& ops = document_["ops"];
@@ -159,6 +162,7 @@ public:
             engine_.setVoltageSource(inputSource_, 0.0f);
             lastSolve_ = engine_.processSample(sim_.newtonMaxIterations, sim_.newtonTolerance);
             if (lastSolve_.singular || !allNodesFinite()) return fail("circuit diverged during warm-up");
+            updateTransformerSaturation();
         }
         return true;
     }
@@ -171,6 +175,7 @@ public:
             appliedControls_[name] = value;
             engine_.setPotentiometerPosition(pots_[binding.pot], binding.invert ? 1.0f - value : value);
         }
+        for (auto& transformer : transformers_) transformer.lastMagnetizingInductanceHenries = -1.0f;
         lastSolve_ = {};
     }
 
@@ -195,6 +200,7 @@ public:
         applySmoothedControls();
         engine_.setVoltageSource(inputSource_, input);
         lastSolve_ = engine_.processSample(sim_.newtonMaxIterations, sim_.newtonTolerance);
+        updateTransformerSaturation();
         const float out = engine_.voltage(outputNode_);
         if (lastSolve_.singular || !std::isfinite(out)) return 0.0f;
         return out;
@@ -224,6 +230,15 @@ private:
         float newtonTolerance = 2.0e-5f;
         float supplyVolts = 9.0f;
         float vrefVolts = 4.5f;
+    };
+
+    // Bookkeeping for a "transformer" op's magnetizing inductance so it can
+    // be re-saturated after every sample, matching PowerAmpCircuit's own
+    // per-sample updateOutputTransformerSaturation().
+    struct TransformerEntry {
+        TransformerSubcircuit handles{};
+        hq::TransformerSpec spec{};
+        float lastMagnetizingInductanceHenries = -1.0f;
     };
 
     bool resolveNode(const JsonValue& container, const char* key, Node& out) const {
@@ -376,6 +391,47 @@ private:
         return spec;
     }
 
+    hq::PentodeSpec pentodeSpecFrom(const JsonValue& op) {
+        hq::PentodeSpec spec = op.has("preset") ? presetPentode(op["preset"].asString()) : hq::PentodeSpec{};
+        const JsonValue& overrides = op.has("spec") ? op["spec"] : op["overrides"];
+        if (overrides.has("name")) spec.name = intern(overrides["name"].asString());
+        if (overrides.has("heaterVoltage")) spec.heaterVoltage = overrides["heaterVoltage"].asFloat();
+        if (overrides.has("nominalPlateVoltage")) spec.nominalPlateVoltage = overrides["nominalPlateVoltage"].asFloat();
+        if (overrides.has("maxPlateVoltage")) spec.maxPlateVoltage = overrides["maxPlateVoltage"].asFloat();
+        if (overrides.has("nominalScreenVoltage")) spec.nominalScreenVoltage = overrides["nominalScreenVoltage"].asFloat();
+        if (overrides.has("maxScreenVoltage")) spec.maxScreenVoltage = overrides["maxScreenVoltage"].asFloat();
+        if (overrides.has("maxPlateDissipationWatts")) spec.maxPlateDissipationWatts = overrides["maxPlateDissipationWatts"].asFloat();
+        if (overrides.has("maxScreenDissipationWatts")) spec.maxScreenDissipationWatts = overrides["maxScreenDissipationWatts"].asFloat();
+        if (overrides.has("gridPlateCapacitanceFarads")) spec.gridPlateCapacitanceFarads = overrides["gridPlateCapacitanceFarads"].asFloat();
+        if (overrides.has("gridCathodeCapacitanceFarads")) spec.gridCathodeCapacitanceFarads = overrides["gridCathodeCapacitanceFarads"].asFloat();
+        if (overrides.has("plateCathodeCapacitanceFarads")) spec.plateCathodeCapacitanceFarads = overrides["plateCathodeCapacitanceFarads"].asFloat();
+        if (overrides.has("screenCathodeCapacitanceFarads")) spec.screenCathodeCapacitanceFarads = overrides["screenCathodeCapacitanceFarads"].asFloat();
+        if (overrides.has("gridCurrentSaturationAmps")) spec.gridCurrentSaturationAmps = overrides["gridCurrentSaturationAmps"].asFloat();
+        if (overrides.has("gridCurrentEmissionCoefficient")) spec.gridCurrentEmissionCoefficient = overrides["gridCurrentEmissionCoefficient"].asFloat();
+        return spec;
+    }
+
+    // Transformers have no catalog preset today (PowerAmpCircuit builds its
+    // output transformer's hq::TransformerSpec inline, not from
+    // component_presets), so a netlist always supplies every field via
+    // "spec" rather than the preset+overrides pattern used elsewhere.
+    hq::TransformerSpec transformerSpecFrom(const JsonValue& op) {
+        hq::TransformerSpec spec{};
+        const JsonValue& overrides = op["spec"];
+        if (overrides.has("name")) spec.name = intern(overrides["name"].asString());
+        if (overrides.has("primaryInductanceHenries")) spec.primaryInductanceHenries = overrides["primaryInductanceHenries"].asFloat();
+        if (overrides.has("leakageInductanceHenries")) spec.leakageInductanceHenries = overrides["leakageInductanceHenries"].asFloat();
+        if (overrides.has("primaryResistanceOhms")) spec.primaryResistanceOhms = overrides["primaryResistanceOhms"].asFloat();
+        if (overrides.has("secondaryResistanceOhms")) spec.secondaryResistanceOhms = overrides["secondaryResistanceOhms"].asFloat();
+        if (overrides.has("turnsRatio")) spec.turnsRatio = overrides["turnsRatio"].asFloat();
+        if (overrides.has("interwindingCapacitanceFarads")) spec.interwindingCapacitanceFarads = overrides["interwindingCapacitanceFarads"].asFloat();
+        if (overrides.has("saturationFluxNormalized")) spec.saturationFluxNormalized = overrides["saturationFluxNormalized"].asFloat();
+        if (overrides.has("magnetizingSaturationCurrentAmps")) spec.magnetizingSaturationCurrentAmps = overrides["magnetizingSaturationCurrentAmps"].asFloat();
+        if (overrides.has("coreSaturationExponent")) spec.coreSaturationExponent = overrides["coreSaturationExponent"].asFloat();
+        if (overrides.has("minimumMagnetizingInductanceRatio")) spec.minimumMagnetizingInductanceRatio = overrides["minimumMagnetizingInductanceRatio"].asFloat();
+        return spec;
+    }
+
     static hq::DiodeSpec presetDiode(const std::string& name) noexcept {
         if (name == "1n34a") return hq::component_presets::oneN34A();
         if (name == "redLed") return hq::component_presets::redLed();
@@ -392,6 +448,11 @@ private:
     static hq::TriodeSpec presetTriode(const std::string& name) noexcept {
         if (name == "12at7") return hq::component_presets::twelveAT7();
         return hq::component_presets::twelveAX7();
+    }
+    static hq::PentodeSpec presetPentode(const std::string& name) noexcept {
+        if (name == "6l6gc") return hq::component_presets::pentodeSixL6GC();
+        if (name == "kt88") return hq::component_presets::pentodeKt88();
+        return hq::component_presets::pentodeEl34();
     }
 
     bool applyOp(const JsonValue& op, std::string* error) {
@@ -495,6 +556,28 @@ private:
             addTriodeParasiticSubcircuit(engine_, plate, grid, cathode, triodeSpecFrom(op));
             return true;
         }
+        if (kind == "pentodeParasitic") {
+            const Node plate = requireNode(op, "plate", ok);
+            const Node grid = requireNode(op, "grid", ok);
+            const Node screen = requireNode(op, "screen", ok);
+            const Node cathode = requireNode(op, "cathode", ok);
+            if (!ok) return fail("pentodeParasitic references unknown node");
+            addPentodeParasiticSubcircuit(engine_, plate, grid, screen, cathode, pentodeSpecFrom(op));
+            return true;
+        }
+        if (kind == "transformer") {
+            const Node primaryPositive = requireNode(op, "primaryPositive", ok);
+            const Node primaryNegative = requireNode(op, "primaryNegative", ok);
+            const Node secondaryPositive = requireNode(op, "secondaryPositive", ok);
+            const Node secondaryNegative = requireNode(op, "secondaryNegative", ok);
+            if (!ok) return fail("transformer references unknown node");
+            TransformerEntry entry;
+            entry.spec = transformerSpecFrom(op);
+            entry.handles = addTransformerSubcircuit(engine_, primaryPositive, primaryNegative,
+                                                       secondaryPositive, secondaryNegative, entry.spec);
+            transformers_.push_back(entry);
+            return true;
+        }
         return fail("unknown netlist op '" + kind + "'");
     }
 
@@ -526,6 +609,28 @@ private:
             }
         }
         return true;
+    }
+
+    // Mirrors PowerAmpCircuit::updateOutputTransformerSaturation(): only push
+    // an updated magnetizing inductance through when it has moved by more
+    // than float noise, since MnaCircuitEngine::setInductorSpec()
+    // unconditionally dirties the static matrix cache and forces a full
+    // rebuild on the next solve (see MnaCircuitEngineCore::
+    // rebuildStaticCache()). Committing on every sample -- even at idle,
+    // where the magnetizing current barely moves -- would force that rebuild
+    // every single sample for no audible benefit.
+    void updateTransformerSaturation() noexcept {
+        for (auto& transformer : transformers_) {
+            const float current = engine_.inductorCurrent(
+                static_cast<std::size_t>(transformer.handles.magnetizing));
+            const float inductance = detail::saturatedMagnetizingInductance(transformer.spec, current);
+            const float threshold = std::max(1.0e-9f, std::abs(transformer.lastMagnetizingInductanceHenries) * 1.0e-4f);
+            if (std::abs(inductance - transformer.lastMagnetizingInductanceHenries) > threshold) {
+                engine_.setInductorSpec(transformer.handles.magnetizing,
+                                        detail::magnetizingSpec(transformer.spec, inductance));
+                transformer.lastMagnetizingInductanceHenries = inductance;
+            }
+        }
     }
 
     bool allNodesFinite() const noexcept {
@@ -578,6 +683,7 @@ private:
     std::unordered_map<std::string, PotHandle> pots_;
     std::unordered_map<std::string, float> potInitialPosition_;
     std::unordered_map<std::string, SourceHandle> voltageSources_;
+    std::vector<TransformerEntry> transformers_;
     std::unordered_map<std::string, ControlBinding> controls_;
     std::unordered_map<std::string, float> targetControls_;
     std::unordered_map<std::string, float> appliedControls_;
