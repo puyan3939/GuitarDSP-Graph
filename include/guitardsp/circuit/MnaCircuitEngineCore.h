@@ -360,6 +360,7 @@ public:
         rhs_.assign(dimension_, 0.0f);
         solution_.assign(dimension_, 0.0f);
         candidate_.assign(dimension_, 0.0f);
+        lineSearchCandidate_.assign(dimension_, 0.0f);
         previousSampleSolution_.assign(dimension_, 0.0f);
         workMatrix_.assign(matrixSize, 0.0f);
         workRhs_.assign(dimension_, 0.0f);
@@ -480,12 +481,26 @@ public:
             stampNonlinear(candidate_, usesPreparedSparse);
             ++performanceStats_.nonlinearAssemblies;
 
-            if (iteration > 0 && usesPreparedSparse
-                && (candidateFromFullSparseSolve
-                    ? sparseSolver_.validateNonlinear(matrix_, rhs_, candidate_,
-                        nonlinearResidualTolerance_)
-                    : sparseSolver_.validate(matrix_, rhs_, candidate_,
-                        nonlinearResidualTolerance_))) {
+            if (iteration > 0
+                && (usesPreparedSparse
+                        ? (candidateFromFullSparseSolve
+                            ? sparseSolver_.validateNonlinear(matrix_, rhs_, candidate_,
+                                nonlinearResidualTolerance_)
+                            : sparseSolver_.validate(matrix_, rhs_, candidate_,
+                                nonlinearResidualTolerance_))
+                        // The dense/general path has no equivalent cheap check, so it
+                        // is only worth the extra pass once few iterations remain:
+                        // a candidate can sit on a device's pinch-off/threshold kink
+                        // or at a floating-point noise floor where the Jacobian is
+                        // near-singular and every remaining Newton step overshoots
+                        // or oscillates despite already satisfying the nonlinear
+                        // equations well. Restricting it to the last few iterations
+                        // keeps ordinary dense solves (already converging well
+                        // before the budget runs out, e.g. the accelerated-nonlinear
+                        // performance-counter fixtures) taking exactly one general
+                        // solve per assembly, unchanged from before line search.
+                        : (iteration + 3 >= maximumNewtonIterations
+                            && scaledResidualNorm(candidate_) <= nonlinearResidualTolerance_))) {
                 // Evaluate the actual nonlinear circuit equations at the current
                 // candidate before factoring their Jacobian again. Near an
                 // op-amp operating point, float-sized voltage jitter can keep
@@ -498,6 +513,11 @@ public:
                 ++performanceStats_.nonlinearResidualConvergences;
                 break;
             }
+
+            // Merit value for the backtracking line search below: the residual of
+            // the current candidate under this iteration's freshly stamped
+            // Jacobian/companion sources, before any step is taken.
+            const float candidateResidual = residualNorm(candidate_);
 
             bool solved = false;
             bool usedSparseSolve = false;
@@ -579,26 +599,107 @@ public:
                 candidateFromFullSparseSolve = true;
             } else {
                 candidateFromFullSparseSolve = false;
-                const float damping = iteration < 3 ? 0.65f : 0.85f;
-                for (std::size_t i = 0; i < dimension_; ++i) {
+                // Globalize the Newton step with backtracking line search instead of
+                // unconditionally applying a fixed damping schedule. A fixed factor
+                // (previously 0.65 for the first 3 iterations, then 0.85) makes the
+                // damped update a deterministic, time-invariant map; around a
+                // high-gain feedback stage that map can have a locally repelling
+                // fixed point, so the iterate can settle into an exact repeating
+                // cycle instead of converging, no matter how many iterations are
+                // allowed (issue #14, reported as DS-1 silent-input hiss, later
+                // found to be a structural property of the fixed-damping scheme
+                // itself and not specific to any one circuit -- issue #16). Halving
+                // the step until the trial state strictly lowers the residual below
+                // the current candidate's is a standard globalization of Newton's
+                // method: because every accepted step strictly decreases the merit
+                // value, no state can ever recur, which rules a stable cycle out
+                // structurally rather than by detecting and reacting to one after
+                // the fact.
+                constexpr int kMaxLineSearchBacktracks = 6;
+
+                // Trust-region bound as a single shared scale rather than an
+                // independent per-node clamp. Two node unknowns can be tied
+                // together by an exact linear identity the rest of the Newton
+                // solve depends on -- e.g. a floating voltage source's own row,
+                // V_pos - V_neg = V_source, or the Ebers-Moll subcircuit's
+                // zero-volt current-sense sources -- and clamping each side's step
+                // to its own magnitude-scaled bound independently can shift the
+                // two sides by different fractions of their raw step, breaking
+                // that identity for every candidate until the solve fully
+                // converges. Finding one scale that satisfies every node's bound
+                // and applying it uniformly keeps any such identity intact at
+                // every trial, exactly as an unclamped full step would.
+                float trustRegionScale = 1.0f;
+                for (std::size_t i = 0; i < nodeCount_; ++i) {
+                    if (i < fixedVoltageNodes_.size() && fixedVoltageNodes_[i] != 0U) continue;
                     const float rawDelta = solution_[i] - candidate_[i];
-                    if (i < nodeCount_) {
-                        if (i < fixedVoltageNodes_.size() && fixedVoltageNodes_[i] != 0U) {
-                            candidate_[i] = solution_[i];
+                    const float scale = std::max(1.0f, std::abs(candidate_[i]));
+                    // Raised from 25 V to 60 V (issue #27) so pentode/beam-tetrode
+                    // power stages, whose plate/screen rails sit at 400-800 V, still
+                    // reach their operating point within a handful of cold-start
+                    // samples. The clamp only engages once |candidate| exceeds ~100 V
+                    // (0.25 * scale > 25), so low-voltage diode/BJT/JFET junctions see
+                    // no change from this and keep their original tight step limit.
+                    const float maximumStep = std::clamp(0.25f * scale, 0.25f, 60.0f);
+                    const float absRawDelta = std::abs(rawDelta);
+                    if (absRawDelta > maximumStep)
+                        trustRegionScale = std::min(trustRegionScale, maximumStep / absRawDelta);
+                }
+
+                const auto buildTrial = [&](float alpha) noexcept {
+                    const float effectiveAlpha = alpha * trustRegionScale;
+                    for (std::size_t i = 0; i < dimension_; ++i) {
+                        if (i < nodeCount_ && i < fixedVoltageNodes_.size()
+                            && fixedVoltageNodes_[i] != 0U) {
+                            lineSearchCandidate_[i] = solution_[i];
                             continue;
                         }
-                        const float scale = std::max(1.0f, std::abs(candidate_[i]));
-                        // Raised from 25 V to 60 V (issue #27) so pentode/beam-tetrode
-                        // power stages, whose plate/screen rails sit at 400-800 V, still
-                        // reach their operating point within a handful of cold-start
-                        // samples. The clamp only engages once |candidate| exceeds ~100 V
-                        // (0.25 * scale > 25), so low-voltage diode/BJT/JFET junctions see
-                        // no change from this and keep their original tight step limit.
-                        const float maximumStep = std::clamp(0.25f * scale, 0.25f, 60.0f);
-                        candidate_[i] += damping * std::clamp(rawDelta, -maximumStep, maximumStep);
-                    } else {
-                        candidate_[i] += damping * rawDelta;
+                        lineSearchCandidate_[i] = candidate_[i]
+                            + effectiveAlpha * (solution_[i] - candidate_[i]);
                     }
+                };
+
+                float alpha = 1.0f;
+                bool lineSearchAccepted = false;
+                for (int backtrack = 0; backtrack < kMaxLineSearchBacktracks; ++backtrack) {
+                    buildTrial(alpha);
+                    for (const auto index : nonlinearMatrixIndices_)
+                        matrix_[index] = staticMatrix_[index];
+                    for (const auto row : nonlinearRhsIndices_)
+                        rhs_[row] = sampleRhs_[row];
+                    stampNonlinear(lineSearchCandidate_, usesPreparedSparse);
+                    const float trialResidual = residualNorm(lineSearchCandidate_);
+                    // Accept a non-increasing residual, not only a strictly
+                    // decreasing one. Once a circuit is within float precision of
+                    // its true operating point, the residual has nothing left to
+                    // shrink and a strict "<" can reject every alpha on noise
+                    // alone, forcing the fixed-damping fallback below on every
+                    // remaining iteration and burning the whole iteration budget
+                    // without ever setting stats.converged. Rejecting only an
+                    // actual increase still blocks a genuine repeating cycle
+                    // (issue #14/#16), since a cycle's states are not exactly
+                    // equal in residual by coincidence every step.
+                    if (trialResidual <= candidateResidual) {
+                        candidate_ = lineSearchCandidate_;
+                        lineSearchAccepted = true;
+                        break;
+                    }
+                    alpha *= 0.5f;
+                }
+
+                if (!lineSearchAccepted) {
+                    // The Newton direction was not a descent direction of the
+                    // residual at any of the alphas tried -- e.g. a JFET/MOSFET
+                    // candidate sitting exactly on its pinch-off/threshold kink,
+                    // where the channel model's derivative collapses to near zero
+                    // and the raw Newton step overshoots wildly without actually
+                    // being wrong. Falling back to the original fixed-damping step
+                    // keeps this case exactly as robust as before line search
+                    // existed, rather than forcing acceptance of a trial already
+                    // known to make the residual worse.
+                    const float damping = iteration < 3 ? 0.65f : 0.85f;
+                    buildTrial(damping);
+                    candidate_ = lineSearchCandidate_;
                 }
             }
 
@@ -1200,6 +1301,60 @@ private:
         stampLinearizedCurrent(device.screen, device.cathode, screenCurrent, guess, screenJac);
     }
 
+    // Plain (unweighted) Euclidean norm of the KCL residual F(x) = A x - b for the
+    // system currently stamped into matrix_/rhs_. Because nonlinear device stamps
+    // are Newton-Raphson companion models linearized at their own guess, this is
+    // the true residual of the nonlinear circuit equations at x, not an artifact
+    // of the linearization. Deliberately left unscaled: the backtracking line
+    // search further down relies on this being exactly ||F(x)|| under a *fixed*
+    // norm, since that is what guarantees a Newton step is a descent direction of
+    // the merit as alpha -> 0. An earlier version divided each row by a per-row
+    // scale that itself depended on x (a backward-error style residual, like
+    // FixedPatternSparseSolver's own validate()); that additional x-dependence
+    // broke the descent guarantee and line search would chase a residual that
+    // kept climbing as alpha shrank instead of settling back to the untouched
+    // candidate's value.
+    float residualNorm(const std::vector<float>& x) const noexcept {
+        double sumSquares = 0.0;
+        for (std::size_t row = 0; row < dimension_; ++row) {
+            double sum = -static_cast<double>(rhs_[row]);
+            const std::size_t base = row * dimension_;
+            for (std::size_t col = 0; col < dimension_; ++col) {
+                const float a = matrix_[base + col];
+                if (a == 0.0f) continue;
+                sum += static_cast<double>(a) * x[col];
+            }
+            sumSquares += sum * sum;
+        }
+        return static_cast<float>(std::sqrt(sumSquares));
+    }
+
+    // Scaled backward-error residual, matching the style FixedPatternSparseSolver
+    // uses to validate a solve (and the same nonlinearResidualTolerance_ scale).
+    // Used only as a single-point threshold test -- is this one candidate already
+    // physically converged? -- never to compare two different candidates against
+    // each other, so unlike residualNorm's line-search use there is no
+    // descent-direction guarantee to preserve, and the fact that its per-row scale
+    // depends on x is harmless.
+    float scaledResidualNorm(const std::vector<float>& x) const noexcept {
+        float worst = 0.0f;
+        for (std::size_t row = 0; row < dimension_; ++row) {
+            double sum = -static_cast<double>(rhs_[row]);
+            double scale = std::abs(static_cast<double>(rhs_[row]));
+            const std::size_t base = row * dimension_;
+            for (std::size_t col = 0; col < dimension_; ++col) {
+                const float a = matrix_[base + col];
+                if (a == 0.0f) continue;
+                const double term = static_cast<double>(a) * x[col];
+                sum += term;
+                scale += std::abs(term);
+            }
+            const double backwardError = std::abs(sum) / std::max(1.0e-12, scale);
+            worst = std::max(worst, static_cast<float>(backwardError));
+        }
+        return worst;
+    }
+
     void stampNonlinear(const std::vector<float>& guess,
                         bool reuseJunctionVoltage) noexcept {
         for (auto& d : diodes_) {
@@ -1521,6 +1676,7 @@ private:
     std::vector<float> rhs_;
     std::vector<float> solution_;
     std::vector<float> candidate_;
+    std::vector<float> lineSearchCandidate_;
     std::vector<float> previousSampleSolution_;
     std::vector<float> workMatrix_;
     std::vector<float> workRhs_;

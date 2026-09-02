@@ -384,6 +384,107 @@ int main() {
     }
 
     {
+        // Newton solver robustness sweep (issue #16): rather than checking a single
+        // hand-picked bias point, this cold-starts a fresh pentode stage at every
+        // grid bias from deep cutoff to near-zero and requires every one of them to
+        // converge. Pentode plate current is a stronger, more kinked nonlinearity
+        // than the triode/BJT/diode stages exercised elsewhere, so this is the
+        // most direct test of the claim that a physically valid pentode circuit
+        // converges numerically regardless of where its operating point lands.
+        bool allConverged = true;
+        for (int step = 0; step <= 8; ++step) {
+            const float gridBias = -150.0f + step * (145.0f / 8.0f);
+            circuit::MnaCircuitEngine c;
+            const auto plateSupply = c.addNode();
+            const auto screenSupply = c.addNode();
+            const auto grid = c.addNode();
+            const auto plate = c.addNode();
+            const auto screen = c.addNode();
+            hq::ResistorSpec plateLoad{};
+            plateLoad.resistanceOhms = 4000.0f;
+            hq::ResistorSpec screenLoad{};
+            screenLoad.resistanceOhms = 470.0f;
+            c.addVoltageSource(plateSupply, circuit::ground, 420.0f);
+            c.addVoltageSource(screenSupply, circuit::ground, 420.0f);
+            c.addVoltageSource(grid, circuit::ground, gridBias);
+            c.addResistor(plateSupply, plate, plateLoad);
+            c.addResistor(screenSupply, screen, screenLoad);
+            c.addPentode(plate, grid, screen, circuit::ground, hq::component_presets::pentodeEl34());
+            const bool prepared = c.prepare(48000.0);
+            const auto stats = settlePentode(c, 8);
+            const bool healthy = prepared && !stats.singular && stats.converged
+                && std::isfinite(c.voltage(plate)) && std::isfinite(c.voltage(screen));
+            std::cout << "DIAG pentode-sweep gridBias=" << gridBias
+                      << " plate=" << c.voltage(plate) << " converged=" << stats.converged
+                      << " singular=" << stats.singular << '\n';
+            allConverged &= healthy;
+        }
+        ok &= require(allConverged,
+                      "pentode Newton solve converges across the full cutoff-to-near-zero grid bias sweep");
+    }
+
+    {
+        // Audio-rate companion to the DC sweep above: a pentode gain stage driven
+        // hard and then cut to silence, mirroring the exact repro shape that
+        // caught DS-1's original Newton-limit-cycle hiss (issue #14/#16). Pentode
+        // plate current is more sharply nonlinear than DS-1's op-amp stage, so a
+        // clean, low-jitter settle here is the strongest available check that the
+        // engine-level line search generalizes beyond the circuit it was
+        // diagnosed on.
+        circuit::MnaCircuitEngine c;
+        const auto plateSupply = c.addNode();
+        const auto screenSupply = c.addNode();
+        const auto grid = c.addNode();
+        const auto plate = c.addNode();
+        const auto screen = c.addNode();
+        hq::ResistorSpec plateLoad{};
+        plateLoad.resistanceOhms = 4000.0f;
+        hq::ResistorSpec screenLoad{};
+        screenLoad.resistanceOhms = 470.0f;
+        c.addVoltageSource(plateSupply, circuit::ground, 420.0f);
+        c.addVoltageSource(screenSupply, circuit::ground, 420.0f);
+        const auto gridSource = c.addVoltageSource(grid, circuit::ground, -20.0f);
+        c.addResistor(plateSupply, plate, plateLoad);
+        c.addResistor(screenSupply, screen, screenLoad);
+        c.addPentode(plate, grid, screen, circuit::ground, hq::component_presets::pentodeEl34());
+        ok &= require(c.prepare(48000.0), "MNA prepares a driven pentode gain stage");
+
+        constexpr int driveSamples = 2048;
+        for (int i = 0; i < driveSamples; ++i) {
+            const double phase = 2.0 * 3.14159265358979323846 * 120.0
+                * static_cast<double>(i) / 48000.0;
+            c.setVoltageSource(gridSource, -20.0f + 15.0f * static_cast<float>(std::sin(phase)));
+            c.processSample(40, 1.0e-5f);
+        }
+
+        c.setVoltageSource(gridSource, -20.0f);
+        constexpr int silentSamples = 2048;
+        double sumSquaredJitter = 0.0;
+        bool healthy = true;
+        int unconverged = 0;
+        c.processSample(40, 1.0e-5f); // let the step from oscillating drive to fixed bias settle first
+        float previous = c.voltage(plate);
+        for (int i = 1; i < silentSamples; ++i) {
+            c.processSample(40, 1.0e-5f);
+            const auto stats = c.lastStats();
+            const float y = c.voltage(plate);
+            healthy &= !stats.singular && std::isfinite(y);
+            unconverged += stats.converged ? 0 : 1;
+            const double delta = static_cast<double>(y) - static_cast<double>(previous);
+            sumSquaredJitter += delta * delta;
+            previous = y;
+        }
+        const double jitterRms = std::sqrt(sumSquaredJitter / static_cast<double>(silentSamples - 1));
+        std::cout << "DIAG pentode-silence jitter_rms=" << jitterRms
+                  << " unconverged=" << unconverged << '\n';
+        ok &= require(healthy, "driven pentode stage stays finite and nonsingular decaying into silence");
+        ok &= require(unconverged < silentSamples / 50,
+                      "driven pentode stage converges on nearly every silent sample");
+        ok &= require(jitterRms < 0.1,
+                      "driven pentode stage settles into silence without a Newton limit cycle");
+    }
+
+    {
         circuit::MnaCircuitEngine c;
         const auto in = c.addNode();
         const auto out = c.addNode();
