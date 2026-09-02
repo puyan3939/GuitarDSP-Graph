@@ -152,13 +152,13 @@ public:
         pedalBox_.addItem("Bypass", 1);
         pedalBox_.addItem("TS808 Circuit", 2);
         pedalBox_.addItem("DS-1 Circuit", 3);
-        pedalBox_.addItem("Preamp Circuit (12AX7)", 4);
-        pedalBox_.addItem("Full Amp Circuit (12AX7 + EL34)", 5);
         pedalBox_.setSelectedId(2, juce::dontSendNotification);
 
         ampBox_.addItem("Reference Amp", 1);
         ampBox_.addItem("British Plexi Family", 2);
         ampBox_.addItem("American Clean Family", 3);
+        ampBox_.addItem("Preamp Circuit (12AX7)", 4);
+        ampBox_.addItem("Full Amp Circuit (12AX7 + EL34)", 5);
         ampBox_.setSelectedId(1, juce::dontSendNotification);
 
         qualityBox_.addItem("Eco (2x nonlinear)", 1);
@@ -513,20 +513,25 @@ public:
             placeKnobs(panel.removeFromTop(std::min(180, panel.getHeight())),
                        {&pedalDrive_, &pedalTone_, &pedalLevel_});
         } else if (currentPage_ == ControlPage::amplifier) {
-            const int knobHeight = std::clamp((panel.getHeight() - 105) / 2,
-                                               86, 155);
-            placeKnobs(panel.removeFromTop(knobHeight),
-                       {&ampGain_, &ampBass_, &ampMid_, &ampTreble_});
-            placeKnobs(panel.removeFromTop(knobHeight),
-                       {&ampMaster_, &ampPresence_, &ampOutput_});
-            panel.removeFromTop(8);
-            row = panel.removeFromTop(32);
-            powerTubeBox_.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(3, 0));
-            toneStackBox_.setBounds(row.reduced(3, 0));
-            panel.removeFromTop(6);
-            row = panel.removeFromTop(32);
-            toneDriverBox_.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(3, 0));
-            feedbackVoicingBox_.setBounds(row.reduced(3, 0));
+            if (selectedAmpIsCircuitLevel()) {
+                placeKnobs(panel.removeFromTop(std::min(180, panel.getHeight())),
+                           {&ampGain_, &ampBass_, &ampTreble_});
+            } else {
+                const int knobHeight = std::clamp((panel.getHeight() - 105) / 2,
+                                                   86, 155);
+                placeKnobs(panel.removeFromTop(knobHeight),
+                           {&ampGain_, &ampBass_, &ampMid_, &ampTreble_});
+                placeKnobs(panel.removeFromTop(knobHeight),
+                           {&ampMaster_, &ampPresence_, &ampOutput_});
+                panel.removeFromTop(8);
+                row = panel.removeFromTop(32);
+                powerTubeBox_.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(3, 0));
+                toneStackBox_.setBounds(row.reduced(3, 0));
+                panel.removeFromTop(6);
+                row = panel.removeFromTop(32);
+                toneDriverBox_.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(3, 0));
+                feedbackVoicingBox_.setBounds(row.reduced(3, 0));
+            }
         } else if (currentPage_ == ControlPage::cabinet) {
             const int knobHeight = std::clamp((panel.getHeight() - 106) / 2,
                                                86, 158);
@@ -636,11 +641,18 @@ private:
                  &pedalDrive_, &pedalTone_, &pedalLevel_}})
             control->setVisible(pedal);
 
-        for (auto* control : std::array<juce::Component*, 11>{{
-                 &ampGain_, &ampBass_, &ampMid_, &ampTreble_, &ampMaster_,
-                 &ampPresence_, &ampOutput_, &powerTubeBox_, &toneStackBox_,
-                 &toneDriverBox_, &feedbackVoicingBox_}})
+        // PreampCircuitNode/FullAmpCircuitNode only expose Drive/Bass/Treble
+        // (see selectedAmpIsCircuitLevel()); the rest of the parameterized
+        // amp-family controls don't apply to them and stay hidden.
+        const bool circuitLevelAmp = amplifier && selectedAmpIsCircuitLevel();
+        for (auto* control : std::array<juce::Component*, 3>{{
+                 &ampGain_, &ampBass_, &ampTreble_}})
             control->setVisible(amplifier);
+        for (auto* control : std::array<juce::Component*, 8>{{
+                 &ampMid_, &ampMaster_, &ampPresence_, &ampOutput_,
+                 &powerTubeBox_, &toneStackBox_, &toneDriverBox_,
+                 &feedbackVoicingBox_}})
+            control->setVisible(amplifier && !circuitLevelAmp);
 
         for (auto* control : std::array<juce::Component*, 10>{{
                  &cabinetMix_, &cabinetLowCut_, &cabinetHighCut_,
@@ -679,6 +691,11 @@ private:
         feedbackVoicingBox_.setEnabled(reference);
     }
 
+    [[nodiscard]] bool selectedAmpIsCircuitLevel() const noexcept {
+        return settings_.amp == guitardsp::app::AmpModel::preampCircuit
+            || settings_.amp == guitardsp::app::AmpModel::fullAmpCircuit;
+    }
+
     void updateRoutingGraph() {
         routingGraphView_.setState(settings_.signalRouting,
                                    settings_.octaveEnabled,
@@ -701,6 +718,10 @@ private:
                 return "British Plexi Family Reference";
             case guitardsp::app::AmpModel::americanCleanFamily:
                 return "American Clean Family Reference";
+            case guitardsp::app::AmpModel::preampCircuit:
+                return "Preamp Circuit";
+            case guitardsp::app::AmpModel::fullAmpCircuit:
+                return "Full Amp Circuit";
             case guitardsp::app::AmpModel::reference:
             default:
                 return "Reference Amp Topology";
@@ -878,18 +899,27 @@ private:
         engine_.setNodeParameter(NodeCategory::drive, 1, settings_.pedalTone);
         engine_.setNodeParameter(NodeCategory::drive, 2, settings_.pedalLevel);
         const auto ampType = selectedGuitarAmpType();
-        engine_.setNodeTypeParameter(ampType, 0, settings_.ampGain);
-        engine_.setNodeTypeParameter(ampType, 1, settings_.ampBass);
-        engine_.setNodeTypeParameter(ampType, 2, settings_.ampMid);
-        engine_.setNodeTypeParameter(ampType, 3, settings_.ampTreble);
-        engine_.setNodeTypeParameter(ampType, 4, settings_.ampMaster);
-        engine_.setNodeTypeParameter(ampType, 5, settings_.ampPresence);
-        engine_.setNodeTypeParameter(ampType, 6, settings_.ampOutputDb);
-        if (settings_.amp == guitardsp::app::AmpModel::reference) {
-            engine_.setNodeTypeParameter(ampType, 7, settings_.ampPowerTube);
-            engine_.setNodeTypeParameter(ampType, 8, settings_.ampToneStack);
-            engine_.setNodeTypeParameter(ampType, 9, settings_.ampToneDriver);
-            engine_.setNodeTypeParameter(ampType, 10, settings_.ampFeedbackVoicing);
+        if (selectedAmpIsCircuitLevel()) {
+            // PreampCircuitNode/FullAmpCircuitNode only expose Drive/Bass/Treble
+            // (indices 0-2); reusing Gain/Bass/Treble avoids sending Mid onto the
+            // node's Treble parameter the way a flat 0..3 index mapping would.
+            engine_.setNodeTypeParameter(ampType, 0, settings_.ampGain);
+            engine_.setNodeTypeParameter(ampType, 1, settings_.ampBass);
+            engine_.setNodeTypeParameter(ampType, 2, settings_.ampTreble);
+        } else {
+            engine_.setNodeTypeParameter(ampType, 0, settings_.ampGain);
+            engine_.setNodeTypeParameter(ampType, 1, settings_.ampBass);
+            engine_.setNodeTypeParameter(ampType, 2, settings_.ampMid);
+            engine_.setNodeTypeParameter(ampType, 3, settings_.ampTreble);
+            engine_.setNodeTypeParameter(ampType, 4, settings_.ampMaster);
+            engine_.setNodeTypeParameter(ampType, 5, settings_.ampPresence);
+            engine_.setNodeTypeParameter(ampType, 6, settings_.ampOutputDb);
+            if (settings_.amp == guitardsp::app::AmpModel::reference) {
+                engine_.setNodeTypeParameter(ampType, 7, settings_.ampPowerTube);
+                engine_.setNodeTypeParameter(ampType, 8, settings_.ampToneStack);
+                engine_.setNodeTypeParameter(ampType, 9, settings_.ampToneDriver);
+                engine_.setNodeTypeParameter(ampType, 10, settings_.ampFeedbackVoicing);
+            }
         }
 
         constexpr std::string_view guitarCab = "Speaker Dynamics + Partitioned Cab";
@@ -910,31 +940,17 @@ private:
         engine_.setNodeTypeParameter("CrossoverSplit", 0, settings_.crossoverFrequency);
     }
 
-    // The pedal page reuses the same three knobs (Drive/Tone/Level) for every
-    // circuit pedal rather than swapping components per selection -- the
-    // Preamp Circuit and Full Amp Circuit both expose Drive/Bass/Treble
-    // instead, so their Tone/Level knobs are relabelled Bass/Treble here to
-    // match what they actually control (guitardsp::hq::PreampCircuitNode's /
-    // guitardsp::hq::FullAmpCircuitNode's "bass"/"treble" parameters).
-    void updatePedalKnobLabels() {
-        const bool bassTreble = settings_.pedal == guitardsp::app::PedalModel::preampCircuit
-            || settings_.pedal == guitardsp::app::PedalModel::fullAmpCircuit;
-        pedalTone_.setTextValueSuffix(bassTreble ? "% BASS" : "% TONE");
-        pedalLevel_.setTextValueSuffix(bassTreble ? "% TREBLE" : "% LEVEL");
-    }
-
     void updateSettingsFromControls() {
         switch (pedalBox_.getSelectedId()) {
             case 1: settings_.pedal = guitardsp::app::PedalModel::bypass; break;
             case 3: settings_.pedal = guitardsp::app::PedalModel::ds1Circuit; break;
-            case 4: settings_.pedal = guitardsp::app::PedalModel::preampCircuit; break;
-            case 5: settings_.pedal = guitardsp::app::PedalModel::fullAmpCircuit; break;
             default: settings_.pedal = guitardsp::app::PedalModel::ts808Circuit; break;
         }
-        updatePedalKnobLabels();
         switch (ampBox_.getSelectedId()) {
             case 2: settings_.amp = guitardsp::app::AmpModel::britishPlexiFamily; break;
             case 3: settings_.amp = guitardsp::app::AmpModel::americanCleanFamily; break;
+            case 4: settings_.amp = guitardsp::app::AmpModel::preampCircuit; break;
+            case 5: settings_.amp = guitardsp::app::AmpModel::fullAmpCircuit; break;
             default: settings_.amp = guitardsp::app::AmpModel::reference; break;
         }
         switch (qualityBox_.getSelectedId()) {
