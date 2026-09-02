@@ -401,6 +401,7 @@ public:
         const auto error = deviceManager_.initialise(2, 2, savedState.get(), true, "*WAVIO*");
         if (error.isNotEmpty())
             statusLabel_.setText("Audio init error: " + error, juce::dontSendNotification);
+        enforceMinimumBufferSize();
         deviceManager_.addAudioCallback(this);
 
         setSize(1240, 900);
@@ -780,10 +781,15 @@ private:
             };
             const int ioLatency = currentInputLatencySamples_ + currentOutputLatencySamples_;
             const int totalReportedLatency = ioLatency + stats.graphLatencySamples;
+            // Device I/O is the ALSA ring latency the driver reports for the open
+            // period configuration (in + out), not a multiple of the block the UI
+            // shows. It is printed in samples as well so a period size the WAVIO
+            // driver silently refuses to change is visible here.
             latencyLabel_.setText(
                 "Buffer: " + juce::String(currentBlockSize_) + " samples / "
                     + juce::String(toMilliseconds(currentBlockSize_), 2)
-                    + " ms    Device I/O: " + juce::String(toMilliseconds(ioLatency), 2)
+                    + " ms    Device I/O: " + juce::String(ioLatency) + " smp / "
+                    + juce::String(toMilliseconds(ioLatency), 2)
                     + " ms    DSP: "
                     + juce::String(toMilliseconds(stats.graphLatencySamples), 2)
                     + " ms    Reported total: "
@@ -815,7 +821,48 @@ private:
     }
 
     void changeListenerCallback(juce::ChangeBroadcaster* source) override {
-        if (source == &deviceManager_) persistAudioDeviceState();
+        if (source != &deviceManager_) return;
+        // Re-apply the floor only when a different device was selected, so opening
+        // AUDIO SETTINGS and deliberately choosing a smaller period on a machine
+        // that can sustain it is still possible without it bouncing straight back.
+        const auto* device = deviceManager_.getCurrentAudioDevice();
+        const juce::String deviceName = device != nullptr ? device->getName() : juce::String();
+        if (deviceName != lastBufferFloorDevice_) enforceMinimumBufferSize();
+        persistAudioDeviceState();
+    }
+
+    // The Onkyo WAVIO / ICE1724 path reports XRUNs at 512-sample ALSA periods once
+    // a component-level pedal or preamp circuit is in the chain (ALSA ring latency
+    // is period x (periods - 1), ~3x the block, per direction). Open the device at
+    // a larger period so scheduling jitter has headroom. This is a startup / device
+    // -switch floor: the AUDIO SETTINGS dropdown can still raise it further or, once
+    // a device is running, lower it. A device that offers nothing at or above the
+    // floor (or no device at all) is left untouched.
+    static constexpr int kMinimumBufferSize = 1024;
+
+    void enforceMinimumBufferSize() {
+        if (applyingBufferFloor_) return;
+        auto* device = deviceManager_.getCurrentAudioDevice();
+        if (device == nullptr) return;
+
+        lastBufferFloorDevice_ = device->getName();
+
+        auto setup = deviceManager_.getAudioDeviceSetup();
+        if (setup.bufferSize >= kMinimumBufferSize) return;
+
+        int target = 0;
+        for (const int size : device->getAvailableBufferSizes())
+            if (size >= kMinimumBufferSize) { target = size; break; }
+        if (target == 0 || target == setup.bufferSize) return;
+
+        setup.bufferSize = target;
+        applyingBufferFloor_ = true;
+        const auto error = deviceManager_.setAudioDeviceSetup(setup, true);
+        applyingBufferFloor_ = false;
+        if (error.isNotEmpty())
+            statusLabel_.setText("Could not raise audio buffer to "
+                                     + juce::String(target) + " samples: " + error,
+                                 juce::dontSendNotification);
     }
 
     static juce::File audioStateFile() {
@@ -1176,6 +1223,8 @@ private:
     int xRunBaseline_ = 0;
     bool loadedIrAllFinite_ = true;
     bool toneControlsPending_ = false;
+    bool applyingBufferFloor_ = false;
+    juce::String lastBufferFloorDevice_;
     juce::Rectangle<int> chainPanel_;
     juce::Rectangle<int> inspectorPanel_;
     ControlPage currentPage_ = ControlPage::pedal;
