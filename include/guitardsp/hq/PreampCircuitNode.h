@@ -32,7 +32,7 @@ public:
     static constexpr float maxDriveGain = 4.0f;
 
     std::string_view typeName() const noexcept override { return "Preamp Circuit"; }
-    graph::NodeCategory category() const noexcept override { return graph::NodeCategory::amp; }
+    graph::NodeCategory category() const noexcept override { return graph::NodeCategory::drive; }
 
     void prepare(const graph::PrepareSpec& spec) override {
         sampleRate_ = std::max(1.0, spec.sampleRate);

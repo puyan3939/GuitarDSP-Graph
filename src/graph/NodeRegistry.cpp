@@ -46,13 +46,13 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("drive.ds1_circuit_hq", [] { return std::make_unique<hq::DS1CircuitNode>(); });
     r.registerType("drive.ts808_hq", [] { return std::make_unique<hq::TS808TopologyNode>(); });
     r.registerType("drive.ts808_circuit_hq", [] { return std::make_unique<hq::TS808CircuitNode>(); });
+    r.registerType("drive.preamp_circuit_hq", [] { return std::make_unique<hq::PreampCircuitNode>(); });
     r.registerType("drive.bd2_hq", [] { return std::make_unique<hq::BD2TopologyNode>(); });
     r.registerType("drive.fuzz_two_transistor", [] { return std::make_unique<hq::TwoTransistorFuzzNode>(); });
     r.registerType("amp.reference_hq", [] { return std::make_unique<hq::ReferenceAmpTopologyNode>(); });
     r.registerType("amp.british_plexi_family_hq", [] { return std::make_unique<hq::BritishPlexiFamilyNode>(); });
     r.registerType("amp.american_clean_family_hq", [] { return std::make_unique<hq::AmericanCleanFamilyNode>(); });
     r.registerType("amp.bass_reference_hq", [] { return std::make_unique<hq::BassAmpNode>(); });
-    r.registerType("amp.preamp_circuit_hq", [] { return std::make_unique<hq::PreampCircuitNode>(); });
     r.registerType("pitch.octave_down_mono", [] { return std::make_unique<hq::OctaveDownNode>(); });
     r.registerType("dynamics.keyed_gate", [] { return std::make_unique<dsp::KeyedGateNode>(); });
     r.registerType("cab.fir", [] { return std::make_unique<dsp::ConvolutionNode>(); });

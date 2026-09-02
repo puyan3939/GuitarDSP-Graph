@@ -42,6 +42,7 @@ void setAmpParameters(graph::AudioNode& node, const LiveRigSettings& settings) {
 const char* pedalTypeId(const LiveRigSettings& settings) {
     if (settings.pedal == PedalModel::ts808Circuit) return "drive.ts808_circuit_hq";
     if (settings.pedal == PedalModel::ds1Circuit) return "drive.ds1_circuit_hq";
+    if (settings.pedal == PedalModel::preampCircuit) return "drive.preamp_circuit_hq";
     return nullptr;
 }
 
@@ -93,7 +94,8 @@ void applySettings(graph::Graph& graph, const graph::GraphDocument& document,
         auto* node = graph.node(mapping->second);
         if (!node) continue;
 
-        if (nodeDoc.typeId == "drive.ts808_circuit_hq" || nodeDoc.typeId == "drive.ds1_circuit_hq") {
+        if (nodeDoc.typeId == "drive.ts808_circuit_hq" || nodeDoc.typeId == "drive.ds1_circuit_hq"
+            || nodeDoc.typeId == "drive.preamp_circuit_hq") {
             setPedalParameters(*node, settings);
         } else if (nodeDoc.typeId == "amp.reference_hq" || nodeDoc.typeId == "amp.british_plexi_family_hq"
                    || nodeDoc.typeId == "amp.american_clean_family_hq") {
