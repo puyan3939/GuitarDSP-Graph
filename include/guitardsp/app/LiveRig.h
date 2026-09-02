@@ -12,7 +12,8 @@ enum class PedalModel {
     bypass,
     ts808Circuit,
     ds1Circuit,
-    preampCircuit
+    preampCircuit,
+    fullAmpCircuit
 };
 
 enum class AmpModel {
