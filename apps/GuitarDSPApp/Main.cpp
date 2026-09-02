@@ -152,6 +152,7 @@ public:
         pedalBox_.addItem("Bypass", 1);
         pedalBox_.addItem("TS808 Circuit", 2);
         pedalBox_.addItem("DS-1 Circuit", 3);
+        pedalBox_.addItem("Preamp Circuit (12AX7)", 4);
         pedalBox_.setSelectedId(2, juce::dontSendNotification);
 
         ampBox_.addItem("Reference Amp", 1);
@@ -908,12 +909,25 @@ private:
         engine_.setNodeTypeParameter("CrossoverSplit", 0, settings_.crossoverFrequency);
     }
 
+    // The pedal page reuses the same three knobs (Drive/Tone/Level) for every
+    // circuit pedal rather than swapping components per selection -- the
+    // Preamp Circuit exposes Drive/Bass/Treble instead, so its Tone/Level
+    // knobs are relabelled Bass/Treble here to match what they actually
+    // control (guitardsp::hq::PreampCircuitNode's "bass"/"treble" parameters).
+    void updatePedalKnobLabels() {
+        const bool preamp = settings_.pedal == guitardsp::app::PedalModel::preampCircuit;
+        pedalTone_.setTextValueSuffix(preamp ? "% BASS" : "% TONE");
+        pedalLevel_.setTextValueSuffix(preamp ? "% TREBLE" : "% LEVEL");
+    }
+
     void updateSettingsFromControls() {
         switch (pedalBox_.getSelectedId()) {
             case 1: settings_.pedal = guitardsp::app::PedalModel::bypass; break;
             case 3: settings_.pedal = guitardsp::app::PedalModel::ds1Circuit; break;
+            case 4: settings_.pedal = guitardsp::app::PedalModel::preampCircuit; break;
             default: settings_.pedal = guitardsp::app::PedalModel::ts808Circuit; break;
         }
+        updatePedalKnobLabels();
         switch (ampBox_.getSelectedId()) {
             case 2: settings_.amp = guitardsp::app::AmpModel::britishPlexiFamily; break;
             case 3: settings_.amp = guitardsp::app::AmpModel::americanCleanFamily; break;

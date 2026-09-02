@@ -1,5 +1,6 @@
 #include "guitardsp/circuit/PreampCircuit.h"
 #include "guitardsp/hq/Measurement.h"
+#include "guitardsp/hq/PreampCircuitNode.h"
 
 #include <algorithm>
 #include <array>
@@ -252,6 +253,70 @@ int main() {
                 " Treble=" + std::to_string(bt[1]) + " stays finite and bounded";
             ok &= require(finite && peak < 10.0f, label.c_str());
         }
+    }
+
+    // 6. Graph node wrapper: confirms the AudioNode adapter (the piece that
+    // makes this circuit selectable from NodeRegistry/GraphBuilder-driven
+    // signal chains, e.g. GuitarDSPApp's CIRCUIT PEDAL slot) exposes the
+    // expected Drive/Bass/Treble parameters, prepares, and produces finite
+    // audio -- mirroring TS808CircuitTests.cpp's own node-level block.
+    {
+        hq::PreampCircuitNode node;
+        graph::PrepareSpec spec{};
+        spec.sampleRate = 48000.0;
+        spec.maximumBlockSize = 64;
+        spec.channels = 1;
+        node.prepare(spec);
+        ok &= require(node.prepared(), "preamp circuit graph node prepares");
+
+        ok &= require(node.parameterCount() == 3, "preamp circuit node exposes 3 parameters");
+        ok &= require(std::string(node.parameterDescriptor(0).id) == "drive"
+                          && std::string(node.parameterDescriptor(1).id) == "bass"
+                          && std::string(node.parameterDescriptor(2).id) == "treble",
+                      "preamp circuit node parameters are drive/bass/treble");
+
+        graph::AudioBuffer input(1, 64);
+        graph::AudioBuffer output(1, 64);
+        for (int i = 0; i < 64; ++i)
+            input.channel(0)[i] = 0.10f * std::sin(2.0f * 3.14159265358979323846f * 220.0f * i / 48000.0f);
+        node.process(input, output, 64);
+        bool finite = true;
+        for (int i = 0; i < 64; ++i) finite &= std::isfinite(output.channel(0)[i]);
+        ok &= require(finite, "preamp circuit graph node processes finite audio");
+
+        // Drive is implemented as an input pre-gain ahead of the fixed-bias
+        // 12AX7 stage (see PreampCircuitNode's driveToPreGain), so raising it
+        // should measurably increase output energy through the oversampler.
+        const auto measureOutputRms = [&](float drive) {
+            hq::PreampCircuitNode measureNode;
+            measureNode.prepare(spec);
+            measureNode.setParameterValue(0, drive);
+            graph::AudioBuffer in(1, 64);
+            graph::AudioBuffer out(1, 64);
+            double sumSquares = 0.0;
+            constexpr int blocks = 32;
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < 64; ++i) {
+                    const int n = b * 64 + i;
+                    in.channel(0)[i] = 0.10f *
+                        std::sin(2.0f * 3.14159265358979323846f * 220.0f * n / 48000.0f);
+                }
+                measureNode.process(in, out, 64);
+                if (b >= blocks / 2) {
+                    for (int i = 0; i < 64; ++i)
+                        sumSquares += static_cast<double>(out.channel(0)[i]) * out.channel(0)[i];
+                }
+            }
+            return std::sqrt(sumSquares / (64.0 * (blocks / 2)));
+        };
+        const double lowDriveRms = measureOutputRms(0.0f);
+        const double highDriveRms = measureOutputRms(1.0f);
+        std::cout << "DIAG preamp node drive-gain low_rms=" << lowDriveRms
+                  << " high_rms=" << highDriveRms << '\n';
+        ok &= require(std::isfinite(lowDriveRms) && std::isfinite(highDriveRms),
+                      "preamp node drive sweep stays finite");
+        ok &= require(highDriveRms > lowDriveRms,
+                      "raising Drive increases output energy through the input pre-gain");
     }
 
     return ok ? 0 : 1;

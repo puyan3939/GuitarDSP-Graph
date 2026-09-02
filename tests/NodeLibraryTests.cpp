@@ -18,6 +18,7 @@ int main() {
     ok &= require(registry.create("drive.ds1_prototype") != nullptr, "registry creates DS-1 prototype");
     ok &= require(registry.create("drive.ds1_hq") != nullptr, "registry creates HQ DS-1");
     ok &= require(registry.create("drive.ts808_hq") != nullptr, "registry creates HQ TS808");
+    ok &= require(registry.create("drive.preamp_circuit_hq") != nullptr, "registry creates HQ preamp circuit");
     ok &= require(registry.create("drive.bd2_hq") != nullptr, "registry creates HQ BD-2");
     ok &= require(registry.create("amp.reference_hq") != nullptr, "registry creates reference HQ amp");
     ok &= require(registry.create("cab.partitioned_hq") != nullptr, "registry creates partitioned HQ cab");

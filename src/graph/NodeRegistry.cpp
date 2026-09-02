@@ -14,6 +14,7 @@
 #include "guitardsp/hq/DS1TopologyNode.h"
 #include "guitardsp/hq/PartitionedCabNode.h"
 #include "guitardsp/hq/OctaveDownNode.h"
+#include "guitardsp/hq/PreampCircuitNode.h"
 #include "guitardsp/hq/ReferenceAmpTopologyNode.h"
 #include "guitardsp/hq/SpeakerDynamicsNode.h"
 #include "guitardsp/hq/TS808CircuitNode.h"
@@ -45,6 +46,7 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("drive.ds1_circuit_hq", [] { return std::make_unique<hq::DS1CircuitNode>(); });
     r.registerType("drive.ts808_hq", [] { return std::make_unique<hq::TS808TopologyNode>(); });
     r.registerType("drive.ts808_circuit_hq", [] { return std::make_unique<hq::TS808CircuitNode>(); });
+    r.registerType("drive.preamp_circuit_hq", [] { return std::make_unique<hq::PreampCircuitNode>(); });
     r.registerType("drive.bd2_hq", [] { return std::make_unique<hq::BD2TopologyNode>(); });
     r.registerType("drive.fuzz_two_transistor", [] { return std::make_unique<hq::TwoTransistorFuzzNode>(); });
     r.registerType("amp.reference_hq", [] { return std::make_unique<hq::ReferenceAmpTopologyNode>(); });
