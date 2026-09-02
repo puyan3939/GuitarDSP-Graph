@@ -11,15 +11,15 @@ namespace guitardsp::app {
 enum class PedalModel {
     bypass,
     ts808Circuit,
-    ds1Circuit,
-    preampCircuit,
-    fullAmpCircuit
+    ds1Circuit
 };
 
 enum class AmpModel {
     reference,
     britishPlexiFamily,
-    americanCleanFamily
+    americanCleanFamily,
+    preampCircuit,
+    fullAmpCircuit
 };
 
 enum class SignalRouting {

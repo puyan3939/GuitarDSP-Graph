@@ -119,6 +119,43 @@ int main() {
     }
 
     {
+        // Issue #47: PreampCircuit/FullAmpCircuit moved from PedalModel to
+        // AmpModel, so the amp slot alone (no separate CIRCUIT PEDAL node) is
+        // what now carries a component-level amp -- confirming this also rules
+        // out the "double amp in series" shape the old pedal-slot placement
+        // allowed (pedal + amp both resolving to an amp-category node).
+        app::LiveRigSettings settings;
+        settings.quality = graph::ProcessingQuality::eco;
+        settings.pedal = app::PedalModel::bypass;
+        settings.amp = app::AmpModel::fullAmpCircuit;
+        settings.ampEnabled = true;
+        settings.cabinetEnabled = false;
+
+        auto rig = app::prepareLiveRig(settings, 48000.0, 64, 1);
+        ok &= require(rig != nullptr, "Full Amp Circuit prepares from the AmpModel slot");
+        if (rig) {
+            graph::AudioBuffer input(1, 64), output(1, 64);
+            bool finite = true;
+            float energy = 0.0f;
+            for (int block = 0; block < 5; ++block) {
+                for (int i = 0; i < 64; ++i) {
+                    const int sample = block * 64 + i;
+                    input.channel(0)[i] = 0.08f * std::sin(
+                        2.0f * std::numbers::pi_v<float> * 220.0f
+                        * static_cast<float>(sample) / 48000.0f);
+                }
+                rig->runtime.process(input, output, 64);
+                for (int i = 0; i < 64; ++i) {
+                    finite &= std::isfinite(output.channel(0)[i]);
+                    energy += output.channel(0)[i] * output.channel(0)[i];
+                }
+            }
+            ok &= require(finite && energy > 1.0e-8f,
+                          "Full Amp Circuit as AmpModel produces finite audible output");
+        }
+    }
+
+    {
         constexpr int blockSize = 512;
         constexpr int blocks = 32;
         constexpr double sampleRate = 44100.0;
