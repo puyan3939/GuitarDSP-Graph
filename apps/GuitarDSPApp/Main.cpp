@@ -153,6 +153,7 @@ public:
         pedalBox_.addItem("TS808 Circuit", 2);
         pedalBox_.addItem("DS-1 Circuit", 3);
         pedalBox_.addItem("Preamp Circuit (12AX7)", 4);
+        pedalBox_.addItem("Full Amp Circuit (12AX7 + EL34)", 5);
         pedalBox_.setSelectedId(2, juce::dontSendNotification);
 
         ampBox_.addItem("Reference Amp", 1);
@@ -911,13 +912,15 @@ private:
 
     // The pedal page reuses the same three knobs (Drive/Tone/Level) for every
     // circuit pedal rather than swapping components per selection -- the
-    // Preamp Circuit exposes Drive/Bass/Treble instead, so its Tone/Level
-    // knobs are relabelled Bass/Treble here to match what they actually
-    // control (guitardsp::hq::PreampCircuitNode's "bass"/"treble" parameters).
+    // Preamp Circuit and Full Amp Circuit both expose Drive/Bass/Treble
+    // instead, so their Tone/Level knobs are relabelled Bass/Treble here to
+    // match what they actually control (guitardsp::hq::PreampCircuitNode's /
+    // guitardsp::hq::FullAmpCircuitNode's "bass"/"treble" parameters).
     void updatePedalKnobLabels() {
-        const bool preamp = settings_.pedal == guitardsp::app::PedalModel::preampCircuit;
-        pedalTone_.setTextValueSuffix(preamp ? "% BASS" : "% TONE");
-        pedalLevel_.setTextValueSuffix(preamp ? "% TREBLE" : "% LEVEL");
+        const bool bassTreble = settings_.pedal == guitardsp::app::PedalModel::preampCircuit
+            || settings_.pedal == guitardsp::app::PedalModel::fullAmpCircuit;
+        pedalTone_.setTextValueSuffix(bassTreble ? "% BASS" : "% TONE");
+        pedalLevel_.setTextValueSuffix(bassTreble ? "% TREBLE" : "% LEVEL");
     }
 
     void updateSettingsFromControls() {
@@ -925,6 +928,7 @@ private:
             case 1: settings_.pedal = guitardsp::app::PedalModel::bypass; break;
             case 3: settings_.pedal = guitardsp::app::PedalModel::ds1Circuit; break;
             case 4: settings_.pedal = guitardsp::app::PedalModel::preampCircuit; break;
+            case 5: settings_.pedal = guitardsp::app::PedalModel::fullAmpCircuit; break;
             default: settings_.pedal = guitardsp::app::PedalModel::ts808Circuit; break;
         }
         updatePedalKnobLabels();
