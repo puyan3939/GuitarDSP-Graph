@@ -264,7 +264,7 @@ int main() {
     // PreampCircuit itself only has Bass/Treble) audibly changes the output.
     {
         graph::NodeRegistry registry = graph::NodeRegistry::createBuiltins();
-        auto registered = registry.create("amp.preamp_circuit_hq");
+        auto registered = registry.create("drive.preamp_circuit_hq");
         ok &= require(registered != nullptr, "NodeRegistry creates the preamp circuit node");
 
         hq::PreampCircuitNode node;
