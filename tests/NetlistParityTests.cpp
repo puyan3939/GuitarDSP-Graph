@@ -12,6 +12,7 @@
 
 #include "guitardsp/circuit/DS1Circuit.h"
 #include "guitardsp/circuit/NetlistLoader.h"
+#include "guitardsp/circuit/PowerAmpCircuit.h"
 #include "guitardsp/circuit/PreampCircuit.h"
 #include "guitardsp/circuit/TS808Circuit.h"
 
@@ -182,6 +183,43 @@ bool checkPreampParity(float bass, float treble) {
     return require(cmp.ok && cmp.maxAbsReference > 1.0e-4f, label);
 }
 
+bool checkPowerAmpParity(float amplitude) {
+    circuit::PowerAmpCircuit reference;
+    if (!reference.prepare(sampleRate)) return require(false, "PowerAmp reference prepare()");
+
+    circuit::NetlistCircuit candidate;
+    std::string error;
+    if (!candidate.loadFromFile(std::string(GUITARDSP_NETLIST_DATA_DIR) + "/poweramp.json", &error))
+        return require(false, "PowerAmp netlist load: " + error);
+    if (!candidate.prepare(sampleRate, &error))
+        return require(false, "PowerAmp netlist prepare(): " + error);
+
+    // PowerAmpCircuit exposes no user controls (no pots), so the parity
+    // sweep instead varies input drive level -- from a clean guitar-level
+    // signal up through hard grid/plate clipping and output-transformer core
+    // saturation -- to exercise both the pentode stamp's nonlinearity and the
+    // per-sample magnetizing-inductance update identically on both sides.
+    const auto settle = sineBurst(4000, amplitude, 220.0);
+    for (float x : settle) {
+        reference.processSample(x);
+        candidate.processSample(x);
+    }
+
+    const auto probe = sineBurst(2000, amplitude, 220.0, 4000);
+    std::vector<float> referenceOut(probe.size());
+    std::vector<float> candidateOut(probe.size());
+    for (std::size_t i = 0; i < probe.size(); ++i) {
+        referenceOut[i] = reference.processSample(probe[i]);
+        candidateOut[i] = candidate.processSample(probe[i]);
+    }
+
+    const auto cmp = compare(referenceOut, candidateOut, 5.0e-4f);
+    const std::string label = "PowerAmp parity amplitude=" + std::to_string(amplitude) +
+        " (maxDiff=" + std::to_string(cmp.maxAbsDifference) +
+        ", maxRef=" + std::to_string(cmp.maxAbsReference) + ")";
+    return require(cmp.ok && cmp.maxAbsReference > 1.0e-3f, label);
+}
+
 } // namespace
 
 int main() {
@@ -231,6 +269,11 @@ int main() {
         {0.99f, 0.99f},
     }};
     for (const auto& s : preampSettings) ok &= checkPreampParity(s[0], s[1]);
+
+    // Sweeps input drive from clean guitar level up through hard grid/plate
+    // clipping and output-transformer core saturation.
+    constexpr std::array<float, 4> powerAmpAmplitudes{{0.05f, 0.3f, 1.0f, 3.0f}};
+    for (float amplitude : powerAmpAmplitudes) ok &= checkPowerAmpParity(amplitude);
 
     return ok ? 0 : 1;
 }

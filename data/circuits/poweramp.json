@@ -1,0 +1,61 @@
+{
+  "name": "PowerAmp",
+  "description": "Component-level single-ended EL34 pentode power-amp stage with cathode self-bias and output transformer. Parity reference: guitardsp::circuit::PowerAmpCircuit (include/guitardsp/circuit/PowerAmpCircuit.h).",
+  "ops": [
+    { "op": "node", "name": "supply" },
+    { "op": "node", "name": "inputJack" },
+    { "op": "node", "name": "inputCoupled" },
+    { "op": "node", "name": "grid" },
+    { "op": "node", "name": "plate" },
+    { "op": "node", "name": "screen" },
+    { "op": "node", "name": "cathode" },
+    { "op": "node", "name": "outputNode" },
+
+    { "op": "voltageSource", "name": "supplySource", "p": "supply", "n": "ground", "volts": 0.0 },
+    { "op": "voltageSource", "name": "inputSource", "p": "inputJack", "n": "ground", "volts": 0.0 },
+
+    { "op": "capacitor", "a": "inputJack", "b": "inputCoupled", "farads": 100.0e-9, "voltageRating": 100.0, "technology": "film" },
+    { "op": "resistor", "a": "inputCoupled", "b": "grid", "ohms": 1500.0 },
+    { "op": "resistor", "a": "grid", "b": "ground", "ohms": 220000.0 },
+
+    { "op": "pentodeParasitic", "name": "pentode", "plate": "plate", "grid": "grid", "screen": "screen", "cathode": "cathode", "preset": "el34" },
+
+    { "op": "resistor", "a": "cathode", "b": "ground", "ohms": 1200.0 },
+    { "op": "capacitor", "a": "cathode", "b": "ground", "farads": 47.0e-6, "voltageRating": 63.0, "technology": "electrolytic" },
+
+    { "op": "resistor", "a": "supply", "b": "screen", "ohms": 470.0 },
+    { "op": "capacitor", "a": "screen", "b": "ground", "farads": 22.0e-6, "voltageRating": 450.0, "technology": "electrolytic" },
+
+    { "op": "transformer", "name": "outputTransformer",
+      "primaryPositive": "supply", "primaryNegative": "plate",
+      "secondaryPositive": "outputNode", "secondaryNegative": "ground",
+      "spec": {
+        "name": "EL34 SE Output Transformer",
+        "primaryInductanceHenries": 15.0,
+        "leakageInductanceHenries": 25.0e-3,
+        "primaryResistanceOhms": 200.0,
+        "secondaryResistanceOhms": 0.2,
+        "turnsRatio": 19.4,
+        "interwindingCapacitanceFarads": 100.0e-12,
+        "saturationFluxNormalized": 1.0,
+        "magnetizingSaturationCurrentAmps": 0.15,
+        "coreSaturationExponent": 2.0,
+        "minimumMagnetizingInductanceRatio": 0.08
+      }
+    },
+
+    { "op": "resistor", "a": "outputNode", "b": "ground", "ohms": 8.0 }
+  ],
+  "ports": { "input": "inputSource", "supply": "supplySource", "output": "outputNode" },
+  "simulation": {
+    "sourceSteps": 280,
+    "solvesPerStep": 3,
+    "warmupSecondsFraction": 0.6,
+    "warmupMinSamples": 8192,
+    "warmupMaxSamples": 65536,
+    "nonlinearResidualTolerance": 2.0e-5,
+    "newtonMaxIterations": 40,
+    "newtonTolerance": 2.0e-5,
+    "supplyVolts": 420.0
+  }
+}
