@@ -195,5 +195,44 @@ int main() {
                       "driven component-level DS-1 converges quickly at its full 2x audio rate");
     }
 
+    {
+        // Regression for issue #14/#16: at DS-1's bright/high-gain setting
+        // (distortion 0.95, tone 1.0) the fixed-damping Newton loop used to settle
+        // into an exact repeating cycle on silent input instead of converging,
+        // producing audible broadband hiss (~0.03 RMS sample-to-sample jitter).
+        // The fix is now the engine-level backtracking line search in
+        // MnaCircuitEngineCore.h (not a DS-1-specific patch), so this exercises
+        // the same physical repro -- a loud passage decaying into silence -- and
+        // checks the jitter it originally caught, without depending on how the
+        // solver internally avoids it.
+        circuit::DS1Circuit ds;
+        ok &= require(ds.prepare(sampleRate), "bright DS-1 prepares");
+        ds.setControls(0.95f, 1.0f, 0.55f);
+        for (int i = 0; i < 4096; ++i) ds.processSample(0.8f * guitarSample(i));
+
+        constexpr int silentSamples = 4096;
+        double sumSquaredJitter = 0.0;
+        bool healthy = true;
+        int unconverged = 0;
+        float previous = ds.processSample(0.0f);
+        for (int i = 1; i < silentSamples; ++i) {
+            const float y = ds.processSample(0.0f);
+            const auto stats = ds.lastSolveStats();
+            healthy &= !stats.singular && std::isfinite(y);
+            unconverged += stats.converged ? 0 : 1;
+            const double delta = static_cast<double>(y) - static_cast<double>(previous);
+            sumSquaredJitter += delta * delta;
+            previous = y;
+        }
+        const double jitterRms = std::sqrt(sumSquaredJitter / static_cast<double>(silentSamples - 1));
+        std::cout << "DIAG bright-ds1-silence jitter_rms=" << jitterRms
+                  << " unconverged=" << unconverged << '\n';
+        ok &= require(healthy, "bright DS-1 stays finite and nonsingular decaying into silence");
+        ok &= require(unconverged < silentSamples / 50,
+                      "bright DS-1 Newton solve converges on nearly every silent sample");
+        ok &= require(jitterRms < 0.01,
+                      "bright DS-1 silent-input jitter stays well below the original ~0.03 RMS hiss");
+    }
+
     return ok ? 0 : 1;
 }
