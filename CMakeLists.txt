@@ -87,6 +87,27 @@ if (GUITARDSP_BUILD_AUDIO_APP)
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
     )
+
+    # JACK backend. The JUCE ALSA backend runs its audio callback on a plain
+    # SCHED_OTHER thread, so short periods underrun on a busy desktop. The JACK
+    # backend instead joins an existing graph (PipeWire-JACK here), which is
+    # real-time scheduled. JUCE resolves libjack with dlopen at runtime, so no
+    # link library is required; only <jack/jack.h> must be present at build time
+    # (libjack-jackd2-dev / libjack-dev).
+    option(GUITARDSP_ENABLE_JACK "Build the standalone host with the JACK backend" ON)
+    if (GUITARDSP_ENABLE_JACK AND (UNIX AND NOT APPLE))
+        find_path(GUITARDSP_JACK_INCLUDE_DIR jack/jack.h)
+        if (GUITARDSP_JACK_INCLUDE_DIR)
+            target_compile_definitions(GuitarDSPApp PRIVATE JUCE_JACK=1)
+            target_include_directories(GuitarDSPApp PRIVATE ${GUITARDSP_JACK_INCLUDE_DIR})
+            message(STATUS "GuitarDSPApp: JACK backend enabled (${GUITARDSP_JACK_INCLUDE_DIR})")
+        else()
+            message(WARNING
+                "GuitarDSPApp: jack/jack.h not found; building without the JACK "
+                "backend. Install libjack-jackd2-dev to enable it.")
+        endif()
+    endif()
+
     target_link_libraries(GuitarDSPApp PRIVATE
         GuitarDSPGraphCore
         juce::juce_audio_utils
