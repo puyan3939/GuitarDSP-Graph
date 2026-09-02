@@ -2,7 +2,8 @@
 
 This document specifies the JSON format loaded by
 `include/guitardsp/circuit/NetlistLoader.h` (`guitardsp::circuit::NetlistCircuit`)
-and used by `data/circuits/ts808.json` / `data/circuits/ds1.json`.
+and used by `data/circuits/ts808.json` / `data/circuits/ds1.json` /
+`data/circuits/preamp.json`.
 
 ## Why this format exists
 
@@ -76,6 +77,7 @@ ground node is always available as `"ground"`.
 | `dynamicOpAmp`  | `name`, `output`, `nonInverting`, `inverting`, `positiveRail`, `negativeRail`, `reference`, `preset`\|`spec` | (none) |
 | `bjtEbersMoll`  | `name`, `collector`, `base`, `emitter`, `preset`\|`spec` (with `overrides`)| (none) |
 | `diodeParasitic`| `name`, `anode`, `cathode`, `preset`\|`spec` (with `overrides`)          | (none) |
+| `triodeParasitic`| `name`, `plate`, `grid`, `cathode`, `preset`\|`spec` (with `overrides`) | (none) |
 
 Notes:
 
@@ -93,6 +95,10 @@ Notes:
   `addBjtParasiticSubcircuit`/plain `addDiode` — a different nonlinear model.
   A netlist that mixed the two would not reach parity with a hand-written
   pedal class, so this format only exposes the pedal-parity primitives.
+- `triodeParasitic` compiles to `addTriodeParasiticSubcircuit` — the plate/
+  grid/cathode Koren-model triode stamp plus its Cgp/Cgk/Cpk parasitic
+  capacitances and positive-grid-current diode, exactly as PreampCircuit uses
+  it. Built-in presets: `"12ax7"`, `"12at7"`.
 - `technology` (capacitor) is one of `"generic"`, `"ceramic"`, `"film"`,
   `"electrolytic"`, `"tantalum"`. `taper` (potentiometer) is one of
   `"linear"`, `"audio"`, `"reverseAudio"`.
@@ -128,12 +134,16 @@ BJT: `name`, `polarity`, `beta`, `nominalVbe`, `saturationVoltage`,
 
 - `input` / `output` are required: `processSample(x)` drives the named
   voltage source with `x` and returns the voltage at the named node.
-- `supply` / `vref` are optional. When both are present, `prepare()` runs the
-  same source-stepping DC-priming continuation TS808Circuit/DS1Circuit use
-  (ramping the supply/vref sources from 0 V up to `simulation.supplyVolts`/
-  `vrefVolts` over `simulation.sourceSteps` steps) before the silence warm-up.
-  Omit both for a circuit with no biased/nonlinear DC operating point to
-  prime.
+- `supply` / `vref` are optional. When `supply` is present, `prepare()` runs
+  the same source-stepping DC-priming continuation TS808Circuit/DS1Circuit
+  use (ramping the supply source, and the vref source if also present, from
+  0 V up to `simulation.supplyVolts`/`vrefVolts` over `simulation.sourceSteps`
+  steps) before the silence warm-up. `vref` only matters for circuits whose
+  active devices bias around a mid-supply virtual ground (TS808/DS1's
+  transistor/op-amp stages, which specify both); a self-biased triode stage
+  returns to true ground instead and only needs `supply` (see
+  `data/circuits/preamp.json`). Omit `supply` entirely for a circuit with no
+  biased/nonlinear DC operating point to prime.
 
 ## Controls
 
