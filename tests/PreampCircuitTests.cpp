@@ -1,5 +1,7 @@
 #include "guitardsp/circuit/PreampCircuit.h"
+#include "guitardsp/graph/NodeRegistry.h"
 #include "guitardsp/hq/Measurement.h"
+#include "guitardsp/hq/PreampCircuitNode.h"
 
 #include <algorithm>
 #include <array>
@@ -252,6 +254,59 @@ int main() {
                 " Treble=" + std::to_string(bt[1]) + " stays finite and bounded";
             ok &= require(finite && peak < 10.0f, label.c_str());
         }
+    }
+
+    // 6. PreampCircuitNode: the AudioNode wrapper that lets the graph/app
+    // signal chain select this circuit like TS808CircuitNode/DS1CircuitNode.
+    // Checks the node prepares, is registered under a NodeRegistry type id,
+    // exposes Drive/Bass/Treble as UI-controllable parameters, and that the
+    // Drive pre-gain (the node's stand-in for a hardware drive control, since
+    // PreampCircuit itself only has Bass/Treble) audibly changes the output.
+    {
+        graph::NodeRegistry registry = graph::NodeRegistry::createBuiltins();
+        auto registered = registry.create("amp.preamp_circuit_hq");
+        ok &= require(registered != nullptr, "NodeRegistry creates the preamp circuit node");
+
+        hq::PreampCircuitNode node;
+        graph::PrepareSpec spec{};
+        spec.sampleRate = sampleRate;
+        spec.maximumBlockSize = 64;
+        spec.channels = 1;
+        node.prepare(spec);
+        ok &= require(node.prepared(), "preamp circuit graph node prepares");
+
+        ok &= require(node.parameterCount() == 3, "preamp circuit node exposes Drive/Bass/Treble");
+        ok &= require(node.parameterIndex("drive") == 0 && node.parameterIndex("bass") == 1 &&
+                          node.parameterIndex("treble") == 2,
+                      "preamp circuit node parameter ids match Drive/Bass/Treble");
+
+        graph::AudioBuffer input(1, 64);
+        graph::AudioBuffer output(1, 64);
+        for (int i = 0; i < 64; ++i)
+            input.channel(0)[i] = 0.10f * static_cast<float>(std::sin(2.0 * pi * 220.0 * i / sampleRate));
+
+        node.setParameterValue(0, 0.0f); // minimum Drive pre-gain
+        node.process(input, output, 64);
+        bool finiteQuiet = true;
+        double quietEnergy = 0.0;
+        for (int i = 0; i < 64; ++i) {
+            finiteQuiet &= std::isfinite(output.channel(0)[i]);
+            quietEnergy += static_cast<double>(output.channel(0)[i]) * output.channel(0)[i];
+        }
+        ok &= require(finiteQuiet, "preamp circuit graph node processes finite audio at low Drive");
+
+        node.reset();
+        node.setParameterValue(0, 1.0f); // maximum Drive pre-gain
+        node.process(input, output, 64);
+        bool finiteHot = true;
+        double hotEnergy = 0.0;
+        for (int i = 0; i < 64; ++i) {
+            finiteHot &= std::isfinite(output.channel(0)[i]);
+            hotEnergy += static_cast<double>(output.channel(0)[i]) * output.channel(0)[i];
+        }
+        ok &= require(finiteHot, "preamp circuit graph node processes finite audio at high Drive");
+        ok &= require(hotEnergy > quietEnergy,
+                      "raising Drive increases the preamp circuit node's output energy");
     }
 
     return ok ? 0 : 1;
