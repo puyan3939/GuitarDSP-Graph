@@ -12,6 +12,7 @@
 #include "guitardsp/hq/CabinetChainNode.h"
 #include "guitardsp/hq/DS1CircuitNode.h"
 #include "guitardsp/hq/DS1TopologyNode.h"
+#include "guitardsp/hq/FullAmpCircuitNode.h"
 #include "guitardsp/hq/PartitionedCabNode.h"
 #include "guitardsp/hq/OctaveDownNode.h"
 #include "guitardsp/hq/PowerAmpCircuitNode.h"
@@ -55,6 +56,7 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("amp.american_clean_family_hq", [] { return std::make_unique<hq::AmericanCleanFamilyNode>(); });
     r.registerType("amp.bass_reference_hq", [] { return std::make_unique<hq::BassAmpNode>(); });
     r.registerType("amp.power_amp_circuit_hq", [] { return std::make_unique<hq::PowerAmpCircuitNode>(); });
+    r.registerType("amp.full_amp_circuit_hq", [] { return std::make_unique<hq::FullAmpCircuitNode>(); });
     r.registerType("pitch.octave_down_mono", [] { return std::make_unique<hq::OctaveDownNode>(); });
     r.registerType("dynamics.keyed_gate", [] { return std::make_unique<dsp::KeyedGateNode>(); });
     r.registerType("cab.fir", [] { return std::make_unique<dsp::ConvolutionNode>(); });
