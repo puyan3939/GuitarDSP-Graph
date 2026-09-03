@@ -2,6 +2,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include "AudioTapFifo.h"
 #include "guitardsp/app/LiveRig.h"
 #include "guitardsp/app/RealtimeAudioEngine.h"
 #include "guitardsp/app/ReferenceCabinetIR.h"
@@ -154,6 +155,10 @@ public:
         addAndMakeVisible(routingPageButton_);
         addAndMakeVisible(advancedPageButton_);
         addAndMakeVisible(routingGraphView_);
+        addAndMakeVisible(inputWaveform_);
+        addAndMakeVisible(outputWaveform_);
+        addAndMakeVisible(inputWaveformLabel_);
+        addAndMakeVisible(outputWaveformLabel_);
         addAndMakeVisible(statusLabel_);
         addAndMakeVisible(irLabel_);
         addAndMakeVisible(meterLabel_);
@@ -335,6 +340,14 @@ public:
                              juce::dontSendNotification);
         meterLabel_.setText("Input: -inf dBFS    Output: -inf dBFS",
                             juce::dontSendNotification);
+        inputWaveformLabel_.setText("INPUT", juce::dontSendNotification);
+        outputWaveformLabel_.setText("OUTPUT", juce::dontSendNotification);
+        for (auto* waveform : {&inputWaveform_, &outputWaveform_}) {
+            waveform->setColours(juce::Colour::fromRGB(20, 29, 34),
+                                 juce::Colours::lightseagreen);
+            waveform->setBufferSize(512);
+            waveform->setSamplesPerBlock(256);
+        }
 
         pedalBox_.onChange = [this] {
             updateSettingsFromControls();
@@ -490,6 +503,16 @@ public:
         resetDiagnosticsButton_.setBounds(row.removeFromRight(158).reduced(0, 2));
         area.removeFromTop(10);
 
+        auto waveformArea = area.removeFromTop(96);
+        auto inputWaveArea = waveformArea.removeFromLeft(waveformArea.getWidth() / 2 - 6);
+        waveformArea.removeFromLeft(12);
+        auto& outputWaveArea = waveformArea;
+        inputWaveformLabel_.setBounds(inputWaveArea.removeFromTop(18));
+        inputWaveform_.setBounds(inputWaveArea);
+        outputWaveformLabel_.setBounds(outputWaveArea.removeFromTop(18));
+        outputWaveform_.setBounds(outputWaveArea);
+        area.removeFromTop(10);
+
         auto diagnostics = area.removeFromBottom(155);
         row = diagnostics.removeFromTop(34);
         inputTrim_.setBounds(row.removeFromLeft(row.getWidth() / 2 - 8));
@@ -610,6 +633,13 @@ public:
         auto settings = settingsForCurrentDevice();
         const bool ok = engine_.configure(currentSampleRate_, currentBlockSize_,
                                           processingChannels_, settings);
+        // Sized for a quarter second of headroom at the device sample rate so a
+        // stalled UI thread cannot make push() block or allocate; prepare() runs
+        // here, on the message thread, strictly before the callback below can push.
+        const int waveformCapacity = std::max(8192,
+            static_cast<int>(currentSampleRate_ * 0.25));
+        inputTapFifo_.prepare(waveformCapacity);
+        outputTapFifo_.prepare(waveformCapacity);
         engine_.setInputTrimDb(static_cast<float>(inputTrim_.getValue()));
         engine_.setOutputTrimDb(static_cast<float>(outputTrim_.getValue()));
         engine_.setMuted(mute_.getToggleState());
@@ -647,6 +677,16 @@ public:
         const juce::ScopedNoDenormals noDenormals;
         engine_.process(inputChannelData, numInputChannels,
                         outputChannelData, numOutputChannels, numSamples);
+
+        // Lock-free hand-off to the UI thread for the waveform displays: tap the
+        // physical input and the final hardware output actually written above.
+        // No allocation, no lock (see AudioTapFifo.h).
+        if (inputChannelData != nullptr && numInputChannels > 0
+            && inputChannelData[0] != nullptr)
+            inputTapFifo_.push(inputChannelData[0], numSamples);
+        if (outputChannelData != nullptr && numOutputChannels > 0
+            && outputChannelData[0] != nullptr)
+            outputTapFifo_.push(outputChannelData[0], numSamples);
     }
 
 private:
@@ -758,6 +798,14 @@ private:
 
     void timerCallback() override {
         engine_.collectRetired();
+        inputTapFifo_.drain([this](const float* samples, int count) {
+            const float* channelData[]{samples};
+            inputWaveform_.pushBuffer(channelData, 1, count);
+        });
+        outputTapFifo_.drain([this](const float* samples, int count) {
+            const float* channelData[]{samples};
+            outputWaveform_.pushBuffer(channelData, 1, count);
+        });
         if (toneControlsPending_) applyToneControls();
         const auto stats = engine_.stats();
         const auto dbText = [](float peak) {
@@ -1251,6 +1299,12 @@ private:
     juce::TextButton routingPageButton_;
     juce::TextButton advancedPageButton_;
     RoutingGraphView routingGraphView_;
+    guitardsp::app::AudioTapFifo inputTapFifo_;
+    guitardsp::app::AudioTapFifo outputTapFifo_;
+    juce::AudioVisualiserComponent inputWaveform_{1};
+    juce::AudioVisualiserComponent outputWaveform_{1};
+    juce::Label inputWaveformLabel_;
+    juce::Label outputWaveformLabel_;
     juce::Label statusLabel_;
     juce::Label irLabel_;
     juce::Label bassIrLabel_;
