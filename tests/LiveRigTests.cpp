@@ -254,5 +254,57 @@ int main() {
                       "LiveRigSettings::bassCabinetImpulse overrides makeReferenceBassCabinetImpulse");
     }
 
+    {
+        // Issue #76 change 2: each monitor window's tap-selection dropdown is
+        // built from availableMonitorTapPoints(), which must track exactly
+        // what buildLiveRigTopology() actually puts in the graph -- no entry
+        // for a stage the current settings don't produce.
+        const auto has = [](const std::vector<app::MonitorTapPoint>& points, app::MonitorTapPoint point) {
+            return std::find(points.begin(), points.end(), point) != points.end();
+        };
+
+        app::LiveRigSettings serial;
+        serial.pedal = app::PedalModel::bypass;
+        serial.ampEnabled = false;
+        serial.cabinetEnabled = false;
+        const auto serialPoints = app::availableMonitorTapPoints(serial);
+        ok &= require(has(serialPoints, app::MonitorTapPoint::physicalInput)
+                          && has(serialPoints, app::MonitorTapPoint::physicalOutput)
+                          && !has(serialPoints, app::MonitorTapPoint::pedalOutput)
+                          && !has(serialPoints, app::MonitorTapPoint::ampOutput)
+                          && !has(serialPoints, app::MonitorTapPoint::cabinetOutput)
+                          && !has(serialPoints, app::MonitorTapPoint::octaveOutput)
+                          && !has(serialPoints, app::MonitorTapPoint::bassAmpOutput)
+                          && !has(serialPoints, app::MonitorTapPoint::bassCabinetOutput),
+                      "bypassed pedal / disabled amp+cab / serial routing leaves only the "
+                      "physical taps");
+
+        app::LiveRigSettings full;
+        full.pedal = app::PedalModel::ts808Circuit;
+        full.ampEnabled = true;
+        full.cabinetEnabled = true;
+        full.signalRouting = app::SignalRouting::parallelOctaveBass;
+        full.octaveEnabled = true;
+        full.bassCabinetEnabled = true;
+        const auto fullPoints = app::availableMonitorTapPoints(full);
+        ok &= require(has(fullPoints, app::MonitorTapPoint::pedalOutput)
+                          && has(fullPoints, app::MonitorTapPoint::ampOutput)
+                          && has(fullPoints, app::MonitorTapPoint::cabinetOutput)
+                          && has(fullPoints, app::MonitorTapPoint::octaveOutput)
+                          && has(fullPoints, app::MonitorTapPoint::bassAmpOutput)
+                          && has(fullPoints, app::MonitorTapPoint::bassCabinetOutput),
+                      "fully-populated parallel rig offers every SIGNAL CHAIN tap point");
+
+        app::LiveRigSettings trimmed = full;
+        trimmed.octaveEnabled = false;
+        trimmed.bassCabinetEnabled = false;
+        const auto trimmedPoints = app::availableMonitorTapPoints(trimmed);
+        ok &= require(!has(trimmedPoints, app::MonitorTapPoint::octaveOutput)
+                          && !has(trimmedPoints, app::MonitorTapPoint::bassCabinetOutput)
+                          && has(trimmedPoints, app::MonitorTapPoint::bassAmpOutput),
+                      "disabling octave/bass-cab individually removes just those tap points, "
+                      "not the always-present bass amp tap");
+    }
+
     return ok ? 0 : 1;
 }

@@ -164,8 +164,8 @@ public:
         addAndMakeVisible(outputWaveform_);
         addAndMakeVisible(inputSpectrum_);
         addAndMakeVisible(outputSpectrum_);
-        addAndMakeVisible(inputWaveformLabel_);
-        addAndMakeVisible(outputWaveformLabel_);
+        addAndMakeVisible(inputMonitorTapBox_);
+        addAndMakeVisible(outputMonitorTapBox_);
         addAndMakeVisible(spectrumToggle_);
         addAndMakeVisible(statusLabel_);
         addAndMakeVisible(irLabel_);
@@ -368,8 +368,6 @@ public:
                              juce::dontSendNotification);
         meterLabel_.setText("Input: -inf dBFS    Output: -inf dBFS",
                             juce::dontSendNotification);
-        inputWaveformLabel_.setText("INPUT", juce::dontSendNotification);
-        outputWaveformLabel_.setText("OUTPUT", juce::dontSendNotification);
         for (auto* waveform : {&inputWaveform_, &outputWaveform_}) {
             waveform->setColours(juce::Colour::fromRGB(20, 29, 34),
                                  juce::Colours::lightseagreen);
@@ -389,6 +387,18 @@ public:
             outputWaveform_.setVisible(!showSpectrum_);
             inputSpectrum_.setVisible(showSpectrum_);
             outputSpectrum_.setVisible(showSpectrum_);
+        };
+        inputMonitorTapBox_.onChange = [this] {
+            const int index = inputMonitorTapBox_.getSelectedItemIndex();
+            if (index >= 0 && index < static_cast<int>(inputMonitorTapOptions_.size()))
+                inputMonitorTap_.store(inputMonitorTapOptions_[static_cast<std::size_t>(index)],
+                                       std::memory_order_relaxed);
+        };
+        outputMonitorTapBox_.onChange = [this] {
+            const int index = outputMonitorTapBox_.getSelectedItemIndex();
+            if (index >= 0 && index < static_cast<int>(outputMonitorTapOptions_.size()))
+                outputMonitorTap_.store(outputMonitorTapOptions_[static_cast<std::size_t>(index)],
+                                        std::memory_order_relaxed);
         };
 
         pedalBox_.onChange = [this] {
@@ -425,7 +435,7 @@ public:
         toneStackBox_.onChange = [this] { toneControlsPending_ = true; };
         toneDriverBox_.onChange = [this] { toneControlsPending_ = true; };
         feedbackVoicingBox_.onChange = [this] { toneControlsPending_ = true; };
-        safeDry_.onClick = [this] { rebuildRig(); };
+        safeDry_.onClick = [this] { updateMonitorTapOptions(); rebuildRig(); };
         mute_.onClick = [this] { engine_.setMuted(mute_.getToggleState()); };
         matchIrLevel_.onClick = [this] {
             settings_.matchMeasuredCabinetLevel = matchIrLevel_.getToggleState();
@@ -560,12 +570,12 @@ public:
         auto inputWaveArea = waveformArea.removeFromLeft(waveformArea.getWidth() / 2 - 6);
         waveformArea.removeFromLeft(12);
         auto& outputWaveArea = waveformArea;
-        inputWaveformLabel_.setBounds(inputWaveArea.removeFromTop(18));
+        inputMonitorTapBox_.setBounds(inputWaveArea.removeFromTop(18));
         inputWaveform_.setBounds(inputWaveArea);
         inputSpectrum_.setBounds(inputWaveArea);
         auto outputWaveLabelRow = outputWaveArea.removeFromTop(18);
-        outputWaveformLabel_.setBounds(outputWaveLabelRow.removeFromLeft(80));
         spectrumToggle_.setBounds(outputWaveLabelRow.removeFromRight(110).reduced(0, 1));
+        outputMonitorTapBox_.setBounds(outputWaveLabelRow);
         outputWaveform_.setBounds(outputWaveArea);
         outputSpectrum_.setBounds(outputWaveArea);
         area.removeFromTop(10);
@@ -700,8 +710,8 @@ public:
         // Sized to the device's own block size, which bounds numSamples for
         // every audioDeviceIOCallbackWithContext() call below; prepared here
         // on the message thread, before the callback that writes into it.
-        testSignalTapBuffer_.assign(static_cast<std::size_t>(std::max(1, currentBlockSize_)), 0.0f);
-        testSignalOutputTapBuffer_.assign(static_cast<std::size_t>(std::max(1, currentBlockSize_)), 0.0f);
+        monitorTapBufferA_.assign(static_cast<std::size_t>(std::max(1, currentBlockSize_)), 0.0f);
+        monitorTapBufferB_.assign(static_cast<std::size_t>(std::max(1, currentBlockSize_)), 0.0f);
         inputSpectrum_.setSampleRate(currentSampleRate_);
         outputSpectrum_.setSampleRate(currentSampleRate_);
         inputSpectrum_.resetAnalysis();
@@ -742,44 +752,26 @@ public:
                                           int numSamples,
                                           const juce::AudioIODeviceCallbackContext&) override {
         const juce::ScopedNoDenormals noDenormals;
-        // testSignalTapBuffer_/testSignalOutputTapBuffer_ are sized to
-        // currentBlockSize_ in audioDeviceAboutToStart(), which bounds
-        // numSamples here; only handed to process() as write targets while
-        // test-signal mode is active and only ever touched from this callback.
-        const bool testSignalMode = testSignalActive_.load(std::memory_order_acquire);
-        const bool testSignalBuffersFit = static_cast<std::size_t>(numSamples)
-            <= testSignalTapBuffer_.size();
-        float* testSignalTap = testSignalMode && testSignalBuffersFit
-            ? testSignalTapBuffer_.data() : nullptr;
-        // While test-signal mode is active, RealtimeAudioEngine::process()
-        // always forces the physical output silent (see its doc comment) so
-        // the test tone is never actually heard; this tap instead carries
-        // the real post-DSP signal so the OUTPUT waveform/spectrum can keep
-        // showing it instead of going dark.
-        float* testSignalOutputTap = testSignalMode && testSignalBuffersFit
-            ? testSignalOutputTapBuffer_.data() : nullptr;
+        // monitorTapBufferA_/monitorTapBufferB_ are sized to currentBlockSize_
+        // in audioDeviceAboutToStart(), which bounds numSamples here; only
+        // ever touched from this callback.
+        const bool monitorBuffersFit = static_cast<std::size_t>(numSamples)
+            <= monitorTapBufferA_.size() && static_cast<std::size_t>(numSamples)
+            <= monitorTapBufferB_.size();
+        float* monitorTapA = monitorBuffersFit ? monitorTapBufferA_.data() : nullptr;
+        float* monitorTapB = monitorBuffersFit ? monitorTapBufferB_.data() : nullptr;
         engine_.process(inputChannelData, numInputChannels,
                         outputChannelData, numOutputChannels, numSamples,
-                        testSignalTap, testSignalOutputTap);
+                        inputMonitorTap_.load(std::memory_order_relaxed), monitorTapA,
+                        outputMonitorTap_.load(std::memory_order_relaxed), monitorTapB);
 
-        // Lock-free hand-off to the UI thread for the waveform displays: tap
-        // the final hardware output actually written above (or, in test-signal
-        // mode, the un-muted post-DSP tap since the hardware output is forced
-        // silent), and either the physical input or (in test-signal mode) the
-        // synthesized stimulus that was actually fed into the graph. No
+        // Lock-free hand-off to the UI thread for the two monitor windows'
+        // waveform/spectrum displays -- each window shows whatever tap point
+        // its dropdown currently selects (see RealtimeAudioEngine::process()'s
+        // MonitorTapPoint doc comment for exactly what each point reads). No
         // allocation, no lock (see AudioTapFifo.h).
-        if (testSignalTap != nullptr) {
-            inputTapFifo_.push(testSignalTap, numSamples);
-        } else if (inputChannelData != nullptr && numInputChannels > 0
-            && inputChannelData[0] != nullptr) {
-            inputTapFifo_.push(inputChannelData[0], numSamples);
-        }
-        if (testSignalOutputTap != nullptr) {
-            outputTapFifo_.push(testSignalOutputTap, numSamples);
-        } else if (outputChannelData != nullptr && numOutputChannels > 0
-            && outputChannelData[0] != nullptr) {
-            outputTapFifo_.push(outputChannelData[0], numSamples);
-        }
+        if (monitorTapA != nullptr) inputTapFifo_.push(monitorTapA, numSamples);
+        if (monitorTapB != nullptr) outputTapFifo_.push(monitorTapB, numSamples);
     }
 
 private:
@@ -1207,6 +1199,53 @@ private:
         settings_.octaveEnabled = octaveEnabled_.getToggleState();
         settings_.bassCabinetEnabled = bassCabinetEnabled_.getToggleState();
         settings_.matchMeasuredCabinetLevel = matchIrLevel_.getToggleState();
+        updateMonitorTapOptions();
+    }
+
+    // Rebuilds each monitor window's tap-selection dropdown from the tap
+    // points the current rig settings actually make available (see
+    // availableMonitorTapPoints()), so a bypassed pedal, a disabled amp/
+    // cabinet, serial routing, etc. never leave a stale, nonexistent tap
+    // selectable. Preserves each window's current selection if it's still
+    // available; otherwise falls back to the physical input/output default.
+    void updateMonitorTapOptions() {
+        auto effective = settings_;
+        if (safeDry_.getToggleState()) {
+            effective.pedal = guitardsp::app::PedalModel::bypass;
+            effective.signalRouting = guitardsp::app::SignalRouting::serialGuitar;
+            effective.ampEnabled = false;
+            effective.cabinetEnabled = false;
+        }
+        const auto points = guitardsp::app::availableMonitorTapPoints(effective);
+
+        auto populate = [&](juce::ComboBox& box,
+                            std::vector<guitardsp::app::MonitorTapPoint>& options,
+                            std::atomic<guitardsp::app::MonitorTapPoint>& selection,
+                            guitardsp::app::MonitorTapPoint fallback) {
+            const auto current = selection.load(std::memory_order_relaxed);
+            options = points;
+            box.clear(juce::dontSendNotification);
+            int selectId = 0;
+            for (std::size_t i = 0; i < options.size(); ++i) {
+                const int id = static_cast<int>(i) + 1;
+                box.addItem(guitardsp::app::monitorTapPointLabel(options[i]), id);
+                if (options[i] == current) selectId = id;
+            }
+            if (selectId == 0) {
+                const auto it = std::find(options.begin(), options.end(), fallback);
+                selectId = it != options.end()
+                    ? static_cast<int>(std::distance(options.begin(), it)) + 1
+                    : (options.empty() ? 0 : 1);
+                if (selectId > 0)
+                    selection.store(options[static_cast<std::size_t>(selectId - 1)],
+                                    std::memory_order_relaxed);
+            }
+            box.setSelectedId(selectId, juce::dontSendNotification);
+        };
+        populate(inputMonitorTapBox_, inputMonitorTapOptions_, inputMonitorTap_,
+                guitardsp::app::MonitorTapPoint::physicalInput);
+        populate(outputMonitorTapBox_, outputMonitorTapOptions_, outputMonitorTap_,
+                guitardsp::app::MonitorTapPoint::physicalOutput);
     }
 
     // Offline-resamples a measured IR to the active device sample rate and
@@ -1414,21 +1453,35 @@ private:
     RoutingGraphView routingGraphView_;
     guitardsp::app::AudioTapFifo inputTapFifo_;
     guitardsp::app::AudioTapFifo outputTapFifo_;
-    // Audio-callback-readable flag mirroring the InputRoutingMode combo box,
-    // and the scratch buffer process() writes the synthesized test tone into
-    // so the input waveform/spectrum can tap the actual DSP stimulus instead
-    // of the (idle) physical input while test-signal mode is active.
+    // Audio-callback-readable flag mirroring the InputRoutingMode combo box.
     std::atomic<bool> testSignalActive_{false};
-    std::vector<float> testSignalTapBuffer_;
-    std::vector<float> testSignalOutputTapBuffer_;
+    // Scratch buffers process() writes each monitor window's selected tap
+    // signal into every callback (see RealtimeAudioEngine::process()'s
+    // MonitorTapPoint doc comment); sized to the device block size in
+    // audioDeviceAboutToStart().
+    std::vector<float> monitorTapBufferA_;
+    std::vector<float> monitorTapBufferB_;
+    // Audio-callback-readable mirrors of inputMonitorTapBox_/
+    // outputMonitorTapBox_'s current selection; the id<->MonitorTapPoint
+    // mapping can change (see inputMonitorTapOptions_/outputMonitorTapOptions_
+    // below) so the combo box's selected id alone isn't audio-thread safe.
+    std::atomic<guitardsp::app::MonitorTapPoint> inputMonitorTap_{
+        guitardsp::app::MonitorTapPoint::physicalInput};
+    std::atomic<guitardsp::app::MonitorTapPoint> outputMonitorTap_{
+        guitardsp::app::MonitorTapPoint::physicalOutput};
+    // Message-thread-only: index i of each combo box corresponds to
+    // options[i], rebuilt by updateMonitorTapOptions() whenever the rig
+    // settings change what SIGNAL CHAIN stages exist.
+    std::vector<guitardsp::app::MonitorTapPoint> inputMonitorTapOptions_;
+    std::vector<guitardsp::app::MonitorTapPoint> outputMonitorTapOptions_;
     juce::AudioVisualiserComponent inputWaveform_{1};
     juce::AudioVisualiserComponent outputWaveform_{1};
     guitardsp::app::SpectrumAnalyserComponent inputSpectrum_{2048};
     guitardsp::app::SpectrumAnalyserComponent outputSpectrum_{2048};
     juce::TextButton spectrumToggle_;
     bool showSpectrum_ = false;
-    juce::Label inputWaveformLabel_;
-    juce::Label outputWaveformLabel_;
+    juce::ComboBox inputMonitorTapBox_;
+    juce::ComboBox outputMonitorTapBox_;
     juce::Label statusLabel_;
     juce::Label irLabel_;
     juce::Label bassIrLabel_;

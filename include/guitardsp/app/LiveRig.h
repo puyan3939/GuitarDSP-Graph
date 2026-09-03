@@ -3,6 +3,8 @@
 #include "guitardsp/graph/AudioNode.h"
 #include "guitardsp/graph/RealtimeGraphHost.h"
 
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -82,6 +84,64 @@ struct LiveRigSettings {
     // cabinet branch (see configureBassCabinet()).
     std::vector<float> bassCabinetImpulse;
 };
+
+// A place a waveform/spectrum monitor window can tap into. physicalInput/
+// physicalOutput aren't graph nodes -- RealtimeAudioEngine reads those
+// directly from its pre-DSP input block / post-DSP output block. The rest
+// name a stage inside the SIGNAL CHAIN and are resolved against the live
+// compiled graph by typeId (see monitorTapPointCandidates()).
+enum class MonitorTapPoint : std::uint8_t {
+    physicalInput,
+    physicalOutput,
+    pedalOutput,
+    ampOutput,
+    cabinetOutput,
+    octaveOutput,
+    bassAmpOutput,
+    bassCabinetOutput,
+};
+
+// Which typeIds a given tap point could resolve to across every possible
+// pedal/amp model choice. RealtimeAudioEngine doesn't track the active
+// LiveRigSettings itself (it only ever sees the already-compiled graph), so
+// it probes each candidate in turn against the live graph and uses whichever
+// one is actually present -- exactly one will be, since pedal/amp selection
+// always produces a single node of one of these types. Fixed-size and
+// constexpr so this is real-time safe to call from the audio thread.
+struct MonitorTapCandidates {
+    std::array<const char*, 5> typeIds{};
+    int count = 0;
+};
+
+[[nodiscard]] constexpr MonitorTapCandidates monitorTapPointCandidates(MonitorTapPoint point) noexcept {
+    switch (point) {
+        case MonitorTapPoint::pedalOutput:
+            return {{"drive.ts808_circuit_hq", "drive.ds1_circuit_hq"}, 2};
+        case MonitorTapPoint::ampOutput:
+            return {{"amp.reference_hq", "amp.british_plexi_family_hq",
+                      "amp.american_clean_family_hq", "drive.preamp_circuit_hq",
+                      "amp.full_amp_circuit_hq"}, 5};
+        case MonitorTapPoint::cabinetOutput: return {{"cab.chain_hq"}, 1};
+        case MonitorTapPoint::octaveOutput: return {{"pitch.octave_down_mono"}, 1};
+        case MonitorTapPoint::bassAmpOutput: return {{"amp.bass_reference_hq"}, 1};
+        case MonitorTapPoint::bassCabinetOutput: return {{"cab.bass_reference_hq"}, 1};
+        case MonitorTapPoint::physicalInput:
+        case MonitorTapPoint::physicalOutput:
+        default:
+            return {};
+    }
+}
+
+// Short label for a monitor-window tap-selection dropdown.
+[[nodiscard]] const char* monitorTapPointLabel(MonitorTapPoint point) noexcept;
+
+// Which tap points are actually reachable for the given settings, in display
+// order. physicalInput/physicalOutput are always first. A SIGNAL CHAIN stage
+// only appears once the settings actually produce a node for it (bypassed
+// pedal, disabled amp/cabinet, serial routing with no bass branch, etc. all
+// remove the corresponding entry) so a dropdown built from this never offers
+// a tap point that doesn't exist in the live graph.
+[[nodiscard]] std::vector<MonitorTapPoint> availableMonitorTapPoints(const LiveRigSettings& settings);
 
 std::unique_ptr<graph::PreparedGraph> prepareLiveRig(const LiveRigSettings& settings,
                                                      double sampleRate,

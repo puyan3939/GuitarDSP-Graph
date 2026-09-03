@@ -103,4 +103,10 @@ void CompiledAudioGraph::processMultiOutput(const AudioBuffer& externalInput,std
     }
 }
 
+const AudioBuffer* CompiledAudioGraph::nodeOutput(NodeId id,int port)const noexcept{
+    const auto*r=runtime(id);
+    if(!r||port<0||port>=static_cast<int>(r->outputs.size()))return nullptr;
+    return &r->outputs[static_cast<std::size_t>(port)];
+}
+
 } // namespace guitardsp::graph

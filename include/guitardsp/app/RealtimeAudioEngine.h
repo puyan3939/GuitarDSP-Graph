@@ -52,28 +52,43 @@ public:
 
     bool rebuildRig(const LiveRigSettings& settings);
 
-    // testSignalTap, when non-null, receives the exact sample stream fed into
-    // the graph as input for this callback while InputRoutingMode::testSignal
-    // is active (untouched otherwise), so a caller can hand the same buffer
-    // to a waveform/spectrum tap instead of the (idle) physical input. Must
-    // have room for at least numSamples floats; writing it is an O(numSamples)
-    // store with no extra allocation or locking.
+    // Two independent waveform/spectrum monitor taps -- monitorTapPointA/B
+    // select where each one reads from (see MonitorTapPoint), and, when the
+    // matching buffer pointer is non-null, that many samples of the tapped
+    // signal are written to it (room for at least numSamples floats
+    // required). Each is an O(numSamples) store with no extra allocation or
+    // locking, safe to call every device callback.
     //
-    // testSignalOutputTap, when non-null, receives the post-DSP output sample
-    // stream (channel 0, after outputGain/safety-ceiling) while
-    // InputRoutingMode::testSignal is active (untouched otherwise). While
-    // that mode is active the physical outputChannels are always forced
-    // silent regardless of setMuted(), since a test signal is for probing the
-    // rig's waveform/spectrum response, not for listening to -- this tap is
-    // what lets a caller still show that response on a display. Must have
-    // room for at least numSamples floats.
+    // MonitorTapPoint::physicalInput reads the raw physical input channel 0,
+    // except while InputRoutingMode::testSignal is active, where it instead
+    // reads the synthesized stimulus actually fed into the graph (there is
+    // no physical input to show).
+    //
+    // MonitorTapPoint::physicalOutput reads the post-DSP, post-outputGain,
+    // safety-ceiling-clamped channel-0 signal -- i.e. what the hardware
+    // output would carry if it weren't muted. This is deliberately the same
+    // regardless of setMuted()/InputRoutingMode::testSignal's forced mute
+    // (see below): the display keeps showing the real signal even when the
+    // speakers are silent.
+    //
+    // The remaining MonitorTapPoint values read directly from the
+    // corresponding SIGNAL CHAIN node's output inside the compiled graph
+    // (pre-outputGain); if the current rig doesn't have that stage, the tap
+    // is filled with silence.
+    //
+    // Independent of which tap points are selected: while
+    // InputRoutingMode::testSignal is active the physical outputChannels are
+    // always forced silent regardless of setMuted(), since a test signal is
+    // for probing the rig's waveform/spectrum response, not for listening to.
     void process(const float* const* inputChannels,
                  int numInputChannels,
                  float* const* outputChannels,
                  int numOutputChannels,
                  int numSamples,
-                 float* testSignalTap = nullptr,
-                 float* testSignalOutputTap = nullptr) noexcept;
+                 MonitorTapPoint monitorTapPointA = MonitorTapPoint::physicalInput,
+                 float* monitorTapBufferA = nullptr,
+                 MonitorTapPoint monitorTapPointB = MonitorTapPoint::physicalOutput,
+                 float* monitorTapBufferB = nullptr) noexcept;
 
     void setInputTrimDb(float db) noexcept;
     void setOutputTrimDb(float db) noexcept;
@@ -107,6 +122,10 @@ public:
 
 private:
     static float dbToLinear(float db) noexcept;
+    // Probes monitorTapPointCandidates(point) against the active compiled
+    // graph and returns whichever one is present, or nullptr if the current
+    // rig has no stage of that type. Audio-thread safe, no allocation.
+    [[nodiscard]] const graph::AudioBuffer* resolveMonitorNodeTap(MonitorTapPoint point) const noexcept;
 
     graph::RealtimeGraphHost host_;
     graph::AudioBuffer inputBlock_;
