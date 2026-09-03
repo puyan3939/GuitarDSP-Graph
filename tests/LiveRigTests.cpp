@@ -200,5 +200,59 @@ int main() {
                       "right-jack guitar stays audible after tube self-bias settles");
     }
 
+    {
+        // Issue #64: the dedicated bass branch should follow the same
+        // "loaded IR overrides the synthetic reference" fallback as the
+        // guitar cabinet (configureGuitarCabinet / configureBassCabinet in
+        // LiveRig.cpp). Render the bass branch with a near-identity IR and
+        // with the default fallback and confirm they audibly differ, which
+        // only holds if LiveRigSettings::bassCabinetImpulse actually reaches
+        // the bass cabinet node instead of being ignored.
+        constexpr double sampleRate = 48000.0;
+        constexpr int blockSize = 256;
+        constexpr int blocks = 4;
+
+        const auto renderBassBranch = [&](const std::vector<float>& bassImpulse) {
+            app::LiveRigSettings settings;
+            settings.quality = graph::ProcessingQuality::eco;
+            settings.pedal = app::PedalModel::bypass;
+            settings.ampEnabled = false;
+            settings.cabinetEnabled = false;
+            settings.signalRouting = app::SignalRouting::parallelOctaveBass;
+            settings.octaveEnabled = false;
+            settings.guitarBranchLevel = 0.0f;
+            settings.bassBranchLevel = 1.0f;
+            settings.bassLevel = 1.0f;
+            settings.bassCabinetImpulse = bassImpulse;
+
+            std::vector<float> rendered;
+            auto rig = app::prepareLiveRig(settings, sampleRate, blockSize, 1);
+            if (!rig) return rendered;
+            graph::AudioBuffer input(1, blockSize), output(1, blockSize);
+            for (int block = 0; block < blocks; ++block) {
+                for (int i = 0; i < blockSize; ++i) {
+                    const int sample = block * blockSize + i;
+                    input.channel(0)[i] = 0.2f * std::sin(
+                        2.0f * std::numbers::pi_v<float> * 110.0f
+                        * static_cast<float>(sample) / static_cast<float>(sampleRate));
+                }
+                rig->runtime.process(input, output, blockSize);
+                for (int i = 0; i < blockSize; ++i) rendered.push_back(output.channel(0)[i]);
+            }
+            return rendered;
+        };
+
+        const auto withCustomIr = renderBassBranch({1.0f});
+        const auto withDefaultIr = renderBassBranch({});
+        ok &= require(!withCustomIr.empty() && withCustomIr.size() == withDefaultIr.size(),
+                      "bass branch renders with both a custom IR and the default fallback");
+
+        float difference = 0.0f;
+        for (std::size_t i = 0; i < withCustomIr.size(); ++i)
+            difference += std::abs(withCustomIr[i] - withDefaultIr[i]);
+        ok &= require(difference > 1.0e-3f,
+                      "LiveRigSettings::bassCabinetImpulse overrides makeReferenceBassCabinetImpulse");
+    }
+
     return ok ? 0 : 1;
 }

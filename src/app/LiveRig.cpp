@@ -94,7 +94,9 @@ void configureGuitarCabinet(hq::CabinetChainNode& cab, const LiveRigSettings& se
 void configureBassCabinet(hq::BassCabinetNode& cab, const LiveRigSettings& settings,
                           double sampleRate) {
     cab.setPartitionSize(std::clamp(settings.cabinetPartitionSize, 16, 1024));
-    cab.setImpulseResponse(makeReferenceBassCabinetImpulse(sampleRate));
+    cab.setImpulseResponse(settings.bassCabinetImpulse.empty()
+        ? makeReferenceBassCabinetImpulse(sampleRate)
+        : settings.bassCabinetImpulse);
     cab.setParameterValue(0, 0.12f);
     cab.setParameterValue(1, 0.10f);
     cab.setParameterValue(2, 0.28f);
