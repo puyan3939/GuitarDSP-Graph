@@ -17,7 +17,12 @@ enum class InputRoutingMode : std::uint8_t {
     autoMono,
     input1,
     input2,
-    stereo
+    stereo,
+    // Physical inputs are ignored; the graph is fed a synthesized sine wave
+    // computed sample-by-sample in process() (see setTestSignalFrequencyHz()/
+    // setTestSignalAmplitude()). Intended for probing a rig's response to a
+    // known stimulus alongside the waveform/spectrum displays.
+    testSignal
 };
 
 struct RealtimeAudioStats {
@@ -47,11 +52,18 @@ public:
 
     bool rebuildRig(const LiveRigSettings& settings);
 
+    // testSignalTap, when non-null, receives the exact sample stream fed into
+    // the graph as input for this callback while InputRoutingMode::testSignal
+    // is active (untouched otherwise), so a caller can hand the same buffer
+    // to a waveform/spectrum tap instead of the (idle) physical input. Must
+    // have room for at least numSamples floats; writing it is an O(numSamples)
+    // store with no extra allocation or locking.
     void process(const float* const* inputChannels,
                  int numInputChannels,
                  float* const* outputChannels,
                  int numOutputChannels,
-                 int numSamples) noexcept;
+                 int numSamples,
+                 float* testSignalTap = nullptr) noexcept;
 
     void setInputTrimDb(float db) noexcept;
     void setOutputTrimDb(float db) noexcept;
@@ -60,6 +72,10 @@ public:
     void setInputRoutingMode(InputRoutingMode mode) noexcept {
         inputRoutingMode_.store(mode, std::memory_order_release);
     }
+    // Control-thread setters for the InputRoutingMode::testSignal oscillator.
+    // Clamped to a sane audio range; take effect at the next process() call.
+    void setTestSignalFrequencyHz(float hz) noexcept;
+    void setTestSignalAmplitude(float linear) noexcept;
     bool setNodeParameter(graph::NodeCategory category,
                           std::size_t parameterIndex,
                           float value) noexcept;
@@ -95,6 +111,11 @@ private:
     std::atomic<float> safetyCeiling_{0.98f};
     std::atomic<bool> muted_{false};
     std::atomic<InputRoutingMode> inputRoutingMode_{InputRoutingMode::autoMono};
+    std::atomic<float> testSignalFrequencyHz_{440.0f};
+    std::atomic<float> testSignalAmplitude_{0.5f};
+    // Audio-thread-only phase accumulator; only ever touched from process(),
+    // mirroring autoSelectedInputChannel_ below.
+    double testSignalPhase_ = 0.0;
 
     std::atomic<std::uint64_t> callbacks_{0};
     std::atomic<std::uint64_t> clippedSamples_{0};

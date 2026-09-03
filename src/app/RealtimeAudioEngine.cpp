@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <numbers>
 
 namespace guitardsp::app {
 
@@ -54,6 +55,14 @@ void RealtimeAudioEngine::setSafetyCeiling(float linear) noexcept {
     safetyCeiling_.store(std::clamp(linear, 0.1f, 1.0f), std::memory_order_release);
 }
 
+void RealtimeAudioEngine::setTestSignalFrequencyHz(float hz) noexcept {
+    testSignalFrequencyHz_.store(std::clamp(hz, 20.0f, 20000.0f), std::memory_order_release);
+}
+
+void RealtimeAudioEngine::setTestSignalAmplitude(float linear) noexcept {
+    testSignalAmplitude_.store(std::clamp(linear, 0.0f, 1.0f), std::memory_order_release);
+}
+
 bool RealtimeAudioEngine::setNodeParameter(graph::NodeCategory category,
                                            std::size_t parameterIndex,
                                            float value) noexcept {
@@ -101,7 +110,8 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
                                   int numInputChannels,
                                   float* const* outputChannels,
                                   int numOutputChannels,
-                                  int numSamples) noexcept {
+                                  int numSamples,
+                                  float* testSignalTap) noexcept {
     if (numSamples <= 0) return;
 
     for (int ch = 0; ch < numOutputChannels; ++ch) {
@@ -168,9 +178,18 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
             }
         }
         selectedChannel = autoSelectedInputChannel_;
+    } else if (routingMode == InputRoutingMode::testSignal) {
+        selectedChannel = -1;
     } else {
         selectedChannel = channelAvailable(0) ? 0 : channelAvailable(1) ? 1 : -1;
     }
+
+    const bool testSignalMode = routingMode == InputRoutingMode::testSignal;
+    const float testFrequencyHz = testSignalFrequencyHz_.load(std::memory_order_acquire);
+    const float testAmplitude = testSignalAmplitude_.load(std::memory_order_acquire);
+    const double testPhaseIncrement = testSignalMode
+        ? 2.0 * std::numbers::pi_v<double> * static_cast<double>(testFrequencyHz) / sampleRate_
+        : 0.0;
 
     float callbackInputPeak = 0.0f;
     float callbackOutputPeak = 0.0f;
@@ -183,26 +202,43 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
         inputBlock_.clear(blockSamples);
         outputBlock_.clear(blockSamples);
 
-        for (int ch = 0; ch < processingChannels_; ++ch) {
-            float* destination = inputBlock_.channel(ch);
-            const float* source = nullptr;
-            if (routingMode == InputRoutingMode::stereo) {
-                const int sourceChannel = physicalChannels == 1
-                    ? 0 : std::min(ch, physicalChannels - 1);
-                if (channelAvailable(sourceChannel)) source = inputChannels[sourceChannel];
-            } else if (channelAvailable(selectedChannel)) {
-                source = inputChannels[selectedChannel];
-            }
-            if (source == nullptr) continue;
-            source += offset;
+        if (testSignalMode) {
+            // Synthesized in place of any physical input: no allocation, just
+            // a per-sample sin() evaluated from a running phase accumulator so
+            // frequency changes between blocks never produce a phase jump.
             for (int i = 0; i < blockSamples; ++i) {
-                const float sample = std::isfinite(source[i]) ? source[i] * inputGain : 0.0f;
-                if (!std::isfinite(sample)) {
-                    destination[i] = 0.0f;
-                    continue;
-                }
-                destination[i] = sample;
+                const double phase = testSignalPhase_ + static_cast<double>(i) * testPhaseIncrement;
+                const float sample = testAmplitude * static_cast<float>(std::sin(phase));
+                for (int ch = 0; ch < processingChannels_; ++ch)
+                    inputBlock_.channel(ch)[i] = sample;
+                if (testSignalTap != nullptr) testSignalTap[offset + i] = sample;
                 callbackInputPeak = std::max(callbackInputPeak, std::abs(sample));
+            }
+            testSignalPhase_ = std::fmod(
+                testSignalPhase_ + static_cast<double>(blockSamples) * testPhaseIncrement,
+                2.0 * std::numbers::pi_v<double>);
+        } else {
+            for (int ch = 0; ch < processingChannels_; ++ch) {
+                float* destination = inputBlock_.channel(ch);
+                const float* source = nullptr;
+                if (routingMode == InputRoutingMode::stereo) {
+                    const int sourceChannel = physicalChannels == 1
+                        ? 0 : std::min(ch, physicalChannels - 1);
+                    if (channelAvailable(sourceChannel)) source = inputChannels[sourceChannel];
+                } else if (channelAvailable(selectedChannel)) {
+                    source = inputChannels[selectedChannel];
+                }
+                if (source == nullptr) continue;
+                source += offset;
+                for (int i = 0; i < blockSamples; ++i) {
+                    const float sample = std::isfinite(source[i]) ? source[i] * inputGain : 0.0f;
+                    if (!std::isfinite(sample)) {
+                        destination[i] = 0.0f;
+                        continue;
+                    }
+                    destination[i] = sample;
+                    callbackInputPeak = std::max(callbackInputPeak, std::abs(sample));
+                }
             }
         }
 
