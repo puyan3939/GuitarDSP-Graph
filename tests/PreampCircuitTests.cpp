@@ -50,6 +50,9 @@ int main() {
         std::cout << "DIAG preamp dc grid=" << s.grid << " plate=" << s.plate
                   << " cathode=" << s.cathode << " toneIn=" << s.toneIn
                   << " toneOut=" << s.toneOut << " output=" << s.output << '\n';
+        ok &= require(preamp.engine().sparseNonlinearSolverAvailable()
+                          && preamp.engine().sparseNonlinearCachedLinearUnknowns() >= 11,
+                      "cached linear Schur prefix retains most of the 14 preamp component unknowns");
         ok &= require(std::isfinite(s.grid) && std::isfinite(s.plate) &&
                           std::isfinite(s.cathode) && std::isfinite(s.output),
                       "preamp DC stage voltages are finite");
