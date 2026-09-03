@@ -3,6 +3,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "AudioTapFifo.h"
+#include "SpectrumAnalyserComponent.h"
 #include "guitardsp/app/LiveRig.h"
 #include "guitardsp/app/RealtimeAudioEngine.h"
 #include "guitardsp/app/ReferenceCabinetIR.h"
@@ -157,8 +158,11 @@ public:
         addAndMakeVisible(routingGraphView_);
         addAndMakeVisible(inputWaveform_);
         addAndMakeVisible(outputWaveform_);
+        addAndMakeVisible(inputSpectrum_);
+        addAndMakeVisible(outputSpectrum_);
         addAndMakeVisible(inputWaveformLabel_);
         addAndMakeVisible(outputWaveformLabel_);
+        addAndMakeVisible(spectrumToggle_);
         addAndMakeVisible(statusLabel_);
         addAndMakeVisible(irLabel_);
         addAndMakeVisible(meterLabel_);
@@ -348,6 +352,20 @@ public:
             waveform->setBufferSize(512);
             waveform->setSamplesPerBlock(256);
         }
+        for (auto* spectrum : {&inputSpectrum_, &outputSpectrum_}) {
+            spectrum->setColours(juce::Colour::fromRGB(20, 29, 34),
+                                 juce::Colours::lightseagreen);
+            spectrum->setVisible(false);
+        }
+        spectrumToggle_.setButtonText("SPECTRUM");
+        spectrumToggle_.setClickingTogglesState(true);
+        spectrumToggle_.onClick = [this] {
+            showSpectrum_ = spectrumToggle_.getToggleState();
+            inputWaveform_.setVisible(!showSpectrum_);
+            outputWaveform_.setVisible(!showSpectrum_);
+            inputSpectrum_.setVisible(showSpectrum_);
+            outputSpectrum_.setVisible(showSpectrum_);
+        };
 
         pedalBox_.onChange = [this] {
             updateSettingsFromControls();
@@ -509,8 +527,12 @@ public:
         auto& outputWaveArea = waveformArea;
         inputWaveformLabel_.setBounds(inputWaveArea.removeFromTop(18));
         inputWaveform_.setBounds(inputWaveArea);
-        outputWaveformLabel_.setBounds(outputWaveArea.removeFromTop(18));
+        inputSpectrum_.setBounds(inputWaveArea);
+        auto outputWaveLabelRow = outputWaveArea.removeFromTop(18);
+        outputWaveformLabel_.setBounds(outputWaveLabelRow.removeFromLeft(80));
+        spectrumToggle_.setBounds(outputWaveLabelRow.removeFromRight(110).reduced(0, 1));
         outputWaveform_.setBounds(outputWaveArea);
+        outputSpectrum_.setBounds(outputWaveArea);
         area.removeFromTop(10);
 
         auto diagnostics = area.removeFromBottom(155);
@@ -640,6 +662,10 @@ public:
             static_cast<int>(currentSampleRate_ * 0.25));
         inputTapFifo_.prepare(waveformCapacity);
         outputTapFifo_.prepare(waveformCapacity);
+        inputSpectrum_.setSampleRate(currentSampleRate_);
+        outputSpectrum_.setSampleRate(currentSampleRate_);
+        inputSpectrum_.resetAnalysis();
+        outputSpectrum_.resetAnalysis();
         engine_.setInputTrimDb(static_cast<float>(inputTrim_.getValue()));
         engine_.setOutputTrimDb(static_cast<float>(outputTrim_.getValue()));
         engine_.setMuted(mute_.getToggleState());
@@ -801,10 +827,12 @@ private:
         inputTapFifo_.drain([this](const float* samples, int count) {
             const float* channelData[]{samples};
             inputWaveform_.pushBuffer(channelData, 1, count);
+            inputSpectrum_.pushSamples(samples, count);
         });
         outputTapFifo_.drain([this](const float* samples, int count) {
             const float* channelData[]{samples};
             outputWaveform_.pushBuffer(channelData, 1, count);
+            outputSpectrum_.pushSamples(samples, count);
         });
         if (toneControlsPending_) applyToneControls();
         const auto stats = engine_.stats();
@@ -1303,6 +1331,10 @@ private:
     guitardsp::app::AudioTapFifo outputTapFifo_;
     juce::AudioVisualiserComponent inputWaveform_{1};
     juce::AudioVisualiserComponent outputWaveform_{1};
+    guitardsp::app::SpectrumAnalyserComponent inputSpectrum_{2048};
+    guitardsp::app::SpectrumAnalyserComponent outputSpectrum_{2048};
+    juce::TextButton spectrumToggle_;
+    bool showSpectrum_ = false;
     juce::Label inputWaveformLabel_;
     juce::Label outputWaveformLabel_;
     juce::Label statusLabel_;
