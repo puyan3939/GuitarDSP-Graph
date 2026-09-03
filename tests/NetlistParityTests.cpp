@@ -10,6 +10,7 @@
 // settings, matching the "NetlistParityCheck" pattern requested for the
 // amp/cabinet netlist follow-up.
 
+#include "guitardsp/circuit/CompressorCircuit.h"
 #include "guitardsp/circuit/DS1Circuit.h"
 #include "guitardsp/circuit/NetlistLoader.h"
 #include "guitardsp/circuit/PowerAmpCircuit.h"
@@ -220,6 +221,44 @@ bool checkPowerAmpParity(float amplitude) {
     return require(cmp.ok && cmp.maxAbsReference > 1.0e-3f, label);
 }
 
+bool checkCompressorParity(float amplitude) {
+    circuit::CompressorCircuit reference;
+    if (!reference.prepare(sampleRate)) return require(false, "Compressor reference prepare()");
+
+    circuit::NetlistCircuit candidate;
+    std::string error;
+    if (!candidate.loadFromFile(std::string(GUITARDSP_NETLIST_DATA_DIR) + "/compressor.json", &error))
+        return require(false, "Compressor netlist load: " + error);
+    if (!candidate.prepare(sampleRate, &error))
+        return require(false, "Compressor netlist prepare(): " + error);
+
+    // CompressorCircuit exposes no user controls (a fixed LA-2A-style
+    // feedback gain cell, like PowerAmpCircuit), so the parity sweep instead
+    // varies input level -- from a quiet, uncompressed signal up through
+    // levels that drive the LDR well into its lit range -- to exercise the
+    // sidechain peak detector, diode rectifier and the per-sample LDR
+    // resistance update identically on both sides.
+    const auto settle = sineBurst(4000, amplitude, 220.0);
+    for (float x : settle) {
+        reference.processSample(x);
+        candidate.processSample(x);
+    }
+
+    const auto probe = sineBurst(2000, amplitude, 220.0, 4000);
+    std::vector<float> referenceOut(probe.size());
+    std::vector<float> candidateOut(probe.size());
+    for (std::size_t i = 0; i < probe.size(); ++i) {
+        referenceOut[i] = reference.processSample(probe[i]);
+        candidateOut[i] = candidate.processSample(probe[i]);
+    }
+
+    const auto cmp = compare(referenceOut, candidateOut, 5.0e-4f);
+    const std::string label = "Compressor parity amplitude=" + std::to_string(amplitude) +
+        " (maxDiff=" + std::to_string(cmp.maxAbsDifference) +
+        ", maxRef=" + std::to_string(cmp.maxAbsReference) + ")";
+    return require(cmp.ok, label);
+}
+
 } // namespace
 
 int main() {
@@ -274,6 +313,11 @@ int main() {
     // clipping and output-transformer core saturation.
     constexpr std::array<float, 4> powerAmpAmplitudes{{0.05f, 0.3f, 1.0f, 3.0f}};
     for (float amplitude : powerAmpAmplitudes) ok &= checkPowerAmpParity(amplitude);
+
+    // Sweeps input level from quiet/uncompressed up through levels that
+    // drive the LDR well into its lit range.
+    constexpr std::array<float, 4> compressorAmplitudes{{0.02f, 0.2f, 0.8f, 1.5f}};
+    for (float amplitude : compressorAmplitudes) ok &= checkCompressorParity(amplitude);
 
     return ok ? 0 : 1;
 }

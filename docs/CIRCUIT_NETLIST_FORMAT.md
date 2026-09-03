@@ -3,7 +3,8 @@
 This document specifies the JSON format loaded by
 `include/guitardsp/circuit/NetlistLoader.h` (`guitardsp::circuit::NetlistCircuit`)
 and used by `data/circuits/ts808.json` / `data/circuits/ds1.json` /
-`data/circuits/preamp.json` / `data/circuits/poweramp.json`.
+`data/circuits/preamp.json` / `data/circuits/poweramp.json` /
+`data/circuits/compressor.json`.
 
 ## Why this format exists
 
@@ -80,6 +81,7 @@ ground node is always available as `"ground"`.
 | `triodeParasitic`| `name`, `plate`, `grid`, `cathode`, `preset`\|`spec` (with `overrides`) | (none) |
 | `pentodeParasitic`| `name`, `plate`, `grid`, `screen`, `cathode`, `preset`\|`spec` (with `overrides`) | (none) |
 | `transformer`   | `name`, `primaryPositive`, `primaryNegative`, `secondaryPositive`, `secondaryNegative`, `spec` | (none) |
+| `opticalCoupler`| `name`, `a`, `b`, `controlNode`, `referenceNode`, `sensitivityPerVolt`, `spec` (optional)      | (none) |
 
 Notes:
 
@@ -118,6 +120,24 @@ Notes:
   the "only push an update through when it moved more than float noise"
   guard that avoids forcing a static-matrix-cache rebuild every sample at
   idle.
+- `opticalCoupler` compiles to a plain `MnaCircuitEngine::addResistor` between
+  `a` and `b` (an LDR modelled as an ordinary variable resistor, exactly as
+  `CompressorCircuit`'s gain-cell shunt uses it), whose resistance is driven
+  every sample by `guitardsp::hq::OptocouplerLDR::processLedDrive()`: the
+  voltage at `controlNode` minus `referenceNode` (e.g. a sidechain envelope
+  node minus the circuit's vref) is scaled by `sensitivityPerVolt` and
+  clamped to `[0,1]` as the normalized LED drive. `spec` is optional and
+  overrides only the `hq::OptocouplerSpec` fields it names (`name`,
+  `ledForwardVoltage`, `darkResistanceOhms`, `lightResistanceOhms`,
+  `attackMs`, `releaseMs`, `gamma`) on top of the default "Generic LED/LDR"
+  baseline -- unlike `transformer`, `OptocouplerSpec`'s default is already a
+  sensible starting point, so `spec` (and every field within it) may be
+  omitted entirely. `NetlistCircuit::processSample()` (and its silent
+  warm-up in `prepare()`) re-drives every declared optical coupler's
+  resistance after each sample, mirroring
+  `CompressorCircuit::updateLdrResistance()` exactly, including the "only
+  push a resistance change through when it moved more than float noise"
+  guard.
 - `technology` (capacitor) is one of `"generic"`, `"ceramic"`, `"film"`,
   `"electrolytic"`, `"tantalum"`. `taper` (potentiometer) is one of
   `"linear"`, `"audio"`, `"reverseAudio"`.

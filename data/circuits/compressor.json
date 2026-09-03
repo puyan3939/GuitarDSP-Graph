@@ -1,0 +1,54 @@
+{
+  "name": "Compressor",
+  "description": "Component-level optical (LA-2A-style) feedback compressor: LDR gain-cell shunt divider driven by a precision half-wave sidechain peak detector. Parity reference: guitardsp::circuit::CompressorCircuit (include/guitardsp/circuit/CompressorCircuit.h).",
+  "ops": [
+    { "op": "node", "name": "supply" },
+    { "op": "node", "name": "vref" },
+    { "op": "node", "name": "inputJack" },
+    { "op": "node", "name": "inputCoupled" },
+    { "op": "node", "name": "gainCell" },
+    { "op": "node", "name": "bufferNonInv" },
+    { "op": "node", "name": "bufferOut" },
+    { "op": "node", "name": "outputNode" },
+    { "op": "node", "name": "scCoupled" },
+    { "op": "node", "name": "envDrive" },
+    { "op": "node", "name": "envNode" },
+
+    { "op": "voltageSource", "name": "supplySource", "p": "supply", "n": "ground", "volts": 0.0 },
+    { "op": "voltageSource", "name": "vrefSource", "p": "vref", "n": "ground", "volts": 0.0 },
+    { "op": "voltageSource", "name": "inputSource", "p": "inputJack", "n": "ground", "volts": 0.0 },
+
+    { "op": "capacitor", "a": "inputJack", "b": "inputCoupled", "farads": 22.0e-9, "voltageRating": 25.0, "technology": "film" },
+    { "op": "resistor", "a": "inputCoupled", "b": "vref", "ohms": 510000.0 },
+    { "op": "resistor", "a": "inputCoupled", "b": "gainCell", "ohms": 4700.0 },
+    { "op": "opticalCoupler", "name": "gainCellLdr", "a": "gainCell", "b": "vref",
+      "controlNode": "envNode", "referenceNode": "vref", "sensitivityPerVolt": 2.5 },
+    { "op": "capacitor", "a": "gainCell", "b": "bufferNonInv", "farads": 0.1e-6, "voltageRating": 25.0, "technology": "film" },
+    { "op": "resistor", "a": "bufferNonInv", "b": "vref", "ohms": 100000.0 },
+
+    { "op": "dynamicOpAmp", "name": "bufferOpAmp", "output": "bufferOut", "nonInverting": "bufferNonInv",
+      "inverting": "bufferOut", "positiveRail": "supply", "negativeRail": "ground", "reference": "ground",
+      "preset": "jrc4558", "overrides": { "name": "Compressor JRC4558-style" } },
+
+    { "op": "capacitor", "a": "bufferOut", "b": "outputNode", "farads": 10.0e-6, "voltageRating": 16.0, "technology": "electrolytic" },
+    { "op": "resistor", "a": "outputNode", "b": "ground", "ohms": 10000.0 },
+
+    { "op": "capacitor", "a": "outputNode", "b": "scCoupled", "farads": 0.1e-6, "voltageRating": 25.0, "technology": "film" },
+    { "op": "resistor", "a": "scCoupled", "b": "vref", "ohms": 100000.0 },
+
+    { "op": "dynamicOpAmp", "name": "peakDetector", "output": "envDrive", "nonInverting": "scCoupled",
+      "inverting": "envNode", "positiveRail": "supply", "negativeRail": "ground", "reference": "ground",
+      "preset": "jrc4558", "overrides": { "name": "Compressor JRC4558-style" } },
+    { "op": "diodeParasitic", "name": "envelopeDiode", "anode": "envDrive", "cathode": "envNode",
+      "preset": "1n4148", "overrides": { "name": "Compressor sidechain rectifier 1N4148-style" } },
+
+    { "op": "capacitor", "a": "envNode", "b": "vref", "farads": 1.0e-6, "voltageRating": 25.0, "technology": "film" },
+    { "op": "resistor", "a": "envNode", "b": "vref", "ohms": 100000.0 }
+  ],
+  "ports": { "input": "inputSource", "output": "outputNode", "supply": "supplySource", "vref": "vrefSource" },
+  "simulation": {
+    "warmupSecondsFraction": 1.5,
+    "warmupMinSamples": 16384,
+    "warmupMaxSamples": 98304
+  }
+}

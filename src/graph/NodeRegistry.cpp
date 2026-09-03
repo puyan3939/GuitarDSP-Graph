@@ -11,6 +11,7 @@
 #include "guitardsp/hq/BassAmpNode.h"
 #include "guitardsp/hq/BD2TopologyNode.h"
 #include "guitardsp/hq/CabinetChainNode.h"
+#include "guitardsp/hq/CompressorCircuitNode.h"
 #include "guitardsp/hq/DS1CircuitNode.h"
 #include "guitardsp/hq/DS1TopologyNode.h"
 #include "guitardsp/hq/FullAmpCircuitNode.h"
@@ -43,6 +44,7 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("filter.hp", [] { return std::make_unique<dsp::OnePoleFilterNode>(dsp::OnePoleFilterNode::Mode::highPass, 80.0f); });
     r.registerType("filter.lp", [] { return std::make_unique<dsp::OnePoleFilterNode>(dsp::OnePoleFilterNode::Mode::lowPass, 8000.0f); });
     r.registerType("dynamics.compressor", [] { return std::make_unique<dsp::CompressorNode>(); });
+    r.registerType("dynamics.compressor_circuit_hq", [] { return std::make_unique<hq::CompressorCircuitNode>(); });
     r.registerType("dynamics.transient", [] { return std::make_unique<dsp::TransientEnhancerNode>(); });
     r.registerType("drive.ds1_prototype", [] { return std::make_unique<dsp::DS1PrototypeNode>(); });
     r.registerType("drive.ds1_hq", [] { return std::make_unique<hq::DS1TopologyNode>(); });

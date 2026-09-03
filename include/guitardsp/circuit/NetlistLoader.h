@@ -26,6 +26,7 @@
 #include "PentodeParasiticSubcircuit.h"
 #include "TransformerSubcircuit.h"
 #include "TriodeParasiticSubcircuit.h"
+#include "guitardsp/hq/AdditionalDeviceStages.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,6 +103,7 @@ public:
         namePool_.clear();
         potInitialPosition_.clear();
         transformers_.clear();
+        opticalCouplers_.clear();
         nodes_.emplace("ground", ground);
 
         const JsonValue& ops = document_["ops"];
@@ -163,6 +165,7 @@ public:
             lastSolve_ = engine_.processSample(sim_.newtonMaxIterations, sim_.newtonTolerance);
             if (lastSolve_.singular || !allNodesFinite()) return fail("circuit diverged during warm-up");
             updateTransformerSaturation();
+            updateOpticalCouplers();
         }
         return true;
     }
@@ -176,6 +179,11 @@ public:
             engine_.setPotentiometerPosition(pots_[binding.pot], binding.invert ? 1.0f - value : value);
         }
         for (auto& transformer : transformers_) transformer.lastMagnetizingInductanceHenries = -1.0f;
+        for (auto& coupler : opticalCouplers_) {
+            coupler.ldr.reset();
+            coupler.lastResistanceOhms = coupler.ldr.resistanceOhms();
+            engine_.setResistance(coupler.resistor, coupler.lastResistanceOhms);
+        }
         lastSolve_ = {};
     }
 
@@ -201,6 +209,7 @@ public:
         engine_.setVoltageSource(inputSource_, input);
         lastSolve_ = engine_.processSample(sim_.newtonMaxIterations, sim_.newtonTolerance);
         updateTransformerSaturation();
+        updateOpticalCouplers();
         const float out = engine_.voltage(outputNode_);
         if (lastSolve_.singular || !std::isfinite(out)) return 0.0f;
         return out;
@@ -239,6 +248,19 @@ private:
         TransformerSubcircuit handles{};
         hq::TransformerSpec spec{};
         float lastMagnetizingInductanceHenries = -1.0f;
+    };
+
+    // Bookkeeping for an "opticalCoupler" op's LDR resistance so it can be
+    // re-driven from its control node's voltage after every sample, matching
+    // CompressorCircuit::updateLdrResistance() exactly (including the "only
+    // push a spec change through when it actually moved" guard).
+    struct OpticalCouplerEntry {
+        ResistorHandle resistor{};
+        hq::OptocouplerLDR ldr{};
+        Node control = ground;
+        Node reference = ground;
+        float sensitivityPerVolt = 1.0f;
+        float lastResistanceOhms = 5.0e6f;
     };
 
     bool resolveNode(const JsonValue& container, const char* key, Node& out) const {
@@ -432,6 +454,23 @@ private:
         return spec;
     }
 
+    // Unlike diode/BJT/op-amp specs, OptocouplerSpec's default constructor is
+    // already a sensible generic LED/LDR baseline (no catalog presets exist
+    // for it), so a netlist can omit "spec" entirely or override only the
+    // fields it cares about, the same way "spec" is used for "transformer".
+    hq::OptocouplerSpec opticalCouplerSpecFrom(const JsonValue& op) {
+        hq::OptocouplerSpec spec{};
+        const JsonValue& overrides = op["spec"];
+        if (overrides.has("name")) spec.name = intern(overrides["name"].asString());
+        if (overrides.has("ledForwardVoltage")) spec.ledForwardVoltage = overrides["ledForwardVoltage"].asFloat();
+        if (overrides.has("darkResistanceOhms")) spec.darkResistanceOhms = overrides["darkResistanceOhms"].asFloat();
+        if (overrides.has("lightResistanceOhms")) spec.lightResistanceOhms = overrides["lightResistanceOhms"].asFloat();
+        if (overrides.has("attackMs")) spec.attackMs = overrides["attackMs"].asFloat();
+        if (overrides.has("releaseMs")) spec.releaseMs = overrides["releaseMs"].asFloat();
+        if (overrides.has("gamma")) spec.gamma = overrides["gamma"].asFloat();
+        return spec;
+    }
+
     static hq::DiodeSpec presetDiode(const std::string& name) noexcept {
         if (name == "1n34a") return hq::component_presets::oneN34A();
         if (name == "redLed") return hq::component_presets::redLed();
@@ -578,6 +617,22 @@ private:
             transformers_.push_back(entry);
             return true;
         }
+        if (kind == "opticalCoupler") {
+            const Node a = requireNode(op, "a", ok);
+            const Node b = requireNode(op, "b", ok);
+            const Node control = requireNode(op, "controlNode", ok);
+            const Node reference = requireNode(op, "referenceNode", ok);
+            if (!ok) return fail("opticalCoupler references unknown node");
+            OpticalCouplerEntry entry;
+            entry.ldr.prepare(sampleRate_, opticalCouplerSpecFrom(op));
+            entry.control = control;
+            entry.reference = reference;
+            entry.sensitivityPerVolt = op["sensitivityPerVolt"].asFloat(1.0f);
+            entry.resistor = engine_.addResistor(a, b, resistorSpec(entry.ldr.resistanceOhms()));
+            entry.lastResistanceOhms = entry.ldr.resistanceOhms();
+            opticalCouplers_.push_back(entry);
+            return true;
+        }
         return fail("unknown netlist op '" + kind + "'");
     }
 
@@ -633,6 +688,23 @@ private:
         }
     }
 
+    // Mirrors CompressorCircuit::updateLdrResistance(): only push an updated
+    // LDR resistance through when it has moved by more than float noise,
+    // since MnaCircuitEngine::setResistance() unconditionally dirties the
+    // static matrix cache and forces a full rebuild on the next solve.
+    void updateOpticalCouplers() noexcept {
+        for (auto& coupler : opticalCouplers_) {
+            const float envelopeVolts = engine_.voltage(coupler.control) - engine_.voltage(coupler.reference);
+            const float normalizedDrive = std::clamp(envelopeVolts * coupler.sensitivityPerVolt, 0.0f, 1.0f);
+            const float resistanceOhms = coupler.ldr.processLedDrive(normalizedDrive);
+            const float threshold = std::max(1.0f, std::abs(coupler.lastResistanceOhms) * 1.0e-4f);
+            if (std::abs(resistanceOhms - coupler.lastResistanceOhms) > threshold) {
+                engine_.setResistance(coupler.resistor, resistanceOhms);
+                coupler.lastResistanceOhms = resistanceOhms;
+            }
+        }
+    }
+
     bool allNodesFinite() const noexcept {
         for (const auto& [name, node] : nodes_) {
             if (!std::isfinite(engine_.voltage(node))) return false;
@@ -684,6 +756,7 @@ private:
     std::unordered_map<std::string, float> potInitialPosition_;
     std::unordered_map<std::string, SourceHandle> voltageSources_;
     std::vector<TransformerEntry> transformers_;
+    std::vector<OpticalCouplerEntry> opticalCouplers_;
     std::unordered_map<std::string, ControlBinding> controls_;
     std::unordered_map<std::string, float> targetControls_;
     std::unordered_map<std::string, float> appliedControls_;
