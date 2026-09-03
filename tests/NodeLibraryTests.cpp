@@ -24,6 +24,7 @@ int main() {
     ok &= require(registry.create("cab.partitioned_hq") != nullptr, "registry creates partitioned HQ cab");
     ok &= require(registry.create("cab.speaker_dynamics_hq") != nullptr, "registry creates HQ speaker dynamics");
     ok &= require(registry.create("route.split") != nullptr, "registry creates split node");
+    ok &= require(registry.create("time.digital_delay") != nullptr, "registry creates digital delay");
     ok &= require(registry.create("does.not.exist") == nullptr, "registry rejects unknown node type");
 
     DS1PrototypeNode drive; PrepareSpec spec{sr,block,2,ProcessingQuality::high}; drive.prepare(spec);
