@@ -43,6 +43,19 @@ The standalone host uses exact types for guitar and bass amplifiers so changing
 one branch never rewrites another amplifier's controls. Both serial and parallel
 graphs have first-callback zero-allocation regression coverage.
 
+The input/output waveform displays (`juce::AudioVisualiserComponent`, side by
+side above the meters) never touch the audio callback directly.
+`audioDeviceIOCallbackWithContext()` taps the physical input channel and the
+final hardware output channel it just wrote into `AudioTapFifo`
+(`apps/GuitarDSPApp/AudioTapFifo.h`), a lock-free, allocation-free
+single-producer/single-consumer ring buffer built on `juce::AbstractFifo`.
+`timerCallback()` (message thread, 20 Hz) drains each `AudioTapFifo` and feeds
+the samples to the corresponding visualiser. `AudioTapFifo::prepare()` sizes
+the backing buffer for a quarter second of headroom at the device sample rate
+and runs on the message thread in `audioDeviceAboutToStart()`, before the
+callback that calls `push()` is attached — the same ordering `RealtimeAudioEngine::configure()`
+already relies on.
+
 The emergency output ceiling defaults to 0.98 linear and only clamps samples that exceed that ceiling. It is a bring-up safety net, not a tone-shaping limiter. The standalone app starts with -12 dB output trim.
 
 ## Cabinet IR policy
