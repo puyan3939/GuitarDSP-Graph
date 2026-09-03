@@ -1,6 +1,7 @@
 #include "guitardsp/graph/NodeRegistry.h"
 #include "guitardsp/graph/UtilityNodes.h"
 #include "guitardsp/dsp/BasicNodes.h"
+#include "guitardsp/dsp/DelayEffectNode.h"
 #include "guitardsp/dsp/DriveNodes.h"
 #include "guitardsp/dsp/KeyedGateNode.h"
 #include "guitardsp/dsp/ConvolutionNode.h"
@@ -59,6 +60,7 @@ NodeRegistry NodeRegistry::createBuiltins() {
     r.registerType("amp.full_amp_circuit_hq", [] { return std::make_unique<hq::FullAmpCircuitNode>(); });
     r.registerType("pitch.octave_down_mono", [] { return std::make_unique<hq::OctaveDownNode>(); });
     r.registerType("dynamics.keyed_gate", [] { return std::make_unique<dsp::KeyedGateNode>(); });
+    r.registerType("time.digital_delay", [] { return std::make_unique<dsp::DelayEffectNode>(); });
     r.registerType("cab.fir", [] { return std::make_unique<dsp::ConvolutionNode>(); });
     r.registerType("cab.partitioned_hq", [] { return std::make_unique<hq::PartitionedCabNode>(); });
     r.registerType("cab.speaker_dynamics_hq", [] { return std::make_unique<hq::SpeakerDynamicsNode>(); });
