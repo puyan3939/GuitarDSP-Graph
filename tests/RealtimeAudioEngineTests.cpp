@@ -121,5 +121,40 @@ int main() {
     ok &= require(allocationCount.load(std::memory_order_relaxed) == 0,
                   "changing live cabinet filter coefficients allocates no audio-thread memory");
 
+    app::RealtimeAudioEngine testSignalEngine;
+    ok &= require(testSignalEngine.configure(48000.0, 64, 1, settings),
+                  "test-signal allocation fixture configures");
+    testSignalEngine.setInputRoutingMode(app::InputRoutingMode::testSignal);
+    testSignalEngine.setTestSignalFrequencyHz(1000.0f);
+    testSignalEngine.setTestSignalAmplitude(0.5f);
+    testSignalEngine.setMuted(false);
+
+    float tap[128]{};
+    allocationCount.store(0, std::memory_order_relaxed);
+    trackAllocations.store(true, std::memory_order_release);
+    // Physical input is null throughout: the whole point of testSignal mode
+    // is to feed the graph without any physical input present.
+    testSignalEngine.process(nullptr, 0, outputs, 2, 128, tap);
+    trackAllocations.store(false, std::memory_order_release);
+    ok &= require(allocationCount.load(std::memory_order_relaxed) == 0,
+                  "test-signal oscillator callback performs zero heap allocations");
+
+    float tapPeak = 0.0f;
+    bool tapFinite = true;
+    for (float sample : tap) {
+        tapPeak = std::max(tapPeak, std::abs(sample));
+        tapFinite &= std::isfinite(sample);
+    }
+    ok &= require(tapFinite && tapPeak > 0.0f && tapPeak <= 0.5f + 1.0e-6f,
+                  "test-signal tap carries a finite sine bounded by the configured amplitude");
+
+    float outputEnergy = 0.0f;
+    for (float sample : left) outputEnergy += sample * sample;
+    ok &= require(outputEnergy > 0.0f,
+                  "test-signal oscillator reaches the graph output with no physical input present");
+
+    ok &= require(testSignalEngine.stats().inputRoutingMode == app::InputRoutingMode::testSignal,
+                  "stats report the active test-signal routing mode");
+
     return ok ? 0 : 1;
 }

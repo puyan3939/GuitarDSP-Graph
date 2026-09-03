@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
@@ -146,6 +147,9 @@ public:
         addAndMakeVisible(matchIrLevel_);
         addAndMakeVisible(inputTrim_);
         addAndMakeVisible(outputTrim_);
+        addAndMakeVisible(testSignalLabel_);
+        addAndMakeVisible(testSignalFrequency_);
+        addAndMakeVisible(testSignalLevel_);
         addAndMakeVisible(loadIrButton_);
         addAndMakeVisible(loadBassIrButton_);
         addAndMakeVisible(bassIrLabel_);
@@ -195,6 +199,7 @@ public:
         inputRoutingBox_.addItem("Input 1 / left", 2);
         inputRoutingBox_.addItem("Input 2 / right", 3);
         inputRoutingBox_.addItem("Independent stereo", 4);
+        inputRoutingBox_.addItem("Test signal (sine)", 5);
         inputRoutingBox_.setSelectedId(1, juce::dontSendNotification);
 
         signalRoutingBox_.addItem("Serial guitar rig", 1);
@@ -247,6 +252,25 @@ public:
         outputTrim_.setRange(-60.0, 0.0, 0.1);
         outputTrim_.setValue(-12.0, juce::dontSendNotification);
         outputTrim_.setTextValueSuffix(" dB out");
+
+        testSignalLabel_.setText("TEST SIGNAL", juce::dontSendNotification);
+        testSignalFrequency_.setSliderStyle(juce::Slider::LinearHorizontal);
+        testSignalFrequency_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 66, 22);
+        testSignalFrequency_.setRange(20.0, 5000.0, 1.0);
+        testSignalFrequency_.setSkewFactorFromMidPoint(440.0);
+        testSignalFrequency_.setValue(440.0, juce::dontSendNotification);
+        testSignalFrequency_.setTextValueSuffix(" Hz");
+        testSignalFrequency_.onValueChange = [this] {
+            engine_.setTestSignalFrequencyHz(static_cast<float>(testSignalFrequency_.getValue()));
+        };
+        testSignalLevel_.setSliderStyle(juce::Slider::LinearHorizontal);
+        testSignalLevel_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, 22);
+        testSignalLevel_.setRange(0.0, 100.0, 1.0);
+        testSignalLevel_.setValue(50.0, juce::dontSendNotification);
+        testSignalLevel_.setTextValueSuffix("% lvl");
+        testSignalLevel_.onValueChange = [this] {
+            engine_.setTestSignalAmplitude(static_cast<float>(testSignalLevel_.getValue() * 0.01));
+        };
 
         auto configureToneControl = [this](juce::Slider& slider,
                                             const juce::String& name,
@@ -519,6 +543,17 @@ public:
         cabEnabled_.setBounds(row.removeFromLeft(190));
         mute_.setBounds(row.removeFromLeft(140));
         resetDiagnosticsButton_.setBounds(row.removeFromRight(158).reduced(0, 2));
+        row.removeFromLeft(10);
+        if (row.getWidth() > 260) {
+            testSignalLabel_.setBounds(row.removeFromLeft(84));
+            testSignalFrequency_.setBounds(row.removeFromLeft(std::min(180, row.getWidth() / 2)));
+            row.removeFromLeft(8);
+            testSignalLevel_.setBounds(row);
+        } else {
+            testSignalLabel_.setBounds({});
+            testSignalFrequency_.setBounds({});
+            testSignalLevel_.setBounds({});
+        }
         area.removeFromTop(10);
 
         auto waveformArea = area.removeFromTop(96);
@@ -662,6 +697,10 @@ public:
             static_cast<int>(currentSampleRate_ * 0.25));
         inputTapFifo_.prepare(waveformCapacity);
         outputTapFifo_.prepare(waveformCapacity);
+        // Sized to the device's own block size, which bounds numSamples for
+        // every audioDeviceIOCallbackWithContext() call below; prepared here
+        // on the message thread, before the callback that writes into it.
+        testSignalTapBuffer_.assign(static_cast<std::size_t>(std::max(1, currentBlockSize_)), 0.0f);
         inputSpectrum_.setSampleRate(currentSampleRate_);
         outputSpectrum_.setSampleRate(currentSampleRate_);
         inputSpectrum_.resetAnalysis();
@@ -701,15 +740,28 @@ public:
                                           int numSamples,
                                           const juce::AudioIODeviceCallbackContext&) override {
         const juce::ScopedNoDenormals noDenormals;
+        // testSignalTapBuffer_ is sized to currentBlockSize_ in
+        // audioDeviceAboutToStart(), which bounds numSamples here; only
+        // handed to process() as a write target while test-signal mode is
+        // active and only ever touched from this callback.
+        const bool testSignalMode = testSignalActive_.load(std::memory_order_acquire);
+        float* testSignalTap = testSignalMode
+            && static_cast<std::size_t>(numSamples) <= testSignalTapBuffer_.size()
+                ? testSignalTapBuffer_.data() : nullptr;
         engine_.process(inputChannelData, numInputChannels,
-                        outputChannelData, numOutputChannels, numSamples);
+                        outputChannelData, numOutputChannels, numSamples, testSignalTap);
 
-        // Lock-free hand-off to the UI thread for the waveform displays: tap the
-        // physical input and the final hardware output actually written above.
-        // No allocation, no lock (see AudioTapFifo.h).
-        if (inputChannelData != nullptr && numInputChannels > 0
-            && inputChannelData[0] != nullptr)
+        // Lock-free hand-off to the UI thread for the waveform displays: tap
+        // the final hardware output actually written above, and either the
+        // physical input or (in test-signal mode) the synthesized stimulus
+        // that was actually fed into the graph. No allocation, no lock (see
+        // AudioTapFifo.h).
+        if (testSignalTap != nullptr) {
+            inputTapFifo_.push(testSignalTap, numSamples);
+        } else if (inputChannelData != nullptr && numInputChannels > 0
+            && inputChannelData[0] != nullptr) {
             inputTapFifo_.push(inputChannelData[0], numSamples);
+        }
         if (outputChannelData != nullptr && numOutputChannels > 0
             && outputChannelData[0] != nullptr)
             outputTapFifo_.push(outputChannelData[0], numSamples);
@@ -843,7 +895,9 @@ private:
         };
 
         juce::String selected = "none";
-        if (stats.inputRoutingMode == guitardsp::app::InputRoutingMode::stereo)
+        if (stats.inputRoutingMode == guitardsp::app::InputRoutingMode::testSignal)
+            selected = "test signal (" + juce::String(testSignalFrequency_.getValue(), 0) + " Hz)";
+        else if (stats.inputRoutingMode == guitardsp::app::InputRoutingMode::stereo)
             selected = "independent stereo";
         else if (stats.selectedInputChannel >= 0)
             selected = "Input " + juce::String(stats.selectedInputChannel + 1);
@@ -989,9 +1043,17 @@ private:
             case 2: mode = InputRoutingMode::input1; break;
             case 3: mode = InputRoutingMode::input2; break;
             case 4: mode = InputRoutingMode::stereo; break;
+            case 5: mode = InputRoutingMode::testSignal; break;
             default: break;
         }
         engine_.setInputRoutingMode(mode);
+
+        const bool testSignalMode = mode == InputRoutingMode::testSignal;
+        testSignalActive_.store(testSignalMode, std::memory_order_release);
+        testSignalFrequency_.setEnabled(testSignalMode);
+        testSignalLevel_.setEnabled(testSignalMode);
+        engine_.setTestSignalFrequencyHz(static_cast<float>(testSignalFrequency_.getValue()));
+        engine_.setTestSignalAmplitude(static_cast<float>(testSignalLevel_.getValue() * 0.01));
 
         const auto* device = deviceManager_.getCurrentAudioDevice();
         if (device == nullptr || !engine_.configured()) return;
@@ -1293,6 +1355,9 @@ private:
     juce::ToggleButton matchIrLevel_;
     juce::Slider inputTrim_;
     juce::Slider outputTrim_;
+    juce::Label testSignalLabel_;
+    juce::Slider testSignalFrequency_;
+    juce::Slider testSignalLevel_;
     juce::Slider pedalDrive_;
     juce::Slider pedalTone_;
     juce::Slider pedalLevel_;
@@ -1329,6 +1394,12 @@ private:
     RoutingGraphView routingGraphView_;
     guitardsp::app::AudioTapFifo inputTapFifo_;
     guitardsp::app::AudioTapFifo outputTapFifo_;
+    // Audio-callback-readable flag mirroring the InputRoutingMode combo box,
+    // and the scratch buffer process() writes the synthesized test tone into
+    // so the input waveform/spectrum can tap the actual DSP stimulus instead
+    // of the (idle) physical input while test-signal mode is active.
+    std::atomic<bool> testSignalActive_{false};
+    std::vector<float> testSignalTapBuffer_;
     juce::AudioVisualiserComponent inputWaveform_{1};
     juce::AudioVisualiserComponent outputWaveform_{1};
     guitardsp::app::SpectrumAnalyserComponent inputSpectrum_{2048};
