@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace guitardsp::circuit {
@@ -351,6 +352,33 @@ public:
                 diode.spec.emissionCoefficient * diode.spec.thermalVoltage);
         dimension_ = branch;
         if (dimension_ == 0U) return false;
+
+        // Node topology is fixed from here on for this prepare() call, so every
+        // nonlinear device's stamp write destinations can be resolved once
+        // instead of on every Newton iteration (see CompiledCurrentStamp above).
+        for (auto& d : diodes_)
+            d.conductanceLayout = compileConductanceStamp(dimension_, d.anode, d.cathode);
+        for (auto& bjt : bjts_) {
+            bjt.collectorLayout = compileCurrentStamp<3>(dimension_, bjt.collector, bjt.emitter,
+                std::array<Node, 3>{bjt.collector, bjt.base, bjt.emitter});
+            bjt.baseLayout = compileCurrentStamp<3>(dimension_, bjt.base, bjt.emitter,
+                std::array<Node, 3>{bjt.collector, bjt.base, bjt.emitter});
+        }
+        for (auto& jfet : jfets_)
+            jfet.layout = compileCurrentStamp<3>(dimension_, jfet.drain, jfet.source,
+                std::array<Node, 3>{jfet.drain, jfet.gate, jfet.source});
+        for (auto& mosfet : mosfets_)
+            mosfet.layout = compileCurrentStamp<3>(dimension_, mosfet.drain, mosfet.source,
+                std::array<Node, 3>{mosfet.drain, mosfet.gate, mosfet.source});
+        for (auto& triode : triodes_)
+            triode.layout = compileCurrentStamp<3>(dimension_, triode.plate, triode.cathode,
+                std::array<Node, 3>{triode.plate, triode.grid, triode.cathode});
+        for (auto& pentode : pentodes_) {
+            pentode.plateLayout = compileCurrentStamp<4>(dimension_, pentode.plate, pentode.cathode,
+                std::array<Node, 4>{pentode.plate, pentode.grid, pentode.screen, pentode.cathode});
+            pentode.screenLayout = compileCurrentStamp<3>(dimension_, pentode.screen, pentode.cathode,
+                std::array<Node, 3>{pentode.grid, pentode.screen, pentode.cathode});
+        }
 
         const std::size_t matrixSize = dimension_ * dimension_;
         staticMatrix_.assign(matrixSize, 0.0f);
@@ -757,6 +785,34 @@ public:
     float sparseNonlinearFactorDensity() const noexcept { return sparseSolver_.factorDensity(); }
 
 private:
+    // Compiled nonlinear stamp write destinations. Node topology (and hence
+    // every row/column a nonlinear device's Jacobian can ever touch) is fixed
+    // once prepare() runs; only the derivative/current values Newton computes
+    // each iteration actually change. Resolving "which flat matrix_/rhs_ cell
+    // does this Jacobian term write to" once here -- instead of re-deriving it
+    // from Node identities via nodeIndex()/ground comparisons on every Newton
+    // iteration of every device -- is docs/MNA_ACCELERATION.md's "next
+    // acceleration stage" #1. npos marks a ground-connected terminal, which
+    // never has a matrix column/row of its own.
+    static constexpr std::size_t npos = std::numeric_limits<std::size_t>::max();
+
+    template <std::size_t N>
+    struct CompiledCurrentStamp {
+        std::size_t positiveRow = npos;
+        std::size_t negativeRow = npos;
+        std::array<std::size_t, N> positiveSlot{};
+        std::array<std::size_t, N> negativeSlot{};
+    };
+
+    struct CompiledConductanceStamp {
+        std::size_t aRow = npos;
+        std::size_t bRow = npos;
+        std::size_t aaSlot = npos;
+        std::size_t bbSlot = npos;
+        std::size_t abSlot = npos;
+        std::size_t baSlot = npos;
+    };
+
     struct Resistor { Node a{}, b{}; hq::ResistorSpec spec{}; };
     struct Capacitor {
         Node a{}, b{};
@@ -802,23 +858,98 @@ private:
         float junctionVoltage = 0.0f;
         float inverseThermalVoltage = 0.0f;
         bool junctionVoltageValid = false;
+        CompiledConductanceStamp conductanceLayout{};
     };
-    struct Bjt { Node collector{}, base{}, emitter{}; hq::BJTSpec spec{}; };
-    struct Jfet { Node drain{}, gate{}, source{}; hq::JFETSpec spec{}; };
-    struct Mosfet { Node drain{}, gate{}, source{}; hq::MOSFETSpec spec{}; };
+    struct Bjt {
+        Node collector{}, base{}, emitter{};
+        hq::BJTSpec spec{};
+        CompiledCurrentStamp<3> collectorLayout{};
+        CompiledCurrentStamp<3> baseLayout{};
+    };
+    struct Jfet {
+        Node drain{}, gate{}, source{};
+        hq::JFETSpec spec{};
+        CompiledCurrentStamp<3> layout{};
+    };
+    struct Mosfet {
+        Node drain{}, gate{}, source{};
+        hq::MOSFETSpec spec{};
+        CompiledCurrentStamp<3> layout{};
+    };
     struct OpAmp {
         Node output{}, nonInverting{}, inverting{}, reference{};
         hq::OpAmpSpec spec{};
         std::size_t branchIndex = 0;
     };
-    struct Triode { Node plate{}, grid{}, cathode{}; hq::TriodeSpec spec{}; };
-    struct Pentode { Node plate{}, grid{}, screen{}, cathode{}; hq::PentodeSpec spec{}; };
+    struct Triode {
+        Node plate{}, grid{}, cathode{};
+        hq::TriodeSpec spec{};
+        CompiledCurrentStamp<3> layout{};
+    };
+    struct Pentode {
+        Node plate{}, grid{}, screen{}, cathode{};
+        hq::PentodeSpec spec{};
+        CompiledCurrentStamp<4> plateLayout{};
+        CompiledCurrentStamp<3> screenLayout{};
+    };
 
     struct JacobianTerm { Node node{}; float derivative = 0.0f; };
     struct DiodeLinearization { float current = 0.0f; float conductance = 0.0f; };
 
     static std::size_t nodeIndex(Node node) noexcept {
         return static_cast<std::size_t>(node - 1U);
+    }
+
+    // Resolve every flat matrix_ cell a device's linearized-current stamp can
+    // ever write once, from its fixed terminal topology. `nodes` gives the
+    // Jacobian's column terminals in the same order the caller will later pass
+    // derivative values, so the two line up positionally at stamp time.
+    template <std::size_t N>
+    static CompiledCurrentStamp<N> compileCurrentStamp(std::size_t dimension, Node positive,
+                                                        Node negative,
+                                                        const std::array<Node, N>& nodes) noexcept {
+        CompiledCurrentStamp<N> layout;
+        layout.positiveRow = positive != ground ? nodeIndex(positive) : npos;
+        layout.negativeRow = negative != ground ? nodeIndex(negative) : npos;
+        for (std::size_t i = 0; i < N; ++i) {
+            const auto column = nodes[i] != ground ? nodeIndex(nodes[i]) : npos;
+            layout.positiveSlot[i] = (layout.positiveRow != npos && column != npos)
+                ? layout.positiveRow * dimension + column : npos;
+            layout.negativeSlot[i] = (layout.negativeRow != npos && column != npos)
+                ? layout.negativeRow * dimension + column : npos;
+        }
+        return layout;
+    }
+
+    // Same idea for a two-terminal conductance stamp (the diode's own
+    // anode/cathode companion conductance): compile the up-to-four matrix
+    // cells it can touch once from its fixed terminals.
+    static CompiledConductanceStamp compileConductanceStamp(std::size_t dimension, Node a,
+                                                             Node b) noexcept {
+        CompiledConductanceStamp layout;
+        layout.aRow = a != ground ? nodeIndex(a) : npos;
+        layout.bRow = b != ground ? nodeIndex(b) : npos;
+        layout.aaSlot = layout.aRow != npos ? layout.aRow * dimension + layout.aRow : npos;
+        layout.bbSlot = layout.bRow != npos ? layout.bRow * dimension + layout.bRow : npos;
+        layout.abSlot = (layout.aRow != npos && layout.bRow != npos)
+            ? layout.aRow * dimension + layout.bRow : npos;
+        layout.baSlot = (layout.aRow != npos && layout.bRow != npos)
+            ? layout.bRow * dimension + layout.aRow : npos;
+        return layout;
+    }
+
+    void stampConductanceCompiled(const CompiledConductanceStamp& layout,
+                                  float conductance) noexcept {
+        if (layout.aaSlot != npos) matrix_[layout.aaSlot] += conductance;
+        if (layout.bbSlot != npos) matrix_[layout.bbSlot] += conductance;
+        if (layout.abSlot != npos) matrix_[layout.abSlot] -= conductance;
+        if (layout.baSlot != npos) matrix_[layout.baSlot] -= conductance;
+    }
+
+    void stampCurrentSourceCompiled(const CompiledConductanceStamp& layout,
+                                    float current) noexcept {
+        if (layout.aRow != npos) rhs_[layout.aRow] -= current;
+        if (layout.bRow != npos) rhs_[layout.bRow] += current;
     }
 
     float nodeVoltage(const std::vector<float>& x, Node node) const noexcept {
@@ -1006,25 +1137,28 @@ private:
         }
     }
 
+    // `layout` resolves this call's positive/negative rows and every
+    // Jacobian-term column to a flat matrix_ slot once, in prepare() (see
+    // compileCurrentStamp above), rather than re-deriving row/column addresses
+    // from Node identities on every Newton iteration. jacobian[i] and
+    // layout.positiveSlot[i]/negativeSlot[i] correspond positionally; the
+    // equivalent-current calculation below is untouched and still reads
+    // nodeVoltage()/ground exactly as before.
     template <std::size_t N>
-    void stampLinearizedCurrent(Node positive, Node negative, float currentAtGuess,
+    void stampLinearizedCurrent(const CompiledCurrentStamp<N>& layout, float currentAtGuess,
                                 const std::vector<float>& guess,
                                 const std::array<JacobianTerm, N>& jacobian) noexcept {
         float equivalentCurrent = currentAtGuess;
         for (const auto& term : jacobian)
             equivalentCurrent -= term.derivative * nodeVoltage(guess, term.node);
 
-        if (positive != ground) {
-            const auto row = nodeIndex(positive);
-            for (const auto& term : jacobian)
-                if (term.node != ground) addMatrix(matrix_, row, nodeIndex(term.node), term.derivative);
-        }
-        if (negative != ground) {
-            const auto row = nodeIndex(negative);
-            for (const auto& term : jacobian)
-                if (term.node != ground) addMatrix(matrix_, row, nodeIndex(term.node), -term.derivative);
-        }
-        stampCurrentSource(rhs_, positive, negative, equivalentCurrent);
+        for (std::size_t i = 0; i < N; ++i)
+            if (layout.positiveSlot[i] != npos) matrix_[layout.positiveSlot[i]] += jacobian[i].derivative;
+        for (std::size_t i = 0; i < N; ++i)
+            if (layout.negativeSlot[i] != npos) matrix_[layout.negativeSlot[i]] -= jacobian[i].derivative;
+
+        if (layout.positiveRow != npos) rhs_[layout.positiveRow] -= equivalentCurrent;
+        if (layout.negativeRow != npos) rhs_[layout.negativeRow] += equivalentCurrent;
     }
 
     static DiodeLinearization linearizeDiode(Diode& diode,
@@ -1122,7 +1256,7 @@ private:
             {device.base, dCollectorDvbe},
             {device.emitter, -(dCollectorDvce + dCollectorDvbe)}
         }};
-        stampLinearizedCurrent(device.collector, device.emitter, collectorCurrent, guess, collectorJac);
+        stampLinearizedCurrent(device.collectorLayout, collectorCurrent, guess, collectorJac);
 
         const float beta = std::max(1.0f, device.spec.beta);
         const float baseCurrent = collectorCurrent / beta;
@@ -1131,7 +1265,7 @@ private:
             {device.base, dCollectorDvbe / beta},
             {device.emitter, -(dCollectorDvce + dCollectorDvbe) / beta}
         }};
-        stampLinearizedCurrent(device.base, device.emitter, baseCurrent, guess, baseJac);
+        stampLinearizedCurrent(device.baseLayout, baseCurrent, guess, baseJac);
     }
 
     void stampJfet(const Jfet& device, const std::vector<float>& guess) noexcept {
@@ -1168,7 +1302,7 @@ private:
             {device.gate, dIdDvgs},
             {device.source, -(dIdDvds + dIdDvgs)}
         }};
-        stampLinearizedCurrent(device.drain, device.source, current, guess, jac);
+        stampLinearizedCurrent(device.layout, current, guess, jac);
     }
 
     void stampMosfet(const Mosfet& device, const std::vector<float>& guess) noexcept {
@@ -1208,7 +1342,7 @@ private:
             {device.gate, dIdDvgs},
             {device.source, -(dIdDvds + dIdDvgs)}
         }};
-        stampLinearizedCurrent(device.drain, device.source, current, guess, jac);
+        stampLinearizedCurrent(device.layout, current, guess, jac);
     }
 
     void stampTriode(const Triode& device, const std::vector<float>& guess) noexcept {
@@ -1237,7 +1371,7 @@ private:
             {device.grid, safeGm},
             {device.cathode, -(safeGp + safeGm)}
         }};
-        stampLinearizedCurrent(device.plate, device.cathode, current, guess, jac);
+        stampLinearizedCurrent(device.layout, current, guess, jac);
     }
 
     void stampPentode(const Pentode& device, const std::vector<float>& guess) noexcept {
@@ -1285,7 +1419,7 @@ private:
             {device.screen, safeGscreen},
             {device.cathode, -(safeGp + safeGm + safeGscreen)}
         }};
-        stampLinearizedCurrent(device.plate, device.cathode, plateCurrent, guess, plateJac);
+        stampLinearizedCurrent(device.plateLayout, plateCurrent, guess, plateJac);
 
         const float gsGrid = (screenFor(vgk + gridStep, vsk) - screenFor(vgk - gridStep, vsk)) /
                              (2.0f * gridStep);
@@ -1298,7 +1432,7 @@ private:
             {device.screen, safeGsScreen},
             {device.cathode, -(safeGsGrid + safeGsScreen)}
         }};
-        stampLinearizedCurrent(device.screen, device.cathode, screenCurrent, guess, screenJac);
+        stampLinearizedCurrent(device.screenLayout, screenCurrent, guess, screenJac);
     }
 
     // Plain (unweighted) Euclidean norm of the KCL residual F(x) = A x - b for the
@@ -1319,10 +1453,10 @@ private:
         for (std::size_t row = 0; row < dimension_; ++row) {
             double sum = -static_cast<double>(rhs_[row]);
             const std::size_t base = row * dimension_;
-            for (std::size_t col = 0; col < dimension_; ++col) {
-                const float a = matrix_[base + col];
-                if (a == 0.0f) continue;
-                sum += static_cast<double>(a) * x[col];
+            for (std::size_t slot = residualRowOffsets_[row];
+                 slot < residualRowOffsets_[row + 1U]; ++slot) {
+                const auto col = residualColumns_[slot];
+                sum += static_cast<double>(matrix_[base + col]) * x[col];
             }
             sumSquares += sum * sum;
         }
@@ -1342,10 +1476,10 @@ private:
             double sum = -static_cast<double>(rhs_[row]);
             double scale = std::abs(static_cast<double>(rhs_[row]));
             const std::size_t base = row * dimension_;
-            for (std::size_t col = 0; col < dimension_; ++col) {
-                const float a = matrix_[base + col];
-                if (a == 0.0f) continue;
-                const double term = static_cast<double>(a) * x[col];
+            for (std::size_t slot = residualRowOffsets_[row];
+                 slot < residualRowOffsets_[row + 1U]; ++slot) {
+                const auto col = residualColumns_[slot];
+                const double term = static_cast<double>(matrix_[base + col]) * x[col];
                 sum += term;
                 scale += std::abs(term);
             }
@@ -1362,8 +1496,8 @@ private:
             const auto linear = linearizeDiode(d, v, reuseJunctionVoltage);
             const float g = std::max(1.0e-12f, linear.conductance);
             const float iEq = linear.current - g * v;
-            stampConductance(matrix_, d.anode, d.cathode, g);
-            stampCurrentSource(rhs_, d.anode, d.cathode, iEq);
+            stampConductanceCompiled(d.conductanceLayout, g);
+            stampCurrentSourceCompiled(d.conductanceLayout, iEq);
         }
         for (const auto& bjt : bjts_) stampBjt(bjt, guess);
         for (const auto& jfet : jfets_) stampJfet(jfet, guess);
@@ -1507,6 +1641,27 @@ private:
             markFourTerminalPattern(pattern, pentode.plate, pentode.grid, pentode.screen, pentode.cathode);
             markFourTerminalPattern(nonlinearPattern, pentode.plate, pentode.grid, pentode.screen, pentode.cathode);
         }
+
+        // residualNorm()/scaledResidualNorm() are called up to several dozen
+        // times per audio sample (once per Newton iteration and once per
+        // backtracking line-search trial). The circuit's structural sparsity
+        // pattern above is exactly the set of matrix_ cells any stamp can ever
+        // touch and does not depend on Newton's current guess, so it is
+        // compiled once here into a per-row nonzero-column list instead of
+        // scanning and zero-testing all dimension_^2 cells on every call.
+        // Cells outside this pattern are always exactly 0.0f and contributed
+        // nothing to the previous dense scan either, so this is bit-identical.
+        residualRowOffsets_.assign(dimension_ + 1U, 0U);
+        residualColumns_.clear();
+        residualColumns_.reserve(pattern.size());
+        for (std::size_t row = 0; row < dimension_; ++row) {
+            residualRowOffsets_[row] = residualColumns_.size();
+            for (std::size_t column = 0; column < dimension_; ++column) {
+                if (pattern[row * dimension_ + column] != 0U)
+                    residualColumns_.push_back(column);
+            }
+        }
+        residualRowOffsets_[dimension_] = residualColumns_.size();
 
         nonlinearMatrixIndices_.clear();
         nonlinearMatrixIndices_.reserve(pattern.size());
@@ -1684,6 +1839,8 @@ private:
     std::vector<std::size_t> linearPivots_;
     std::vector<std::size_t> nonlinearMatrixIndices_;
     std::vector<std::size_t> nonlinearRhsIndices_;
+    std::vector<std::size_t> residualRowOffsets_;
+    std::vector<std::size_t> residualColumns_;
     std::vector<std::uint8_t> fixedVoltageNodes_;
     bool previousSampleSolutionValid_ = false;
     FixedPatternSparseSolver sparseSolver_;
