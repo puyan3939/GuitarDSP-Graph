@@ -106,13 +106,23 @@ RealtimeAudioStats RealtimeAudioEngine::stats() const noexcept {
     };
 }
 
+const graph::AudioBuffer* RealtimeAudioEngine::resolveMonitorNodeTap(MonitorTapPoint point) const noexcept {
+    const auto candidates = monitorTapPointCandidates(point);
+    for (int i = 0; i < candidates.count; ++i) {
+        if (const auto* buffer = host_.nodeOutputByTypeId(candidates.typeIds[i])) return buffer;
+    }
+    return nullptr;
+}
+
 void RealtimeAudioEngine::process(const float* const* inputChannels,
                                   int numInputChannels,
                                   float* const* outputChannels,
                                   int numOutputChannels,
                                   int numSamples,
-                                  float* testSignalTap,
-                                  float* testSignalOutputTap) noexcept {
+                                  MonitorTapPoint monitorTapPointA,
+                                  float* monitorTapBufferA,
+                                  MonitorTapPoint monitorTapPointB,
+                                  float* monitorTapBufferB) noexcept {
     if (numSamples <= 0) return;
 
     for (int ch = 0; ch < numOutputChannels; ++ch) {
@@ -197,6 +207,16 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
     std::uint64_t clipped = 0;
     std::uint64_t nonFiniteOutput = 0;
 
+    // Which of the two monitor slots (if any) want each kind of tap. A/B are
+    // resolved once here rather than compared per-sample in the hot loops
+    // below.
+    const bool tapAPhysicalIn = monitorTapBufferA != nullptr && monitorTapPointA == MonitorTapPoint::physicalInput;
+    const bool tapAPhysicalOut = monitorTapBufferA != nullptr && monitorTapPointA == MonitorTapPoint::physicalOutput;
+    const bool tapANode = monitorTapBufferA != nullptr && !tapAPhysicalIn && !tapAPhysicalOut;
+    const bool tapBPhysicalIn = monitorTapBufferB != nullptr && monitorTapPointB == MonitorTapPoint::physicalInput;
+    const bool tapBPhysicalOut = monitorTapBufferB != nullptr && monitorTapPointB == MonitorTapPoint::physicalOutput;
+    const bool tapBNode = monitorTapBufferB != nullptr && !tapBPhysicalIn && !tapBPhysicalOut;
+
     int offset = 0;
     while (offset < numSamples) {
         const int blockSamples = std::min(maximumBlockSize_, numSamples - offset);
@@ -212,7 +232,8 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
                 const float sample = testAmplitude * static_cast<float>(std::sin(phase));
                 for (int ch = 0; ch < processingChannels_; ++ch)
                     inputBlock_.channel(ch)[i] = sample;
-                if (testSignalTap != nullptr) testSignalTap[offset + i] = sample;
+                if (tapAPhysicalIn) monitorTapBufferA[offset + i] = sample;
+                if (tapBPhysicalIn) monitorTapBufferB[offset + i] = sample;
                 callbackInputPeak = std::max(callbackInputPeak, std::abs(sample));
             }
             testSignalPhase_ = std::fmod(
@@ -241,15 +262,44 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
                     callbackInputPeak = std::max(callbackInputPeak, std::abs(sample));
                 }
             }
+            // physicalInput tap reads the raw physical channel 0 directly,
+            // independent of inputGain and of whichever channel routingMode
+            // actually selected for the graph -- this is "the physical input
+            // jack", not "what got fed to the DSP".
+            if (tapAPhysicalIn || tapBPhysicalIn) {
+                const float* raw = channelAvailable(0) ? inputChannels[0] + offset : nullptr;
+                for (int i = 0; i < blockSamples; ++i) {
+                    const float sample = raw != nullptr ? raw[i] : 0.0f;
+                    if (tapAPhysicalIn) monitorTapBufferA[offset + i] = sample;
+                    if (tapBPhysicalIn) monitorTapBufferB[offset + i] = sample;
+                }
+            }
         }
 
         host_.process(inputBlock_, outputBlock_, blockSamples);
 
+        // Resolved fresh every sub-block: the node's output buffer is
+        // overwritten in place by the next host_.process() call, so it must
+        // be drained before that happens (same discipline the physical-output
+        // tap below already follows for outputBlock_).
+        const graph::AudioBuffer* tapANodeBuffer = tapANode ? resolveMonitorNodeTap(monitorTapPointA) : nullptr;
+        const graph::AudioBuffer* tapBNodeBuffer = tapBNode ? resolveMonitorNodeTap(monitorTapPointB) : nullptr;
+        if (tapANode) {
+            for (int i = 0; i < blockSamples; ++i)
+                monitorTapBufferA[offset + i] = tapANodeBuffer != nullptr ? tapANodeBuffer->channel(0)[i] : 0.0f;
+        }
+        if (tapBNode) {
+            for (int i = 0; i < blockSamples; ++i)
+                monitorTapBufferB[offset + i] = tapBNodeBuffer != nullptr ? tapBNodeBuffer->channel(0)[i] : 0.0f;
+        }
+
         // Test-signal mode is for probing the rig's waveform/spectrum response,
         // not for listening to, so the physical outputs are always forced
         // silent while it's active -- independent of the manual Mute toggle.
-        // testSignalOutputTap still receives the real post-DSP signal (see the
-        // header doc comment) so a waveform/spectrum display doesn't go dark.
+        // A physicalOutput monitor tap still receives the real post-DSP
+        // signal (see the header doc comment) so a waveform/spectrum display
+        // doesn't go dark, whether that's because of test-signal mode or a
+        // manual mute.
         const bool hardwareMuted = muted || testSignalMode;
         for (int ch = 0; ch < numOutputChannels; ++ch) {
             float* destination = outputChannels[ch];
@@ -272,11 +322,12 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
                 destination[i] = sample;
                 callbackOutputPeak = std::max(callbackOutputPeak, std::abs(sample));
 
-                if (testSignalOutputTap != nullptr && ch == 0) {
+                if ((tapAPhysicalOut || tapBPhysicalOut) && ch == 0) {
                     float monitorSample = source[i] * outputGain;
                     monitorSample = std::isfinite(monitorSample)
                         ? std::clamp(monitorSample, -ceiling, ceiling) : 0.0f;
-                    testSignalOutputTap[offset + i] = monitorSample;
+                    if (tapAPhysicalOut) monitorTapBufferA[offset + i] = monitorSample;
+                    if (tapBPhysicalOut) monitorTapBufferB[offset + i] = monitorSample;
                 }
             }
         }

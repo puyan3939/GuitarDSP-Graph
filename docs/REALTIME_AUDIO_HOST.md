@@ -43,10 +43,23 @@ The standalone host uses exact types for guitar and bass amplifiers so changing
 one branch never rewrites another amplifier's controls. Both serial and parallel
 graphs have first-callback zero-allocation regression coverage.
 
-The input/output waveform displays (`juce::AudioVisualiserComponent`, side by
-side above the meters) never touch the audio callback directly.
-`audioDeviceIOCallbackWithContext()` taps the physical input channel and the
-final hardware output channel it just wrote into `AudioTapFifo`
+The two waveform/spectrum displays (side by side above the meters) never touch
+the audio callback directly, and each has its own tap-selection dropdown
+(`MonitorTapPoint`, `include/guitardsp/app/LiveRig.h`) so it can watch any
+point in the SIGNAL CHAIN independently of the other: the physical input, the
+physical output, or (when the current rig has that stage) the CIRCUIT PEDAL,
+GUITAR AMPLIFIER, SPEAKER+CABINET, octave, bass amp or bass cabinet output.
+`Main.cpp::updateMonitorTapOptions()` rebuilds each dropdown from
+`availableMonitorTapPoints(settings)` whenever the rig settings change what
+stages exist, so a bypassed pedal or a disabled/absent branch never leaves a
+nonexistent tap selectable. `audioDeviceIOCallbackWithContext()` hands both
+windows' current `MonitorTapPoint` selections (mirrored into
+`std::atomic<MonitorTapPoint>` members, since the combo box itself is
+message-thread only) to `RealtimeAudioEngine::process()`, which resolves a
+SIGNAL CHAIN tap point against the live compiled graph by NodeRegistry typeId
+(`RealtimeGraphHost::nodeOutputByTypeId()`/`CompiledAudioGraph::nodeOutput()`)
+and writes the tapped signal into a per-window scratch buffer every
+sub-block, then pushes it into that window's `AudioTapFifo`
 (`apps/GuitarDSPApp/AudioTapFifo.h`), a lock-free, allocation-free
 single-producer/single-consumer ring buffer built on `juce::AbstractFifo`.
 `timerCallback()` (message thread, 20 Hz) drains each `AudioTapFifo` and feeds
@@ -55,6 +68,13 @@ the backing buffer for a quarter second of headroom at the device sample rate
 and runs on the message thread in `audioDeviceAboutToStart()`, before the
 callback that calls `push()` is attached — the same ordering `RealtimeAudioEngine::configure()`
 already relies on.
+
+The physical-output tap point always reads the post-DSP,
+post-outputGain, safety-ceiling-clamped signal, independent of whether the
+hardware output is actually muted -- by the manual Mute toggle, or by the
+forced mute `InputRoutingMode::testSignal` applies while probing a rig with
+the synthesized test oscillator instead of a real guitar signal: the display
+keeps showing the real signal even when the speakers are silent.
 
 The emergency output ceiling defaults to 0.98 linear and only clamps samples that exceed that ceiling. It is a bring-up safety net, not a tone-shaping limiter. The standalone app starts with -12 dB output trim.
 

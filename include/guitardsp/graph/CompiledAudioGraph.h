@@ -28,6 +28,15 @@ public:
     void processMultiOutput(const AudioBuffer& externalInput,std::span<AudioBuffer* const> outputBuses,int numSamples) noexcept;
     [[nodiscard]] int totalLatencySamples()const noexcept{return totalLatencySamples_;}
     [[nodiscard]] const std::vector<NodeId>& order()const noexcept{return order_;}
+
+    // Real-time safe: returns the node's output buffer for the block just
+    // processed, or nullptr if id/port doesn't resolve. The returned pointer
+    // is only valid until the next process()/processMultiOutput() call
+    // overwrites that node's output in place -- callers that split a device
+    // callback into multiple sub-blocks must drain it before the next
+    // sub-block, the same discipline RealtimeAudioEngine's test-signal taps
+    // already follow for outputBlock_.
+    [[nodiscard]] const AudioBuffer* nodeOutput(NodeId id,int port=0)const noexcept;
 private:
     NodeRuntime* runtime(NodeId id)noexcept;
     const NodeRuntime* runtime(NodeId id)const noexcept;

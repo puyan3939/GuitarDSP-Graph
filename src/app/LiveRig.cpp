@@ -183,6 +183,36 @@ RoutingTopology buildLiveRigTopology(const LiveRigSettings& settings) {
 
 } // namespace
 
+const char* monitorTapPointLabel(MonitorTapPoint point) noexcept {
+    switch (point) {
+        case MonitorTapPoint::physicalInput: return "INPUT (physical)";
+        case MonitorTapPoint::physicalOutput: return "OUTPUT (physical)";
+        case MonitorTapPoint::pedalOutput: return "CIRCUIT PEDAL out";
+        case MonitorTapPoint::ampOutput: return "GUITAR AMPLIFIER out";
+        case MonitorTapPoint::cabinetOutput: return "SPEAKER+CABINET out";
+        case MonitorTapPoint::octaveOutput: return "OCTAVE (bass branch) out";
+        case MonitorTapPoint::bassAmpOutput: return "BASS AMP out";
+        case MonitorTapPoint::bassCabinetOutput: return "BASS CABINET out";
+    }
+    return "";
+}
+
+std::vector<MonitorTapPoint> availableMonitorTapPoints(const LiveRigSettings& settings) {
+    std::vector<MonitorTapPoint> points{MonitorTapPoint::physicalInput, MonitorTapPoint::physicalOutput};
+    if (pedalTypeId(settings) != nullptr) points.push_back(MonitorTapPoint::pedalOutput);
+    if (settings.ampEnabled && ampTypeId(settings) != nullptr) points.push_back(MonitorTapPoint::ampOutput);
+    if (settings.cabinetEnabled) points.push_back(MonitorTapPoint::cabinetOutput);
+    if (settings.signalRouting != SignalRouting::serialGuitar) {
+        // Bass branch always has amp.bass_reference_hq (see
+        // buildLiveRigTopology()); octave/bass-cabinet stages inside it are
+        // individually optional.
+        if (settings.octaveEnabled) points.push_back(MonitorTapPoint::octaveOutput);
+        points.push_back(MonitorTapPoint::bassAmpOutput);
+        if (settings.bassCabinetEnabled) points.push_back(MonitorTapPoint::bassCabinetOutput);
+    }
+    return points;
+}
+
 std::unique_ptr<graph::PreparedGraph> prepareLiveRig(const LiveRigSettings& settings,
                                                      double sampleRate,
                                                      int maximumBlockSize,
@@ -198,6 +228,9 @@ std::unique_ptr<graph::PreparedGraph> prepareLiveRig(const LiveRigSettings& sett
 
     applySettings(prepared->graph, document, build.documentToRuntimeId, settings, sampleRate);
     prepared->documentToRuntimeId = std::move(build.documentToRuntimeId);
+    // Monitor taps (see RealtimeAudioEngine::resolveMonitorNodeTap()) resolve
+    // a SIGNAL CHAIN stage by typeId against this index.
+    graph::indexTypeIds(document, *prepared);
 
     if (!prepared->runtime.build(prepared->graph, sampleRate, maximumBlockSize, channels, settings.quality))
         return nullptr;

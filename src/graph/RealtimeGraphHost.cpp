@@ -19,8 +19,17 @@ std::unique_ptr<PreparedGraph> RealtimeGraphHost::prepare(
     auto build = buildGraphFromDocument(document, registry, prepared->graph);
     if (!build.ok) return nullptr;
     prepared->documentToRuntimeId = std::move(build.documentToRuntimeId);
+    indexTypeIds(document, *prepared);
     if (!prepared->runtime.build(prepared->graph, sampleRate, maximumBlockSize, channels, quality)) return nullptr;
     return prepared;
+}
+
+void indexTypeIds(const GraphDocument& document, PreparedGraph& prepared) {
+    for (const auto& nodeDoc : document.nodes) {
+        const auto mapping = prepared.documentToRuntimeId.find(nodeDoc.id);
+        if (mapping == prepared.documentToRuntimeId.end()) continue;
+        prepared.typeIdToRuntimeId.try_emplace(nodeDoc.typeId, mapping->second);
+    }
 }
 
 void RealtimeGraphHost::submit(std::unique_ptr<PreparedGraph> prepared) noexcept {
@@ -78,6 +87,14 @@ void RealtimeGraphHost::process(const AudioBuffer& input, AudioBuffer& output, i
     } else {
         output.copyFrom(input, numSamples);
     }
+}
+
+const AudioBuffer* RealtimeGraphHost::nodeOutputByTypeId(std::string_view typeId, int port) const noexcept {
+    PreparedGraph* active = active_.load(std::memory_order_acquire);
+    if (active == nullptr) return nullptr;
+    const auto it = active->typeIdToRuntimeId.find(typeId);
+    if (it == active->typeIdToRuntimeId.end()) return nullptr;
+    return active->runtime.nodeOutput(it->second, port);
 }
 
 bool RealtimeGraphHost::setCategoryParameter(NodeCategory category,
