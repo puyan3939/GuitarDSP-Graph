@@ -21,6 +21,8 @@ add_library(GuitarDSPGraphCore
     src/graph/RealtimeGraphHost.cpp
     src/app/LiveRig.cpp
     src/app/RealtimeAudioEngine.cpp
+    src/app/LiveRigPresetJson.cpp
+    src/app/PresetStore.cpp
 )
 target_include_directories(GuitarDSPGraphCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(GuitarDSPGraphCore PUBLIC cxx_std_20)
@@ -246,6 +248,15 @@ add_test(NAME live_rig COMMAND GuitarDSPLiveRigTests)
 add_executable(GuitarDSPRealtimeAudioEngineTests tests/RealtimeAudioEngineTests.cpp)
 target_link_libraries(GuitarDSPRealtimeAudioEngineTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME realtime_audio_engine COMMAND GuitarDSPRealtimeAudioEngineTests)
+add_executable(GuitarDSPLiveRigPresetJsonTests tests/LiveRigPresetJsonTests.cpp)
+target_link_libraries(GuitarDSPLiveRigPresetJsonTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME live_rig_preset_json COMMAND GuitarDSPLiveRigPresetJsonTests)
+add_executable(GuitarDSPPresetStoreTests tests/PresetStoreTests.cpp)
+target_link_libraries(GuitarDSPPresetStoreTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME preset_store COMMAND GuitarDSPPresetStoreTests)
+add_executable(GuitarDSPRigABStateTests tests/RigABStateTests.cpp)
+target_link_libraries(GuitarDSPRigABStateTests PRIVATE GuitarDSPGraphCore)
+add_test(NAME rig_ab_state COMMAND GuitarDSPRigABStateTests)
 add_executable(GuitarDSPHardwareBringupTests tests/HardwareBringupTests.cpp)
 target_link_libraries(GuitarDSPHardwareBringupTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME hardware_bringup COMMAND GuitarDSPHardwareBringupTests)
