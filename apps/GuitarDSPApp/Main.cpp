@@ -5,6 +5,8 @@
 #include "AudioTapFifo.h"
 #include "SpectrumAnalyserComponent.h"
 #include "guitardsp/app/LiveRig.h"
+#include "guitardsp/app/LiveRigPresetJson.h"
+#include "guitardsp/app/PresetStore.h"
 #include "guitardsp/app/RealtimeAudioEngine.h"
 #include "guitardsp/app/ReferenceCabinetIR.h"
 
@@ -15,7 +17,9 @@
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -26,6 +30,11 @@ namespace {
 struct MeasuredImpulseState {
     std::vector<float> impulse;
     juce::String name;
+    // Full path of the source file, so a saved preset can remember which
+    // measured IR was loaded and reload/re-resample it later (see
+    // LiveRigPreset.h's doc comment on why the resampled `impulse` data
+    // itself isn't what gets persisted).
+    juce::String fullPath;
     double sampleRate = 0.0;
     double calibrationGainDb = 0.0;
     double rawPeakDb = 0.0;
@@ -125,7 +134,10 @@ class MainComponent final : public juce::Component,
 public:
     MainComponent()
         : deviceSelector_(deviceManager_, 1, 2, 1, 2,
-                          false, false, true, false) {
+                          false, false, true, false),
+          presetStore_(juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                           .getChildFile("GuitarDSP").getChildFile("Presets")
+                           .getFullPathName().toStdString()) {
         formatManager_.registerBasicFormats();
 
         addChildComponent(deviceSelector_);
@@ -159,6 +171,15 @@ public:
         addAndMakeVisible(cabinetPageButton_);
         addAndMakeVisible(routingPageButton_);
         addAndMakeVisible(advancedPageButton_);
+        addAndMakeVisible(presetsPageButton_);
+        addAndMakeVisible(slotAButton_);
+        addAndMakeVisible(slotBButton_);
+        addAndMakeVisible(presetBox_);
+        addAndMakeVisible(loadPresetButton_);
+        addAndMakeVisible(deletePresetButton_);
+        addAndMakeVisible(presetNameEditor_);
+        addAndMakeVisible(savePresetButton_);
+        addAndMakeVisible(presetStatusLabel_);
         addAndMakeVisible(routingGraphView_);
         addAndMakeVisible(inputWaveform_);
         addAndMakeVisible(outputWaveform_);
@@ -353,6 +374,17 @@ public:
         advancedPageButton_.setButtonText("02   GUITAR AMPLIFIER");
         cabinetPageButton_.setButtonText("03   SPEAKER + CABINET");
         routingPageButton_.setButtonText("04   ROUTING + BASS");
+        presetsPageButton_.setButtonText("05   PRESETS");
+
+        slotAButton_.setButtonText("A");
+        slotBButton_.setButtonText("B");
+        presetNameEditor_.setTextToShowWhenEmpty("preset name", juce::Colours::grey);
+        loadPresetButton_.setButtonText("LOAD");
+        deletePresetButton_.setButtonText("DELETE");
+        savePresetButton_.setButtonText("SAVE AS");
+        presetStatusLabel_.setText(
+            "Presets are stored in " + presetDirectoryDescription(), juce::dontSendNotification);
+        presetStatusLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
 
         pedalControlsTitle_.setText("SIGNAL CHAIN", juce::dontSendNotification);
         ampControlsTitle_.setText("CIRCUIT PEDAL", juce::dontSendNotification);
@@ -469,6 +501,20 @@ public:
         cabinetPageButton_.onClick = [this] { setControlPage(ControlPage::cabinet); };
         routingPageButton_.onClick = [this] { setControlPage(ControlPage::routing); };
         advancedPageButton_.onClick = [this] { setControlPage(ControlPage::amplifier); };
+        presetsPageButton_.onClick = [this] { setControlPage(ControlPage::presets); };
+
+        slotAButton_.onClick = [this] { selectRigSlot(true); };
+        slotBButton_.onClick = [this] { selectRigSlot(false); };
+
+        presetBox_.onChange = [this] {
+            const bool has = presetBox_.getSelectedId() > 0;
+            loadPresetButton_.setEnabled(has);
+            deletePresetButton_.setEnabled(has);
+            if (has) presetNameEditor_.setText(presetBox_.getText(), juce::dontSendNotification);
+        };
+        savePresetButton_.onClick = [this] { onSavePresetClicked(); };
+        loadPresetButton_.onClick = [this] { onLoadPresetClicked(); };
+        deletePresetButton_.onClick = [this] { onDeletePresetClicked(); };
 
         engine_.setInputTrimDb(0.0f);
         engine_.setOutputTrimDb(-12.0f);
@@ -478,6 +524,8 @@ public:
         updateInputRouting();
         updateRoutingGraph();
         updateAdvancedControlAvailability();
+        updateSlotButtonAppearance();
+        refreshPresetList();
         setControlPage(ControlPage::pedal);
 
         const auto stateFile = audioStateFile();
@@ -513,7 +561,7 @@ public:
         graphics.drawRoundedRectangle(inspectorPanel_.toFloat(), 11.0f, 1.0f);
 
         auto guide = chainPanel_.reduced(16);
-        guide.removeFromTop(305);
+        guide.removeFromTop(368);
         if (guide.getHeight() > 55) {
             graphics.setColour(juce::Colours::white.withAlpha(0.55f));
             graphics.setFont(13.0f);
@@ -528,6 +576,10 @@ public:
         auto area = getLocalBounds().reduced(14);
         auto row = area.removeFromTop(36);
         audioSettingsButton_.setBounds(row.removeFromRight(190).reduced(0, 3));
+        row.removeFromRight(12);
+        slotBButton_.setBounds(row.removeFromRight(40).reduced(0, 3));
+        row.removeFromRight(4);
+        slotAButton_.setBounds(row.removeFromRight(40).reduced(0, 3));
         row.removeFromRight(12);
         statusLabel_.setBounds(row);
 
@@ -608,6 +660,8 @@ public:
         cabinetPageButton_.setBounds(chain.removeFromTop(54));
         chain.removeFromTop(9);
         routingPageButton_.setBounds(chain.removeFromTop(54));
+        chain.removeFromTop(9);
+        presetsPageButton_.setBounds(chain.removeFromTop(54));
 
         auto panel = inspectorPanel_.reduced(18, 12);
         ampControlsTitle_.setBounds(panel.removeFromTop(40));
@@ -659,7 +713,7 @@ public:
             row.removeFromLeft(12);
             matchIrLevel_.setBounds(row);
             irLabel_.setBounds(panel.removeFromTop(34));
-        } else {
+        } else if (currentPage_ == ControlPage::routing) {
             row = panel.removeFromTop(34);
             signalRoutingBox_.setBounds(row.removeFromLeft(std::min(320, row.getWidth() / 2)));
             row.removeFromLeft(8);
@@ -680,6 +734,20 @@ public:
             loadBassIrButton_.setBounds(row.removeFromLeft(220));
             row.removeFromLeft(12);
             bassIrLabel_.setBounds(row);
+        } else {
+            row = panel.removeFromTop(34);
+            presetBox_.setBounds(row.removeFromLeft(std::min(320, row.getWidth() / 2)));
+            row.removeFromLeft(8);
+            loadPresetButton_.setBounds(row.removeFromLeft(110));
+            row.removeFromLeft(8);
+            deletePresetButton_.setBounds(row);
+            panel.removeFromTop(10);
+            row = panel.removeFromTop(34);
+            presetNameEditor_.setBounds(row.removeFromLeft(std::max(200, row.getWidth() - 150)));
+            row.removeFromLeft(8);
+            savePresetButton_.setBounds(row);
+            panel.removeFromTop(10);
+            presetStatusLabel_.setBounds(panel.removeFromTop(60));
         }
     }
 
@@ -775,7 +843,7 @@ public:
     }
 
 private:
-    enum class ControlPage { pedal, amplifier, cabinet, routing };
+    enum class ControlPage { pedal, amplifier, cabinet, routing, presets };
 
     void setControlPage(ControlPage page) {
         currentPage_ = page;
@@ -783,11 +851,13 @@ private:
         const bool amplifier = page == ControlPage::amplifier;
         const bool cabinet = page == ControlPage::cabinet;
         const bool routing = page == ControlPage::routing;
+        const bool presets = page == ControlPage::presets;
 
         const juce::String title = pedal ? "CIRCUIT PEDAL  /  " + pedalBox_.getText()
             : amplifier ? "GUITAR AMPLIFIER  /  " + ampBox_.getText()
             : cabinet ? "SPEAKER + CABINET RESPONSE"
-                      : "PARALLEL ROUTING + BASS AMP";
+            : routing ? "PARALLEL ROUTING + BASS AMP"
+                      : "PRESETS  /  slot " + juce::String(abActiveIsA_ ? "A" : "B") + " active";
         ampControlsTitle_.setText(title, juce::dontSendNotification);
 
         for (auto* control : std::array<juce::Component*, 3>{{
@@ -820,6 +890,11 @@ private:
                  &crossoverFrequency_, &loadBassIrButton_, &bassIrLabel_}})
             control->setVisible(routing);
 
+        for (auto* control : std::array<juce::Component*, 6>{{
+                 &presetBox_, &loadPresetButton_, &deletePresetButton_,
+                 &presetNameEditor_, &savePresetButton_, &presetStatusLabel_}})
+            control->setVisible(presets);
+
         rigPageButton_.setColour(juce::TextButton::buttonColourId,
             pedal ? juce::Colour::fromRGB(43, 119, 134)
                   : juce::Colour::fromRGB(43, 55, 61));
@@ -832,6 +907,10 @@ private:
         routingPageButton_.setColour(juce::TextButton::buttonColourId,
             routing ? juce::Colour::fromRGB(43, 119, 134)
                     : juce::Colour::fromRGB(43, 55, 61));
+        presetsPageButton_.setColour(juce::TextButton::buttonColourId,
+            presets ? juce::Colour::fromRGB(43, 119, 134)
+                    : juce::Colour::fromRGB(43, 55, 61));
+        if (presets) refreshPresetList();
         if (getWidth() > 0 && getHeight() > 0) resized();
         repaint();
     }
@@ -863,6 +942,220 @@ private:
             slider->setEnabled(parallel);
         crossoverFrequency_.setEnabled(
             settings_.signalRouting == guitardsp::app::SignalRouting::crossoverOctaveBass);
+    }
+
+    [[nodiscard]] juce::String presetDirectoryDescription() const {
+        return juce::String(presetStore_.directory());
+    }
+
+    // Pushes settings_ (already updated by the caller -- a preset load or an
+    // A/B slot switch) onto every UI control that mirrors it, without
+    // triggering each control's own onChange/onClick handler (which would
+    // otherwise fire a full rig rebuild once per widget). A single rebuild
+    // happens at the end instead. Mirrors the constructor's own
+    // dontSendNotification + one explicit updateSettingsFromControls()
+    // pattern.
+    void refreshControlsFromSettings() {
+        using guitardsp::app::AmpModel;
+        using guitardsp::app::PedalModel;
+        using guitardsp::app::SignalRouting;
+
+        pedalBox_.setSelectedId(
+            settings_.pedal == PedalModel::bypass ? 1
+                : settings_.pedal == PedalModel::ds1Circuit ? 3 : 2,
+            juce::dontSendNotification);
+        ampBox_.setSelectedId(
+            settings_.amp == AmpModel::britishPlexiFamily ? 2
+                : settings_.amp == AmpModel::americanCleanFamily ? 3
+                : settings_.amp == AmpModel::preampCircuit ? 4
+                : settings_.amp == AmpModel::fullAmpCircuit ? 5 : 1,
+            juce::dontSendNotification);
+        qualityBox_.setSelectedId(
+            settings_.quality == guitardsp::graph::ProcessingQuality::eco ? 1
+                : settings_.quality == guitardsp::graph::ProcessingQuality::live ? 2
+                : settings_.quality == guitardsp::graph::ProcessingQuality::studio ? 4 : 3,
+            juce::dontSendNotification);
+        ampEnabled_.setToggleState(settings_.ampEnabled, juce::dontSendNotification);
+        cabEnabled_.setToggleState(settings_.cabinetEnabled, juce::dontSendNotification);
+        signalRoutingBox_.setSelectedId(
+            settings_.signalRouting == SignalRouting::parallelOctaveBass ? 2
+                : settings_.signalRouting == SignalRouting::crossoverOctaveBass ? 3 : 1,
+            juce::dontSendNotification);
+        octaveEnabled_.setToggleState(settings_.octaveEnabled, juce::dontSendNotification);
+        bassCabinetEnabled_.setToggleState(settings_.bassCabinetEnabled, juce::dontSendNotification);
+        matchIrLevel_.setToggleState(settings_.matchMeasuredCabinetLevel, juce::dontSendNotification);
+        powerTubeBox_.setSelectedId(static_cast<int>(settings_.ampPowerTube) + 1, juce::dontSendNotification);
+        toneStackBox_.setSelectedId(static_cast<int>(settings_.ampToneStack) + 1, juce::dontSendNotification);
+        toneDriverBox_.setSelectedId(static_cast<int>(settings_.ampToneDriver) + 1, juce::dontSendNotification);
+        feedbackVoicingBox_.setSelectedId(
+            static_cast<int>(settings_.ampFeedbackVoicing) + 1, juce::dontSendNotification);
+
+        const auto setPercent = [](juce::Slider& slider, float value) {
+            slider.setValue(static_cast<double>(value) * 100.0, juce::dontSendNotification);
+        };
+        setPercent(pedalDrive_, settings_.pedalDrive);
+        setPercent(pedalTone_, settings_.pedalTone);
+        setPercent(pedalLevel_, settings_.pedalLevel);
+        setPercent(ampGain_, settings_.ampGain);
+        setPercent(ampBass_, settings_.ampBass);
+        setPercent(ampMid_, settings_.ampMid);
+        setPercent(ampTreble_, settings_.ampTreble);
+        setPercent(ampMaster_, settings_.ampMaster);
+        setPercent(ampPresence_, settings_.ampPresence);
+        setPercent(cabinetMix_, settings_.cabinetMix);
+        setPercent(speakerCompression_, settings_.speakerCompression);
+        setPercent(speakerExcursion_, settings_.speakerExcursion);
+        setPercent(speakerResonance_, settings_.speakerResonance);
+        setPercent(guitarBranchLevel_, settings_.guitarBranchLevel);
+        setPercent(bassBranchLevel_, settings_.bassBranchLevel);
+        setPercent(octaveMix_, settings_.octaveMix);
+        setPercent(octaveLevel_, settings_.octaveLevel);
+        setPercent(bassGain_, settings_.bassGain);
+        setPercent(bassTone_, settings_.bassTone);
+        setPercent(bassLevel_, settings_.bassLevel);
+        cabinetOutput_.setValue(settings_.cabinetOutputDb, juce::dontSendNotification);
+        ampOutput_.setValue(settings_.ampOutputDb, juce::dontSendNotification);
+        cabinetLowCut_.setValue(settings_.cabinetLowCutHz, juce::dontSendNotification);
+        cabinetHighCut_.setValue(settings_.cabinetHighCutHz, juce::dontSendNotification);
+        crossoverFrequency_.setValue(settings_.crossoverFrequency, juce::dontSendNotification);
+
+        toneControlsPending_ = false;
+        // Re-derives settings_'s discrete fields from the widgets just set
+        // (a no-op given they were set from settings_ itself) and refreshes
+        // everything downstream of it -- monitor tap options included.
+        updateSettingsFromControls();
+        updateAdvancedControlAvailability();
+        updateRoutingGraph();
+        setControlPage(currentPage_);
+        rebuildRig();
+    }
+
+    // A/B comparison: swaps the currently active LiveRigSettings with the
+    // held-aside inactive slot and rebuilds the rig from it. See
+    // RigABState.h's doc comment for why this always goes through a full
+    // rebuildRig() rather than the per-knob real-time path -- A and B can
+    // differ in pedal/amp model or routing, which setNodeParameter/
+    // setNodeTypeParameter (issue #47's real-time knob path) can't express,
+    // only a topology rebuild can. RealtimeGraphHost's block-boundary hot
+    // swap (see its class doc comment) is what keeps that rebuild low
+    // latency and real-time safe, exactly as it already is for every other
+    // topology-affecting control on this page.
+    void selectRigSlot(bool wantA) {
+        if (wantA == abActiveIsA_) return;
+        std::swap(settings_, abInactiveSettings_);
+        abActiveIsA_ = wantA;
+        refreshControlsFromSettings();
+        updateSlotButtonAppearance();
+    }
+
+    void updateSlotButtonAppearance() {
+        slotAButton_.setColour(juce::TextButton::buttonColourId,
+            abActiveIsA_ ? juce::Colour::fromRGB(43, 119, 134) : juce::Colour::fromRGB(43, 55, 61));
+        slotBButton_.setColour(juce::TextButton::buttonColourId,
+            !abActiveIsA_ ? juce::Colour::fromRGB(43, 119, 134) : juce::Colour::fromRGB(43, 55, 61));
+    }
+
+    // Rebuilds presetBox_'s item list from what's actually on disk right
+    // now (PresetStore::list() is control-thread filesystem I/O, cheap
+    // enough to call on every page switch / save / delete). Keeps
+    // `preferredSelection` selected if given and still present, otherwise
+    // tries to keep whatever was already showing.
+    void refreshPresetList(const juce::String& preferredSelection = {}) {
+        const juce::String target = preferredSelection.isNotEmpty()
+            ? preferredSelection : presetBox_.getText();
+        presetBox_.clear(juce::dontSendNotification);
+        presetSummaries_ = presetStore_.list();
+        int selectId = 0;
+        for (std::size_t i = 0; i < presetSummaries_.size(); ++i) {
+            const int id = static_cast<int>(i) + 1;
+            presetBox_.addItem(juce::String(presetSummaries_[i].name), id);
+            if (juce::String(presetSummaries_[i].name) == target) selectId = id;
+        }
+        presetBox_.setSelectedId(selectId, juce::dontSendNotification);
+        const bool has = selectId != 0;
+        loadPresetButton_.setEnabled(has);
+        deletePresetButton_.setEnabled(has);
+    }
+
+    // Reloads a preset's saved measured-IR reference (see LiveRigPreset.h):
+    // an empty path means "use the built-in reference IR", a path that no
+    // longer resolves on this machine falls back to the same built-in
+    // reference rather than silently keeping whatever was previously loaded,
+    // and otherwise re-runs the normal file-load/resample path so the IR is
+    // correct for the current device sample rate.
+    void applyCabinetIrFromPreset(const std::string& path, MeasuredImpulseState& state,
+                                  juce::Label& label, const juce::String& fallbackText) {
+        if (path.empty()) {
+            state = MeasuredImpulseState{};
+            updateImpulseLabel(state, label, fallbackText);
+            return;
+        }
+        const juce::File file(path);
+        if (file.existsAsFile()) {
+            loadImpulseResponse(file, state, label, fallbackText);
+        } else {
+            state = MeasuredImpulseState{};
+            label.setText("Preset IR not found: " + file.getFullPathName(), juce::dontSendNotification);
+        }
+    }
+
+    void onSavePresetClicked() {
+        const auto name = presetNameEditor_.getText().trim();
+        if (name.isEmpty()) {
+            presetStatusLabel_.setText("Enter a preset name before saving", juce::dontSendNotification);
+            return;
+        }
+        guitardsp::app::LiveRigPreset preset;
+        preset.name = name.toStdString();
+        preset.settings = settings_;
+        preset.guitarCabinetIrPath = loadedGuitarIr_.impulse.empty()
+            ? std::string() : loadedGuitarIr_.fullPath.toStdString();
+        preset.bassCabinetIrPath = loadedBassIr_.impulse.empty()
+            ? std::string() : loadedBassIr_.fullPath.toStdString();
+
+        std::string error;
+        if (presetStore_.save(preset, &error)) {
+            presetStatusLabel_.setText("Saved preset \"" + name + "\"", juce::dontSendNotification);
+            refreshPresetList(name);
+        } else {
+            presetStatusLabel_.setText("Save failed: " + juce::String(error), juce::dontSendNotification);
+        }
+    }
+
+    void onLoadPresetClicked() {
+        const int id = presetBox_.getSelectedId();
+        if (id <= 0 || static_cast<std::size_t>(id - 1) >= presetSummaries_.size()) return;
+        const std::string name = presetSummaries_[static_cast<std::size_t>(id - 1)].name;
+
+        guitardsp::app::LiveRigPreset preset;
+        std::string error;
+        if (!presetStore_.load(name, preset, &error)) {
+            presetStatusLabel_.setText("Load failed: " + juce::String(error), juce::dontSendNotification);
+            return;
+        }
+
+        settings_ = preset.settings;
+        applyCabinetIrFromPreset(preset.guitarCabinetIrPath, loadedGuitarIr_, irLabel_,
+            "BUILT-IN REFERENCE / calibrated guitar cabinet / not measured");
+        applyCabinetIrFromPreset(preset.bassCabinetIrPath, loadedBassIr_, bassIrLabel_,
+            "BUILT-IN REFERENCE / calibrated bass cabinet / not measured");
+        refreshControlsFromSettings();
+        presetNameEditor_.setText(juce::String(name), juce::dontSendNotification);
+        presetStatusLabel_.setText("Loaded preset \"" + juce::String(name) + "\"", juce::dontSendNotification);
+    }
+
+    void onDeletePresetClicked() {
+        const int id = presetBox_.getSelectedId();
+        if (id <= 0 || static_cast<std::size_t>(id - 1) >= presetSummaries_.size()) return;
+        const std::string name = presetSummaries_[static_cast<std::size_t>(id - 1)].name;
+
+        std::string error;
+        if (presetStore_.remove(name, &error)) {
+            presetStatusLabel_.setText("Deleted preset \"" + juce::String(name) + "\"", juce::dontSendNotification);
+            refreshPresetList();
+        } else {
+            presetStatusLabel_.setText("Delete failed: " + juce::String(error), juce::dontSendNotification);
+        }
     }
 
     [[nodiscard]] std::string_view selectedGuitarAmpType() const noexcept {
@@ -1376,6 +1669,7 @@ private:
         state.impulse.assign(buffer.getReadPointer(0), buffer.getReadPointer(0) + samplesToRead);
         state.sampleRate = reader->sampleRate;
         state.name = file.getFileName();
+        state.fullPath = file.getFullPathName();
         const auto calibration = guitardsp::app::calibrateMeasuredCabinetImpulse(
             state.impulse, state.sampleRate);
         state.calibrationGainDb = calibration.appliedGainDb;
@@ -1395,6 +1689,15 @@ private:
     juce::AudioFormatManager formatManager_;
     guitardsp::app::RealtimeAudioEngine engine_;
     guitardsp::app::LiveRigSettings settings_;
+    // A/B comparison (issue #79): settings_ always holds the *active* slot
+    // (A or B); the other slot's settings sit here untouched until toggled
+    // back in. See selectRigSlot()/RigABState.h.
+    guitardsp::app::LiveRigSettings abInactiveSettings_;
+    bool abActiveIsA_ = true;
+    guitardsp::app::PresetStore presetStore_;
+    // Message-thread-only: index i of presetBox_'s item (id i+1) corresponds
+    // to presetSummaries_[i], rebuilt by refreshPresetList().
+    std::vector<guitardsp::app::PresetSummary> presetSummaries_;
 
     juce::ComboBox pedalBox_;
     juce::ComboBox ampBox_;
@@ -1450,6 +1753,15 @@ private:
     juce::TextButton cabinetPageButton_;
     juce::TextButton routingPageButton_;
     juce::TextButton advancedPageButton_;
+    juce::TextButton presetsPageButton_;
+    juce::TextButton slotAButton_;
+    juce::TextButton slotBButton_;
+    juce::ComboBox presetBox_;
+    juce::TextButton loadPresetButton_;
+    juce::TextButton deletePresetButton_;
+    juce::TextEditor presetNameEditor_;
+    juce::TextButton savePresetButton_;
+    juce::Label presetStatusLabel_;
     RoutingGraphView routingGraphView_;
     guitardsp::app::AudioTapFifo inputTapFifo_;
     guitardsp::app::AudioTapFifo outputTapFifo_;
