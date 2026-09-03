@@ -701,6 +701,7 @@ public:
         // every audioDeviceIOCallbackWithContext() call below; prepared here
         // on the message thread, before the callback that writes into it.
         testSignalTapBuffer_.assign(static_cast<std::size_t>(std::max(1, currentBlockSize_)), 0.0f);
+        testSignalOutputTapBuffer_.assign(static_cast<std::size_t>(std::max(1, currentBlockSize_)), 0.0f);
         inputSpectrum_.setSampleRate(currentSampleRate_);
         outputSpectrum_.setSampleRate(currentSampleRate_);
         inputSpectrum_.resetAnalysis();
@@ -715,7 +716,8 @@ public:
                 + juce::String(currentSampleRate_, 0) + " Hz / "
                 + juce::String(currentBlockSize_) + " samples / graph latency "
                 + juce::String(engine_.stats().graphLatencySamples) + " samples"
-                + (mute_.getToggleState() ? " / OUTPUT MUTED" : "")
+                + (mute_.getToggleState() || testSignalActive_.load(std::memory_order_relaxed)
+                       ? " / OUTPUT MUTED" : "")
             : "Failed to prepare DSP rig";
         juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this), message] {
             if (safe != nullptr) safe->statusLabel_.setText(message, juce::dontSendNotification);
@@ -740,31 +742,44 @@ public:
                                           int numSamples,
                                           const juce::AudioIODeviceCallbackContext&) override {
         const juce::ScopedNoDenormals noDenormals;
-        // testSignalTapBuffer_ is sized to currentBlockSize_ in
-        // audioDeviceAboutToStart(), which bounds numSamples here; only
-        // handed to process() as a write target while test-signal mode is
-        // active and only ever touched from this callback.
+        // testSignalTapBuffer_/testSignalOutputTapBuffer_ are sized to
+        // currentBlockSize_ in audioDeviceAboutToStart(), which bounds
+        // numSamples here; only handed to process() as write targets while
+        // test-signal mode is active and only ever touched from this callback.
         const bool testSignalMode = testSignalActive_.load(std::memory_order_acquire);
-        float* testSignalTap = testSignalMode
-            && static_cast<std::size_t>(numSamples) <= testSignalTapBuffer_.size()
-                ? testSignalTapBuffer_.data() : nullptr;
+        const bool testSignalBuffersFit = static_cast<std::size_t>(numSamples)
+            <= testSignalTapBuffer_.size();
+        float* testSignalTap = testSignalMode && testSignalBuffersFit
+            ? testSignalTapBuffer_.data() : nullptr;
+        // While test-signal mode is active, RealtimeAudioEngine::process()
+        // always forces the physical output silent (see its doc comment) so
+        // the test tone is never actually heard; this tap instead carries
+        // the real post-DSP signal so the OUTPUT waveform/spectrum can keep
+        // showing it instead of going dark.
+        float* testSignalOutputTap = testSignalMode && testSignalBuffersFit
+            ? testSignalOutputTapBuffer_.data() : nullptr;
         engine_.process(inputChannelData, numInputChannels,
-                        outputChannelData, numOutputChannels, numSamples, testSignalTap);
+                        outputChannelData, numOutputChannels, numSamples,
+                        testSignalTap, testSignalOutputTap);
 
         // Lock-free hand-off to the UI thread for the waveform displays: tap
-        // the final hardware output actually written above, and either the
-        // physical input or (in test-signal mode) the synthesized stimulus
-        // that was actually fed into the graph. No allocation, no lock (see
-        // AudioTapFifo.h).
+        // the final hardware output actually written above (or, in test-signal
+        // mode, the un-muted post-DSP tap since the hardware output is forced
+        // silent), and either the physical input or (in test-signal mode) the
+        // synthesized stimulus that was actually fed into the graph. No
+        // allocation, no lock (see AudioTapFifo.h).
         if (testSignalTap != nullptr) {
             inputTapFifo_.push(testSignalTap, numSamples);
         } else if (inputChannelData != nullptr && numInputChannels > 0
             && inputChannelData[0] != nullptr) {
             inputTapFifo_.push(inputChannelData[0], numSamples);
         }
-        if (outputChannelData != nullptr && numOutputChannels > 0
-            && outputChannelData[0] != nullptr)
+        if (testSignalOutputTap != nullptr) {
+            outputTapFifo_.push(testSignalOutputTap, numSamples);
+        } else if (outputChannelData != nullptr && numOutputChannels > 0
+            && outputChannelData[0] != nullptr) {
             outputTapFifo_.push(outputChannelData[0], numSamples);
+        }
     }
 
 private:
@@ -962,12 +977,17 @@ private:
         const bool fault = xruns > 0 || stats.performance.deadlineMisses > 0
             || stats.nonFiniteInputSamples > 0 || stats.nonFiniteOutputSamples > 0;
         const bool overload = driverCpu > 80.0 || callbackP99 > 90.0;
+        // Test-signal mode always forces the physical output silent (see
+        // RealtimeAudioEngine::process()), independent of the manual Mute
+        // toggle, so reflect that here too.
+        const bool outputMuted = mute_.getToggleState()
+            || stats.inputRoutingMode == guitardsp::app::InputRoutingMode::testSignal;
         safetyLabel_.setColour(juce::Label::textColourId,
             fault ? juce::Colours::orangered
-                  : overload || mute_.getToggleState() ? juce::Colours::orange
-                                                        : juce::Colours::lightgreen);
+                  : overload || outputMuted ? juce::Colours::orange
+                                             : juce::Colours::lightgreen);
         safetyLabel_.setText(
-            (mute_.getToggleState() ? "OUTPUT MUTED    " : "OUTPUT ACTIVE    ")
+            (outputMuted ? "OUTPUT MUTED    " : "OUTPUT ACTIVE    ")
                 + juce::String(safeDry_.getToggleState()
                     ? "Safe dry monitor    " : "Full pedal / amp / cabinet path    ")
                 + "Nonfinite input: "
@@ -1400,6 +1420,7 @@ private:
     // of the (idle) physical input while test-signal mode is active.
     std::atomic<bool> testSignalActive_{false};
     std::vector<float> testSignalTapBuffer_;
+    std::vector<float> testSignalOutputTapBuffer_;
     juce::AudioVisualiserComponent inputWaveform_{1};
     juce::AudioVisualiserComponent outputWaveform_{1};
     guitardsp::app::SpectrumAnalyserComponent inputSpectrum_{2048};

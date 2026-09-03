@@ -58,12 +58,22 @@ public:
     // to a waveform/spectrum tap instead of the (idle) physical input. Must
     // have room for at least numSamples floats; writing it is an O(numSamples)
     // store with no extra allocation or locking.
+    //
+    // testSignalOutputTap, when non-null, receives the post-DSP output sample
+    // stream (channel 0, after outputGain/safety-ceiling) while
+    // InputRoutingMode::testSignal is active (untouched otherwise). While
+    // that mode is active the physical outputChannels are always forced
+    // silent regardless of setMuted(), since a test signal is for probing the
+    // rig's waveform/spectrum response, not for listening to -- this tap is
+    // what lets a caller still show that response on a display. Must have
+    // room for at least numSamples floats.
     void process(const float* const* inputChannels,
                  int numInputChannels,
                  float* const* outputChannels,
                  int numOutputChannels,
                  int numSamples,
-                 float* testSignalTap = nullptr) noexcept;
+                 float* testSignalTap = nullptr,
+                 float* testSignalOutputTap = nullptr) noexcept;
 
     void setInputTrimDb(float db) noexcept;
     void setOutputTrimDb(float db) noexcept;
