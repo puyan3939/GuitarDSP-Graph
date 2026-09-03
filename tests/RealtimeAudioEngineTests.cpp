@@ -130,11 +130,12 @@ int main() {
     testSignalEngine.setMuted(false);
 
     float tap[128]{};
+    float outputTap[128]{};
     allocationCount.store(0, std::memory_order_relaxed);
     trackAllocations.store(true, std::memory_order_release);
     // Physical input is null throughout: the whole point of testSignal mode
     // is to feed the graph without any physical input present.
-    testSignalEngine.process(nullptr, 0, outputs, 2, 128, tap);
+    testSignalEngine.process(nullptr, 0, outputs, 2, 128, tap, outputTap);
     trackAllocations.store(false, std::memory_order_release);
     ok &= require(allocationCount.load(std::memory_order_relaxed) == 0,
                   "test-signal oscillator callback performs zero heap allocations");
@@ -150,8 +151,19 @@ int main() {
 
     float outputEnergy = 0.0f;
     for (float sample : left) outputEnergy += sample * sample;
-    ok &= require(outputEnergy > 0.0f,
-                  "test-signal oscillator reaches the graph output with no physical input present");
+    ok &= require(outputEnergy == 0.0f,
+                  "test-signal mode always forces the physical output silent, "
+                  "even with setMuted(false)");
+
+    float outputTapPeak = 0.0f;
+    bool outputTapFinite = true;
+    for (float sample : outputTap) {
+        outputTapPeak = std::max(outputTapPeak, std::abs(sample));
+        outputTapFinite &= std::isfinite(sample);
+    }
+    ok &= require(outputTapFinite && outputTapPeak > 0.0f,
+                  "test-signal output tap still carries the real post-DSP signal "
+                  "while the physical output is forced silent");
 
     ok &= require(testSignalEngine.stats().inputRoutingMode == app::InputRoutingMode::testSignal,
                   "stats report the active test-signal routing mode");

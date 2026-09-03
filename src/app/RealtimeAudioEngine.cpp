@@ -111,7 +111,8 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
                                   float* const* outputChannels,
                                   int numOutputChannels,
                                   int numSamples,
-                                  float* testSignalTap) noexcept {
+                                  float* testSignalTap,
+                                  float* testSignalOutputTap) noexcept {
     if (numSamples <= 0) return;
 
     for (int ch = 0; ch < numOutputChannels; ++ch) {
@@ -244,6 +245,12 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
 
         host_.process(inputBlock_, outputBlock_, blockSamples);
 
+        // Test-signal mode is for probing the rig's waveform/spectrum response,
+        // not for listening to, so the physical outputs are always forced
+        // silent while it's active -- independent of the manual Mute toggle.
+        // testSignalOutputTap still receives the real post-DSP signal (see the
+        // header doc comment) so a waveform/spectrum display doesn't go dark.
+        const bool hardwareMuted = muted || testSignalMode;
         for (int ch = 0; ch < numOutputChannels; ++ch) {
             float* destination = outputChannels[ch];
             if (destination == nullptr) continue;
@@ -251,7 +258,7 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
             const int sourceChannel = std::min(ch, processingChannels_ - 1);
             const float* source = outputBlock_.channel(sourceChannel);
             for (int i = 0; i < blockSamples; ++i) {
-                float sample = muted ? 0.0f : source[i] * outputGain;
+                float sample = hardwareMuted ? 0.0f : source[i] * outputGain;
                 if (!std::isfinite(sample)) {
                     sample = 0.0f;
                     ++nonFiniteOutput;
@@ -264,6 +271,13 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
                 }
                 destination[i] = sample;
                 callbackOutputPeak = std::max(callbackOutputPeak, std::abs(sample));
+
+                if (testSignalOutputTap != nullptr && ch == 0) {
+                    float monitorSample = source[i] * outputGain;
+                    monitorSample = std::isfinite(monitorSample)
+                        ? std::clamp(monitorSample, -ceiling, ceiling) : 0.0f;
+                    testSignalOutputTap[offset + i] = monitorSample;
+                }
             }
         }
 
