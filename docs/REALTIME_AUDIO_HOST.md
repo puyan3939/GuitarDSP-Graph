@@ -47,28 +47,34 @@ The emergency output ceiling defaults to 0.98 linear and only clamps samples tha
 
 ## Cabinet IR policy
 
-A measured cabinet IR is the fidelity path. The app accepts WAV/AIFF IR files and
-converts them to the active device sample rate offline using the windowed-sinc
-resampler in `ReferenceCabinetIR.h` before graph preparation. `Match measured IR
-loudness` is enabled by default: it removes inaudible DC, measures the actual
-convolution frequency response, and applies one broadband gain to target roughly
--1 dB through the guitar midrange while bounding the highest response to +4 dB.
-It does not EQ, flatten, compress, or limit the measured cabinet. The control can
-be disabled when the original capture gain is required. Non-finite IR samples
-are removed before the graph reaches the realtime callback.
+A measured cabinet IR is the fidelity path. The app accepts WAV/AIFF IR files for
+both the guitar cabinet and the dedicated bass cabinet (separate `LOAD MEASURED
+IR` / `LOAD MEASURED BASS IR` buttons and file choosers, each keeping its own
+loaded IR independently) and converts them to the active device sample rate
+offline using the windowed-sinc resampler in `ReferenceCabinetIR.h` before graph
+preparation. `Match measured IR loudness` is enabled by default and applies to
+both cabinets: it removes inaudible DC, measures the actual convolution
+frequency response, and applies one broadband gain to target roughly -1 dB
+through the midrange while bounding the highest response to +4 dB. It does not
+EQ, flatten, compress, or limit the measured cabinet. The control can be
+disabled when the original capture gain is required. Non-finite IR samples are
+removed before the graph reaches the realtime callback.
 
-If no measured IR is supplied, the app uses `makeReferenceCabinetImpulse()`.
-The synthetic reference is designed as a stable high-pass/body/mid/presence/
-low-pass filter cascade with short early reflections. Its response is normalized
-by midband convolution gain, not by the peak amplitude of a single impulse
-sample. At 44.1, 48, and 96 kHz the midrange is approximately -0.75 dB and the
-broad cabinet-body peak remains around +2.1 dB. It is **not measured data and
-must not be used as a cabinet-model accuracy reference**.
+If no measured IR is supplied for the guitar cabinet, the app uses
+`makeReferenceCabinetImpulse()`. The synthetic reference is designed as a stable
+high-pass/body/mid/presence/low-pass filter cascade with short early
+reflections. Its response is normalized by midband convolution gain, not by the
+peak amplitude of a single impulse sample. At 44.1, 48, and 96 kHz the midrange
+is approximately -0.75 dB and the broad cabinet-body peak remains around +2.1
+dB. It is **not measured data and must not be used as a cabinet-model accuracy
+reference**.
 
-The dedicated bass branch uses a separately voiced synthetic fallback from
-`makeReferenceBassCabinetImpulse()`. Its frequency response is bounded during
-offline preparation so a resonant impulse cannot silently add tens of decibels
-of convolution gain. It is also **not measured**.
+The dedicated bass branch falls back the same way: if no measured IR has been
+loaded for it, it uses a separately voiced synthetic fallback from
+`makeReferenceBassCabinetImpulse()` (`LiveRigSettings::bassCabinetImpulse` empty
+means fallback, same as `cabinetImpulse` for the guitar cabinet). Its frequency
+response is bounded during offline preparation so a resonant impulse cannot
+silently add tens of decibels of convolution gain. It is also **not measured**.
 
 The Speaker + Cabinet inspector exposes IR Mix, adjustable 12 dB/octave low cut
 and high cut, voice-coil compression, excursion, low-frequency speaker resonance,

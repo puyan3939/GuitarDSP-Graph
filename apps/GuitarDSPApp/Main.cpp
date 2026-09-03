@@ -17,6 +17,19 @@
 
 namespace {
 
+// Holds a loaded measured cabinet IR plus the analysis needed to describe it
+// in the UI. Guitar and bass cabinets each keep an independent instance so
+// loading one never disturbs the other.
+struct MeasuredImpulseState {
+    std::vector<float> impulse;
+    juce::String name;
+    double sampleRate = 0.0;
+    double calibrationGainDb = 0.0;
+    double rawPeakDb = 0.0;
+    double matchedPeakDb = 0.0;
+    bool allFinite = true;
+};
+
 class RoutingGraphView final : public juce::Component {
 public:
     void setState(guitardsp::app::SignalRouting routing,
@@ -132,6 +145,8 @@ public:
         addAndMakeVisible(inputTrim_);
         addAndMakeVisible(outputTrim_);
         addAndMakeVisible(loadIrButton_);
+        addAndMakeVisible(loadBassIrButton_);
+        addAndMakeVisible(bassIrLabel_);
         addAndMakeVisible(resetDiagnosticsButton_);
         addAndMakeVisible(audioSettingsButton_);
         addAndMakeVisible(rigPageButton_);
@@ -311,10 +326,13 @@ public:
         pedalControlsTitle_.setFont(juce::FontOptions(16.0f, juce::Font::bold));
         ampControlsTitle_.setFont(juce::FontOptions(18.0f, juce::Font::bold));
         loadIrButton_.setButtonText("LOAD MEASURED IR");
+        loadBassIrButton_.setButtonText("LOAD MEASURED BASS IR");
         resetDiagnosticsButton_.setButtonText("RESET METERS");
         statusLabel_.setText("Audio device not started", juce::dontSendNotification);
         irLabel_.setText("BUILT-IN REFERENCE / calibrated guitar cabinet / not measured",
                          juce::dontSendNotification);
+        bassIrLabel_.setText("BUILT-IN REFERENCE / calibrated bass cabinet / not measured",
+                             juce::dontSendNotification);
         meterLabel_.setText("Input: -inf dBFS    Output: -inf dBFS",
                             juce::dontSendNotification);
 
@@ -356,7 +374,10 @@ public:
         mute_.onClick = [this] { engine_.setMuted(mute_.getToggleState()); };
         matchIrLevel_.onClick = [this] {
             settings_.matchMeasuredCabinetLevel = matchIrLevel_.getToggleState();
-            updateImpulseLabel();
+            updateImpulseLabel(loadedGuitarIr_, irLabel_,
+                               "BUILT-IN REFERENCE / calibrated guitar cabinet / not measured");
+            updateImpulseLabel(loadedBassIr_, bassIrLabel_,
+                               "BUILT-IN REFERENCE / calibrated bass cabinet / not measured");
             rebuildRig();
         };
         audioSettingsButton_.onClick = [this] {
@@ -374,6 +395,7 @@ public:
             engine_.setOutputTrimDb(static_cast<float>(outputTrim_.getValue()));
         };
         loadIrButton_.onClick = [this] { chooseImpulseResponse(); };
+        loadBassIrButton_.onClick = [this] { chooseBassImpulseResponse(); };
         resetDiagnosticsButton_.onClick = [this] {
             engine_.resetDiagnostics();
             xRunBaseline_ = std::max(0, deviceManager_.getXRunCount());
@@ -557,12 +579,17 @@ public:
             routingGraphView_.setBounds(panel.removeFromTop(
                 std::clamp(panel.getHeight() / 4, 72, 105)));
             panel.removeFromTop(5);
-            const int knobHeight = std::clamp(panel.getHeight() / 2, 83, 148);
+            const int knobHeight = std::clamp((panel.getHeight() - 46) / 2, 78, 148);
             placeKnobs(panel.removeFromTop(knobHeight),
                        {&guitarBranchLevel_, &bassBranchLevel_, &octaveMix_,
                         &octaveLevel_});
             placeKnobs(panel.removeFromTop(knobHeight),
                        {&bassGain_, &bassTone_, &bassLevel_, &crossoverFrequency_});
+            panel.removeFromTop(6);
+            row = panel.removeFromTop(34);
+            loadBassIrButton_.setBounds(row.removeFromLeft(220));
+            row.removeFromLeft(12);
+            bassIrLabel_.setBounds(row);
         }
     }
 
@@ -661,11 +688,11 @@ private:
                  &cabinetOutput_, &loadIrButton_, &matchIrLevel_, &irLabel_}})
             control->setVisible(cabinet);
 
-        for (auto* control : std::array<juce::Component*, 12>{{
+        for (auto* control : std::array<juce::Component*, 14>{{
                  &signalRoutingBox_, &octaveEnabled_, &bassCabinetEnabled_,
                  &routingGraphView_, &guitarBranchLevel_, &bassBranchLevel_,
                  &octaveMix_, &octaveLevel_, &bassGain_, &bassTone_, &bassLevel_,
-                 &crossoverFrequency_}})
+                 &crossoverFrequency_, &loadBassIrButton_, &bassIrLabel_}})
             control->setVisible(routing);
 
         rigPageButton_.setColour(juce::TextButton::buttonColourId,
@@ -1024,6 +1051,26 @@ private:
         settings_.matchMeasuredCabinetLevel = matchIrLevel_.getToggleState();
     }
 
+    // Offline-resamples a measured IR to the active device sample rate and
+    // optionally applies the same loudness-matching calibration as the
+    // guitar cabinet (see ReferenceCabinetIR.h). Empty when no measured IR
+    // has been loaded, or before the device sample rate is known.
+    std::vector<float> prepareDeviceImpulse(const MeasuredImpulseState& state,
+                                            bool matchLevel) const {
+        if (state.impulse.empty() || state.sampleRate <= 0.0 || currentSampleRate_ <= 0.0)
+            return {};
+        auto resampled = guitardsp::app::resampleImpulseWindowedSinc(
+            state.impulse, state.sampleRate, currentSampleRate_);
+        if (matchLevel) {
+            auto calibrated = guitardsp::app::calibrateMeasuredCabinetImpulse(
+                resampled, currentSampleRate_);
+            return std::move(calibrated.impulse);
+        }
+        for (float& sample : resampled)
+            if (!std::isfinite(sample)) sample = 0.0f;
+        return resampled;
+    }
+
     guitardsp::app::LiveRigSettings settingsForCurrentDevice() const {
         auto result = settings_;
         if (safeDry_.getToggleState()) {
@@ -1032,23 +1079,11 @@ private:
             result.ampEnabled = false;
             result.cabinetEnabled = false;
             result.cabinetImpulse.clear();
+            result.bassCabinetImpulse.clear();
             return result;
         }
-        if (!loadedIr_.empty() && loadedIrSampleRate_ > 0.0 && currentSampleRate_ > 0.0) {
-            auto resampled = guitardsp::app::resampleImpulseWindowedSinc(
-                loadedIr_, loadedIrSampleRate_, currentSampleRate_);
-            if (result.matchMeasuredCabinetLevel) {
-                auto calibrated = guitardsp::app::calibrateMeasuredCabinetImpulse(
-                    resampled, currentSampleRate_);
-                result.cabinetImpulse = std::move(calibrated.impulse);
-            } else {
-                for (float& sample : resampled)
-                    if (!std::isfinite(sample)) sample = 0.0f;
-                result.cabinetImpulse = std::move(resampled);
-            }
-        } else {
-            result.cabinetImpulse.clear();
-        }
+        result.cabinetImpulse = prepareDeviceImpulse(loadedGuitarIr_, result.matchMeasuredCabinetLevel);
+        result.bassCabinetImpulse = prepareDeviceImpulse(loadedBassIr_, result.matchMeasuredCabinetLevel);
         return result;
     }
 
@@ -1068,48 +1103,65 @@ private:
 
     void chooseImpulseResponse() {
         fileChooser_ = std::make_unique<juce::FileChooser>(
-            "Choose a measured cabinet IR WAV/AIFF", juce::File{}, "*.wav;*.aif;*.aiff");
+            "Choose a measured guitar cabinet IR WAV/AIFF", juce::File{}, "*.wav;*.aif;*.aiff");
         fileChooser_->launchAsync(juce::FileBrowserComponent::openMode
                                     | juce::FileBrowserComponent::canSelectFiles,
                                   [safe = juce::Component::SafePointer<MainComponent>(this)](
                                       const juce::FileChooser& chooser) {
             if (safe == nullptr) return;
             const auto file = chooser.getResult();
-            if (file.existsAsFile()) safe->loadImpulseResponse(file);
+            if (file.existsAsFile())
+                safe->loadImpulseResponse(file, safe->loadedGuitarIr_, safe->irLabel_,
+                    "BUILT-IN REFERENCE / calibrated guitar cabinet / not measured");
         });
     }
 
-    void updateImpulseLabel() {
-        if (loadedIr_.empty()) {
-            irLabel_.setText(
-                "BUILT-IN REFERENCE / calibrated guitar cabinet / not measured",
-                juce::dontSendNotification);
-            irLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+    void chooseBassImpulseResponse() {
+        bassFileChooser_ = std::make_unique<juce::FileChooser>(
+            "Choose a measured bass cabinet IR WAV/AIFF", juce::File{}, "*.wav;*.aif;*.aiff");
+        bassFileChooser_->launchAsync(juce::FileBrowserComponent::openMode
+                                        | juce::FileBrowserComponent::canSelectFiles,
+                                      [safe = juce::Component::SafePointer<MainComponent>(this)](
+                                          const juce::FileChooser& chooser) {
+            if (safe == nullptr) return;
+            const auto file = chooser.getResult();
+            if (file.existsAsFile())
+                safe->loadImpulseResponse(file, safe->loadedBassIr_, safe->bassIrLabel_,
+                    "BUILT-IN REFERENCE / calibrated bass cabinet / not measured");
+        });
+    }
+
+    void updateImpulseLabel(const MeasuredImpulseState& state, juce::Label& label,
+                            const juce::String& fallbackText) {
+        if (state.impulse.empty()) {
+            label.setText(fallbackText, juce::dontSendNotification);
+            label.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             return;
         }
 
         const bool matched = matchIrLevel_.getToggleState();
-        const double peak = matched ? loadedIrMatchedPeakDb_ : loadedIrRawPeakDb_;
-        juce::String description = loadedIrName_ + "  /  "
-            + juce::String(loadedIrSampleRate_, 0) + " Hz  /  ";
+        const double peak = matched ? state.matchedPeakDb : state.rawPeakDb;
+        juce::String description = state.name + "  /  "
+            + juce::String(state.sampleRate, 0) + " Hz  /  ";
         if (matched) {
             description += "matched "
-                + juce::String(loadedIrCalibrationGainDb_, 1) + " dB";
+                + juce::String(state.calibrationGainDb, 1) + " dB";
         } else {
             description += "RAW LEVEL";
         }
         description += "  /  peak " + juce::String(peak, 1) + " dB";
-        if (!loadedIrAllFinite_) description += "  /  invalid samples removed";
-        irLabel_.setText(description, juce::dontSendNotification);
-        irLabel_.setColour(juce::Label::textColourId,
+        if (!state.allFinite) description += "  /  invalid samples removed";
+        label.setText(description, juce::dontSendNotification);
+        label.setColour(juce::Label::textColourId,
             !matched && peak > 8.0 ? juce::Colours::orange
                                    : juce::Colours::lightgrey);
     }
 
-    void loadImpulseResponse(const juce::File& file) {
+    void loadImpulseResponse(const juce::File& file, MeasuredImpulseState& state,
+                             juce::Label& label, const juce::String& fallbackText) {
         auto reader = std::unique_ptr<juce::AudioFormatReader>(formatManager_.createReaderFor(file));
         if (!reader) {
-            irLabel_.setText("IR load failed: unsupported file", juce::dontSendNotification);
+            label.setText("IR load failed: unsupported file", juce::dontSendNotification);
             return;
         }
 
@@ -1120,24 +1172,24 @@ private:
         const int samplesToRead = static_cast<int>(samplesToRead64);
         juce::AudioBuffer<float> buffer(1, samplesToRead);
         if (!reader->read(&buffer, 0, samplesToRead, 0, true, false)) {
-            irLabel_.setText("IR load failed while reading audio", juce::dontSendNotification);
+            label.setText("IR load failed while reading audio", juce::dontSendNotification);
             return;
         }
 
-        loadedIr_.assign(buffer.getReadPointer(0), buffer.getReadPointer(0) + samplesToRead);
-        loadedIrSampleRate_ = reader->sampleRate;
-        loadedIrName_ = file.getFileName();
+        state.impulse.assign(buffer.getReadPointer(0), buffer.getReadPointer(0) + samplesToRead);
+        state.sampleRate = reader->sampleRate;
+        state.name = file.getFileName();
         const auto calibration = guitardsp::app::calibrateMeasuredCabinetImpulse(
-            loadedIr_, loadedIrSampleRate_);
-        loadedIrCalibrationGainDb_ = calibration.appliedGainDb;
-        loadedIrRawPeakDb_ = calibration.before.maximumGainDb;
-        loadedIrMatchedPeakDb_ = calibration.after.maximumGainDb;
-        loadedIrAllFinite_ = calibration.before.allFinite;
-        if (!loadedIrAllFinite_) {
-            for (float& sample : loadedIr_)
+            state.impulse, state.sampleRate);
+        state.calibrationGainDb = calibration.appliedGainDb;
+        state.rawPeakDb = calibration.before.maximumGainDb;
+        state.matchedPeakDb = calibration.after.maximumGainDb;
+        state.allFinite = calibration.before.allFinite;
+        if (!state.allFinite) {
+            for (float& sample : state.impulse)
                 if (!std::isfinite(sample)) sample = 0.0f;
         }
-        updateImpulseLabel();
+        updateImpulseLabel(state, label, fallbackText);
         rebuildRig();
     }
 
@@ -1191,6 +1243,7 @@ private:
     juce::Slider bassLevel_;
     juce::Slider crossoverFrequency_;
     juce::TextButton loadIrButton_;
+    juce::TextButton loadBassIrButton_;
     juce::TextButton resetDiagnosticsButton_;
     juce::TextButton audioSettingsButton_;
     juce::TextButton rigPageButton_;
@@ -1200,6 +1253,7 @@ private:
     RoutingGraphView routingGraphView_;
     juce::Label statusLabel_;
     juce::Label irLabel_;
+    juce::Label bassIrLabel_;
     juce::Label meterLabel_;
     juce::Label routingLabel_;
     juce::Label performanceLabel_;
@@ -1208,20 +1262,16 @@ private:
     juce::Label pedalControlsTitle_;
     juce::Label ampControlsTitle_;
     std::unique_ptr<juce::FileChooser> fileChooser_;
+    std::unique_ptr<juce::FileChooser> bassFileChooser_;
 
-    std::vector<float> loadedIr_;
-    juce::String loadedIrName_;
-    double loadedIrSampleRate_ = 0.0;
-    double loadedIrCalibrationGainDb_ = 0.0;
-    double loadedIrRawPeakDb_ = 0.0;
-    double loadedIrMatchedPeakDb_ = 0.0;
+    MeasuredImpulseState loadedGuitarIr_;
+    MeasuredImpulseState loadedBassIr_;
     double currentSampleRate_ = 0.0;
     int currentBlockSize_ = 0;
     int currentInputLatencySamples_ = 0;
     int currentOutputLatencySamples_ = 0;
     int processingChannels_ = 2;
     int xRunBaseline_ = 0;
-    bool loadedIrAllFinite_ = true;
     bool toneControlsPending_ = false;
     bool applyingBufferFloor_ = false;
     juce::String lastBufferFloorDevice_;

@@ -77,6 +77,10 @@ struct LiveRigSettings {
     // measured IR supplied by the JUCE host should already be resampled to the
     // active audio-device sample rate before it reaches this builder.
     std::vector<float> cabinetImpulse;
+
+    // Same fallback semantics as cabinetImpulse, but for the dedicated bass
+    // cabinet branch (see configureBassCabinet()).
+    std::vector<float> bassCabinetImpulse;
 };
 
 std::unique_ptr<graph::PreparedGraph> prepareLiveRig(const LiveRigSettings& settings,
