@@ -101,6 +101,11 @@ int main() {
     ok &= require(metrics.fundamental > 1.0e-5f, "harmonic analyzer sees fundamental");
     ok &= require(metrics.thd > 1.0e-4f, "nonlinear drive creates measurable harmonics");
     ok &= require(std::isfinite(metrics.thdDb) && std::isfinite(metrics.highBandEnergy), "measurement metrics finite");
+    ok &= require(!metrics.harmonicMagnitudes.empty(),
+                  "harmonic analyzer reports a per-harmonic breakdown (2nd..Nth)");
+    bool harmonicsFinite = true;
+    for (float mag : metrics.harmonicMagnitudes) harmonicsFinite &= std::isfinite(mag) && mag >= 0.0f;
+    ok &= require(harmonicsFinite, "each reported harmonic magnitude is finite and non-negative");
 
     return ok ? 0 : 1;
 }

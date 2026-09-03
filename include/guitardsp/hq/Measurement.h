@@ -3,6 +3,7 @@
 #include <cmath>
 #include <numbers>
 #include <span>
+#include <vector>
 
 namespace guitardsp::hq {
 
@@ -11,6 +12,11 @@ struct HarmonicMetrics {
     float thd = 0.0f;
     float thdDb = -160.0f;
     float highBandEnergy = 0.0f;
+    // Magnitude of each harmonic actually measured (bounded by Nyquist),
+    // in ascending order starting at the 2nd harmonic -- i.e.
+    // harmonicMagnitudes[0] is the 2nd harmonic, [1] the 3rd, and so on.
+    // Divide by `fundamental` for the per-harmonic ratio used by THD.
+    std::vector<float> harmonicMagnitudes;
 };
 
 inline float singleBinMagnitude(std::span<const float> samples, double sampleRate, double frequency) noexcept {
@@ -37,6 +43,7 @@ inline HarmonicMetrics analyzeHarmonics(std::span<const float> samples, double s
         if (f >= 0.5 * sampleRate) break;
         const double mag = singleBinMagnitude(samples, sampleRate, f);
         harmonicPower += mag * mag;
+        m.harmonicMagnitudes.push_back(static_cast<float>(mag));
     }
     m.thd = m.fundamental > 1.0e-12f ? static_cast<float>(std::sqrt(harmonicPower) / m.fundamental) : 0.0f;
     m.thdDb = 20.0f * std::log10(std::max(m.thd, 1.0e-8f));

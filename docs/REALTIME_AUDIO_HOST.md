@@ -76,6 +76,19 @@ forced mute `InputRoutingMode::testSignal` applies while probing a rig with
 the synthesized test oscillator instead of a real guitar signal: the display
 keeps showing the real signal even when the speakers are silent.
 
+The output window's tap also feeds a THD readout below the meters
+(`apps/GuitarDSPApp/ThdAnalyser.h`), following the exact same message-thread
+pattern as `SpectrumAnalyserComponent`: `timerCallback()` pushes the same
+samples drained from the output `AudioTapFifo` into a fixed-size accumulator,
+and once it fills, `guitardsp::hq::analyzeHarmonics()` (`include/guitardsp/hq/Measurement.h`)
+runs a windowed-DFT probe at the fundamental and each harmonic to compute
+THD% and a per-harmonic dB breakdown -- never on the audio callback. THD is
+only well-defined against a known fundamental frequency, so the readout only
+measures while `InputRoutingMode::testSignal` (the "Test signal (sine)"
+input routing option) is active, using its slider frequency as the
+fundamental; otherwise it shows a placeholder telling the user to switch
+routing modes.
+
 The emergency output ceiling defaults to 0.98 linear and only clamps samples that exceed that ceiling. It is a bring-up safety net, not a tone-shaping limiter. The standalone app starts with -12 dB output trim.
 
 ## Cabinet IR policy

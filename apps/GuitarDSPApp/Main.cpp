@@ -4,6 +4,7 @@
 
 #include "AudioTapFifo.h"
 #include "SpectrumAnalyserComponent.h"
+#include "ThdAnalyser.h"
 #include "guitardsp/app/LiveRig.h"
 #include "guitardsp/app/LiveRigPresetJson.h"
 #include "guitardsp/app/PresetStore.h"
@@ -195,6 +196,7 @@ public:
         addAndMakeVisible(performanceLabel_);
         addAndMakeVisible(latencyLabel_);
         addAndMakeVisible(safetyLabel_);
+        addAndMakeVisible(thdLabel_);
         addAndMakeVisible(pedalControlsTitle_);
         addAndMakeVisible(ampControlsTitle_);
 
@@ -400,6 +402,8 @@ public:
                              juce::dontSendNotification);
         meterLabel_.setText("Input: -inf dBFS    Output: -inf dBFS",
                             juce::dontSendNotification);
+        thdLabel_.setText("THD: -- (select \"Test signal (sine)\" input routing to measure)",
+                          juce::dontSendNotification);
         for (auto* waveform : {&inputWaveform_, &outputWaveform_}) {
             waveform->setColours(juce::Colour::fromRGB(20, 29, 34),
                                  juce::Colours::lightseagreen);
@@ -632,7 +636,7 @@ public:
         outputSpectrum_.setBounds(outputWaveArea);
         area.removeFromTop(10);
 
-        auto diagnostics = area.removeFromBottom(155);
+        auto diagnostics = area.removeFromBottom(178);
         row = diagnostics.removeFromTop(34);
         inputTrim_.setBounds(row.removeFromLeft(row.getWidth() / 2 - 8));
         row.removeFromLeft(16);
@@ -643,6 +647,7 @@ public:
         performanceLabel_.setBounds(diagnostics.removeFromTop(23));
         latencyLabel_.setBounds(diagnostics.removeFromTop(23));
         safetyLabel_.setBounds(diagnostics.removeFromTop(23));
+        thdLabel_.setBounds(diagnostics.removeFromTop(23));
 
         area.removeFromBottom(10);
         const int chainWidth = std::clamp(area.getWidth() / 4, 238, 292);
@@ -784,6 +789,8 @@ public:
         outputSpectrum_.setSampleRate(currentSampleRate_);
         inputSpectrum_.resetAnalysis();
         outputSpectrum_.resetAnalysis();
+        outputThd_.setSampleRate(currentSampleRate_);
+        outputThd_.reset();
         engine_.setInputTrimDb(static_cast<float>(inputTrim_.getValue()));
         engine_.setOutputTrimDb(static_cast<float>(outputTrim_.getValue()));
         engine_.setMuted(mute_.getToggleState());
@@ -1181,10 +1188,15 @@ private:
             inputWaveform_.pushBuffer(channelData, 1, count);
             inputSpectrum_.pushSamples(samples, count);
         });
+        // The fundamental is only well-defined while the test-signal input
+        // routing drives a known frequency; set it before draining so the
+        // window that just filled uses the current slider value.
+        outputThd_.setFundamentalHz(testSignalFrequency_.getValue());
         outputTapFifo_.drain([this](const float* samples, int count) {
             const float* channelData[]{samples};
             outputWaveform_.pushBuffer(channelData, 1, count);
             outputSpectrum_.pushSamples(samples, count);
+            outputThd_.pushSamples(samples, count);
         });
         if (toneControlsPending_) applyToneControls();
         const auto stats = engine_.stats();
@@ -1215,6 +1227,29 @@ private:
                 + "    Output safety clips: "
                 + juce::String(static_cast<juce::int64>(stats.clippedSamples)),
             juce::dontSendNotification);
+
+        if (stats.inputRoutingMode != guitardsp::app::InputRoutingMode::testSignal) {
+            thdLabel_.setText(
+                "THD: -- (select \"Test signal (sine)\" input routing to measure)",
+                juce::dontSendNotification);
+        } else if (!outputThd_.hasMetrics()) {
+            thdLabel_.setText("THD: measuring...", juce::dontSendNotification);
+        } else {
+            const auto& metrics = outputThd_.metrics();
+            juce::String breakdown;
+            for (std::size_t i = 0; i < metrics.harmonicMagnitudes.size(); ++i) {
+                const float ratio = metrics.fundamental > 1.0e-9f
+                    ? metrics.harmonicMagnitudes[i] / metrics.fundamental : 0.0f;
+                const float ratioDb = juce::Decibels::gainToDecibels(ratio, -160.0f);
+                breakdown << "  H" << juce::String(static_cast<int>(i) + 2)
+                          << ": " << juce::String(ratioDb, 1) << " dB";
+            }
+            thdLabel_.setText(
+                "THD (output tap, " + juce::String(testSignalFrequency_.getValue(), 0)
+                    + " Hz fundamental): " + juce::String(100.0f * metrics.thd, 2)
+                    + " %  (" + juce::String(metrics.thdDb, 1) + " dB)" + breakdown,
+                juce::dontSendNotification);
+        }
 
         const double driverCpu = 100.0 * std::max(0.0, deviceManager_.getCpuUsage());
         const double callbackCpu = 100.0 * static_cast<double>(stats.performance.averageLoad);
@@ -1790,6 +1825,11 @@ private:
     juce::AudioVisualiserComponent outputWaveform_{1};
     guitardsp::app::SpectrumAnalyserComponent inputSpectrum_{2048};
     guitardsp::app::SpectrumAnalyserComponent outputSpectrum_{2048};
+    // THD readout for the output monitor tap. Message-thread-only, driven
+    // from the same outputTapFifo_.drain() callback as outputSpectrum_; see
+    // ThdAnalyser.h. Only meaningful while the test-signal input routing is
+    // active, since THD needs a known fundamental frequency to probe.
+    guitardsp::app::ThdAnalyser outputThd_{4096};
     juce::TextButton spectrumToggle_;
     bool showSpectrum_ = false;
     juce::ComboBox inputMonitorTapBox_;
@@ -1802,6 +1842,7 @@ private:
     juce::Label performanceLabel_;
     juce::Label latencyLabel_;
     juce::Label safetyLabel_;
+    juce::Label thdLabel_;
     juce::Label pedalControlsTitle_;
     juce::Label ampControlsTitle_;
     std::unique_ptr<juce::FileChooser> fileChooser_;
