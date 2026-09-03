@@ -72,6 +72,14 @@ symbolic fill for a reusable linear prefix: the factor has 193 entries instead
 of 323 in schematic order, and only 15 of its 71 elimination updates remain in
 the per-Newton suffix. The 57-unknown DS-1 similarly caches 29 linear unknowns,
 leaving a 28-unknown nonlinear boundary and a 238-entry factor instead of 453.
+The same split covers the tube amp stages added afterward: the 14-unknown
+component-level preamp caches 11 linear unknowns, and the 18-unknown power amp
+caches 13; `FullAmpCircuit` cascades those two prepared engines independently,
+so it needs no separate partitioning of its own. `MnaAccelerationTests.cpp`,
+`MnaSparseNonlinearTests.cpp`, `TS808CircuitTests.cpp`, `DS1CircuitTests.cpp`,
+`PreampCircuitTests.cpp` and `PowerAmpCircuitTests.cpp` all assert on
+`cachedLinearUnknowns()`/`sparseNonlinearCachedLinearUnknowns()` so a future
+change cannot silently regress the split back to reiterating the whole matrix.
 
 The invariant-prefix factor and the static Schur complement are refreshed when
 potentiometers or other conductance-affecting controls change. Reactive/source
@@ -154,11 +162,23 @@ It reports samples/second and structural counters for a 32-stage linear RC ladde
 
 1. Compile direct nonlinear stamp destinations so device models do not perform
    repeated row/column address arithmetic.
-2. Partition circuits so only nonlinear islands iterate; solve purely linear
-   regions with cached factorizations or an exact Schur complement.
+2. ~~Partition circuits so only nonlinear islands iterate; solve purely linear
+   regions with cached factorizations or an exact Schur complement.~~ **Done.**
+   This was already implemented as part of the `FixedPatternSparseSolver`
+   symbolic ordering above (`linearPrefix_`/`cachedLinearValues_` in
+   `FixedPatternSparseSolver.h`, wired through
+   `MnaCircuitEngineCore::processSample()`'s Newton loop): every Newton
+   iteration reuses the cached invariant linear-prefix factorization and only
+   factors/solves the mutable nonlinear Schur boundary. See the "Nonlinear
+   circuits" section above and the `cachedLinearUnknowns()` regression
+   assertions in `MnaAccelerationTests.cpp`, `MnaSparseNonlinearTests.cpp`,
+   `TS808CircuitTests.cpp`, `DS1CircuitTests.cpp`, `PreampCircuitTests.cpp`
+   and `PowerAmpCircuitTests.cpp` (issue #54).
 3. Improve convergence of the larger DS-1 booster/op-amp circuit without
    weakening its physical component model.
-4. Benchmark representative pedal, tube-preamp and power-amp netlists rather
-   than synthetic ladders only.
+4. ~~Benchmark representative pedal, tube-preamp and power-amp netlists rather
+   than synthetic ladders only.~~ **Done.** `bench/MnaBenchmark.cpp` benchmarks
+   TS808/DS-1 (pedals) and, as of issue #54, the component-level preamp and
+   power-amp stages as well.
 
 The design rule is unchanged: every optimization must preserve the schematic-facing netlist contract and remain regression-compatible with the dense correctness model.

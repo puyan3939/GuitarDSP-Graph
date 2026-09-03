@@ -49,6 +49,9 @@ int main() {
         std::cout << "DIAG poweramp dc grid=" << s.grid << " plate=" << s.plate
                   << " screen=" << s.screen << " cathode=" << s.cathode
                   << " output=" << s.output << '\n';
+        ok &= require(amp.engine().sparseNonlinearSolverAvailable()
+                          && amp.engine().sparseNonlinearCachedLinearUnknowns() >= 13,
+                      "cached linear Schur prefix retains most of the 18 power amp component unknowns");
         ok &= require(std::isfinite(s.grid) && std::isfinite(s.plate) &&
                           std::isfinite(s.screen) && std::isfinite(s.cathode) &&
                           std::isfinite(s.output),

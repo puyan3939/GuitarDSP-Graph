@@ -1,5 +1,7 @@
 #include "guitardsp/circuit/DS1Circuit.h"
 #include "guitardsp/circuit/MnaCircuitEngine.h"
+#include "guitardsp/circuit/PowerAmpCircuit.h"
+#include "guitardsp/circuit/PreampCircuit.h"
 #include "guitardsp/circuit/TS808Circuit.h"
 
 #include <chrono>
@@ -151,6 +153,64 @@ void runDs1(double sampleRate, const std::string& label) {
               << " sparse_fallback_solves=" << stats.sparseFallbackSolves
               << " general_solves=" << stats.generalLinearSolves << '\n';
 }
+
+// Component-level tube amp stages, the other half of "Next acceleration
+// stages" item 4 (TS808/DS-1 above only covered pedal netlists).
+void runPreamp(double sampleRate, const std::string& label) {
+    circuit::PreampCircuit c;
+    if (!c.prepare(sampleRate)) return;
+    c.engine().resetPerformanceStats();
+
+    const auto samples = static_cast<std::size_t>(sampleRate * 2.0);
+    const auto begin = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < samples; ++i) {
+        const float phase = static_cast<float>(i % 480U) / 480.0f;
+        c.processSample(0.35f * std::sin(phase * 6.28318530718f));
+    }
+    const auto end = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(end - begin).count();
+    const auto stats = c.engine().performanceStats();
+    std::cout << "preamp_" << label << " sample_rate=" << sampleRate
+              << " samples=" << samples
+              << " seconds=" << seconds
+              << " samples_per_second=" << static_cast<double>(samples) / seconds
+              << " estimated_cpu_percent="
+              << (sampleRate / (static_cast<double>(samples) / seconds)) * 100.0
+              << " nonlinear_assemblies=" << stats.nonlinearAssemblies
+              << " sparse_newton_solves=" << stats.sparseNewtonSolves
+              << " sparse_fallback_solves=" << stats.sparseFallbackSolves
+              << " general_solves=" << stats.generalLinearSolves
+              << " cached_linear_unknowns=" << c.engine().sparseNonlinearCachedLinearUnknowns()
+              << '\n';
+}
+
+void runPowerAmp(double sampleRate, const std::string& label) {
+    circuit::PowerAmpCircuit c;
+    if (!c.prepare(sampleRate)) return;
+    c.engine().resetPerformanceStats();
+
+    const auto samples = static_cast<std::size_t>(sampleRate * 2.0);
+    const auto begin = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < samples; ++i) {
+        const float phase = static_cast<float>(i % 480U) / 480.0f;
+        c.processSample(0.35f * std::sin(phase * 6.28318530718f));
+    }
+    const auto end = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(end - begin).count();
+    const auto stats = c.engine().performanceStats();
+    std::cout << "poweramp_" << label << " sample_rate=" << sampleRate
+              << " samples=" << samples
+              << " seconds=" << seconds
+              << " samples_per_second=" << static_cast<double>(samples) / seconds
+              << " estimated_cpu_percent="
+              << (sampleRate / (static_cast<double>(samples) / seconds)) * 100.0
+              << " nonlinear_assemblies=" << stats.nonlinearAssemblies
+              << " sparse_newton_solves=" << stats.sparseNewtonSolves
+              << " sparse_fallback_solves=" << stats.sparseFallbackSolves
+              << " general_solves=" << stats.generalLinearSolves
+              << " cached_linear_unknowns=" << c.engine().sparseNonlinearCachedLinearUnknowns()
+              << '\n';
+}
 }
 
 int main() {
@@ -160,5 +220,7 @@ int main() {
     runTs808(96000.0, "eco2x_96k");
     runDs1(48000.0, "1x_48k");
     runDs1(96000.0, "eco2x_96k");
+    runPreamp(48000.0, "1x_48k");
+    runPowerAmp(48000.0, "1x_48k");
     return 0;
 }
