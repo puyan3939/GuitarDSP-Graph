@@ -1,0 +1,23 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "golden",
+            "displayName": "GOLDEN (deterministic reference build)",
+            "description": "The only configuration golden reference files (tests/golden/) may be (re)generated from. See docs/GOLDEN_REFERENCE.md. Fixes -O2 (not the Release default -O3), disables fast-math, -march=native and LTO/IPO so the build is reproducible across machines and compiler versions that satisfy the same toolchain.",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-golden",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_CXX_FLAGS_RELEASE": "-O2 -DNDEBUG -fno-fast-math",
+                "CMAKE_C_FLAGS_RELEASE": "-O2 -DNDEBUG -fno-fast-math",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF",
+                "GUITARDSP_NATIVE_CPU": "OFF",
+                "GUITARDSP_BUILD_GOLDEN_TOOLS": "ON",
+                "GUITARDSP_BUILD_BENCHMARKS": "OFF",
+                "GUITARDSP_BUILD_AUDIO_APP": "OFF"
+            }
+        }
+    ]
+}

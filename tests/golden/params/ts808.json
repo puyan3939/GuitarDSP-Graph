@@ -1,0 +1,13 @@
+{
+    "circuit": "ts808",
+    "sampleRateHz": 48000,
+    "newton": {
+        "maxIterations": 40,
+        "tolerance": 2e-5,
+        "note": "Hardcoded per-sample arguments to MnaCircuitEngine::processSample() inside TS808Circuit::processSample(); not runtime-configurable. Recorded here so a change to those literals is a visible, reviewable diff against this file rather than a silent behavior change."
+    },
+    "variants": {
+        "mid": { "drive": 0.5, "tone": 0.5, "level": 0.5 },
+        "full": { "drive": 1.0, "tone": 1.0, "level": 1.0 }
+    }
+}

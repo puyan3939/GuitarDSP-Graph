@@ -272,3 +272,42 @@ add_test(NAME cabinet_calibration COMMAND GuitarDSPCabinetCalibrationTests)
 add_executable(GuitarDSPDelayEffectNodeTests tests/DelayEffectNodeTests.cpp)
 target_link_libraries(GuitarDSPDelayEffectNodeTests PRIVATE GuitarDSPGraphCore)
 add_test(NAME delay_effect_node COMMAND GuitarDSPDelayEffectNodeTests)
+add_executable(GuitarDSPGoldenReferenceTests tests/GoldenReferenceTests.cpp)
+target_link_libraries(GuitarDSPGoldenReferenceTests PRIVATE GuitarDSPGraphCore)
+target_compile_definitions(GuitarDSPGoldenReferenceTests PRIVATE
+    GUITARDSP_GOLDEN_PARAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/params"
+    GUITARDSP_GOLDEN_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
+    GUITARDSP_NETLIST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/circuits")
+add_test(NAME golden_reference COMMAND GuitarDSPGoldenReferenceTests)
+
+# Offline tooling for the golden reference policy (docs/GOLDEN_REFERENCE.md).
+# Off by default: golden_gen must only be run against the GOLDEN CMake
+# preset, and neither tool is needed for the normal build/test loop.
+option(GUITARDSP_BUILD_GOLDEN_TOOLS "Build golden_gen and parity_check" OFF)
+if (GUITARDSP_BUILD_GOLDEN_TOOLS)
+    add_executable(golden_gen tools/golden_gen/GoldenGen.cpp)
+    target_link_libraries(golden_gen PRIVATE GuitarDSPGraphCore)
+    target_compile_definitions(golden_gen PRIVATE
+        GUITARDSP_GOLDEN_PARAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/params"
+        GUITARDSP_GOLDEN_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden")
+
+    add_executable(parity_check tools/parity_check/ParityCheck.cpp)
+    target_include_directories(parity_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    execute_process(
+        COMMAND git rev-parse HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE GUITARDSP_GOLDEN_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if (NOT GUITARDSP_GOLDEN_COMMIT)
+        set(GUITARDSP_GOLDEN_COMMIT "unknown")
+    endif()
+    add_custom_target(generate_golden
+        COMMAND golden_gen --commit ${GUITARDSP_GOLDEN_COMMIT} --preset golden
+        DEPENDS golden_gen
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Regenerating tests/golden/ reference files (GOLDEN preset only, commit ${GUITARDSP_GOLDEN_COMMIT})"
+    )
+endif()
