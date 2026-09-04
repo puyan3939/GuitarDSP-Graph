@@ -38,6 +38,19 @@ struct LiveRigSettings {
     bool ampEnabled = true;
     bool cabinetEnabled = true;
 
+    // Dynamics stage (optical compressor circuit), inserted ahead of the
+    // pedal at the front of the main chain -- see hq::CompressorCircuitNode.
+    bool compressorEnabled = false;
+    float compressorMakeupGain = 0.30f;
+
+    // Time stage (digital delay), inserted after the cabinet at the tail of
+    // the main chain -- see dsp::DelayEffectNode.
+    bool delayEnabled = false;
+    float delayTimeMs = 350.0f;
+    float delayFeedback = 0.35f;
+    float delayTone = 0.50f;
+    float delayMix = 0.35f;
+
     float pedalDrive = 0.45f;
     float pedalTone = 0.50f;
     float pedalLevel = 0.55f;
@@ -93,9 +106,11 @@ struct LiveRigSettings {
 enum class MonitorTapPoint : std::uint8_t {
     physicalInput,
     physicalOutput,
+    compressorOutput,
     pedalOutput,
     ampOutput,
     cabinetOutput,
+    delayOutput,
     octaveOutput,
     bassAmpOutput,
     bassCabinetOutput,
@@ -115,6 +130,8 @@ struct MonitorTapCandidates {
 
 [[nodiscard]] constexpr MonitorTapCandidates monitorTapPointCandidates(MonitorTapPoint point) noexcept {
     switch (point) {
+        case MonitorTapPoint::compressorOutput:
+            return {{"dynamics.compressor_circuit_hq"}, 1};
         case MonitorTapPoint::pedalOutput:
             return {{"drive.ts808_circuit_hq", "drive.ds1_circuit_hq"}, 2};
         case MonitorTapPoint::ampOutput:
@@ -122,6 +139,7 @@ struct MonitorTapCandidates {
                       "amp.american_clean_family_hq", "drive.preamp_circuit_hq",
                       "amp.full_amp_circuit_hq"}, 5};
         case MonitorTapPoint::cabinetOutput: return {{"cab.chain_hq"}, 1};
+        case MonitorTapPoint::delayOutput: return {{"time.digital_delay"}, 1};
         case MonitorTapPoint::octaveOutput: return {{"pitch.octave_down_mono"}, 1};
         case MonitorTapPoint::bassAmpOutput: return {{"amp.bass_reference_hq"}, 1};
         case MonitorTapPoint::bassCabinetOutput: return {{"cab.bass_reference_hq"}, 1};

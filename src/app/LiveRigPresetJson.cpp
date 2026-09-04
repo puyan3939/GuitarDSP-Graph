@@ -149,6 +149,14 @@ std::string liveRigPresetToJson(const LiveRigPreset& preset) {
     writeField(out, "ampEnabled", s.ampEnabled);
     writeField(out, "cabinetEnabled", s.cabinetEnabled);
 
+    writeField(out, "compressorEnabled", s.compressorEnabled);
+    writeField(out, "compressorMakeupGain", s.compressorMakeupGain);
+    writeField(out, "delayEnabled", s.delayEnabled);
+    writeField(out, "delayTimeMs", s.delayTimeMs);
+    writeField(out, "delayFeedback", s.delayFeedback);
+    writeField(out, "delayTone", s.delayTone);
+    writeField(out, "delayMix", s.delayMix);
+
     writeField(out, "pedalDrive", s.pedalDrive);
     writeField(out, "pedalTone", s.pedalTone);
     writeField(out, "pedalLevel", s.pedalLevel);
@@ -228,6 +236,14 @@ bool liveRigPresetFromJson(std::string_view json, LiveRigPreset& outPreset, std:
             ? routingFromString(settingsJson["signalRouting"].asString()) : s.signalRouting;
         s.ampEnabled = settingsJson["ampEnabled"].asBool(s.ampEnabled);
         s.cabinetEnabled = settingsJson["cabinetEnabled"].asBool(s.cabinetEnabled);
+
+        s.compressorEnabled = settingsJson["compressorEnabled"].asBool(s.compressorEnabled);
+        s.compressorMakeupGain = settingsJson["compressorMakeupGain"].asFloat(s.compressorMakeupGain);
+        s.delayEnabled = settingsJson["delayEnabled"].asBool(s.delayEnabled);
+        s.delayTimeMs = settingsJson["delayTimeMs"].asFloat(s.delayTimeMs);
+        s.delayFeedback = settingsJson["delayFeedback"].asFloat(s.delayFeedback);
+        s.delayTone = settingsJson["delayTone"].asFloat(s.delayTone);
+        s.delayMix = settingsJson["delayMix"].asFloat(s.delayMix);
 
         s.pedalDrive = settingsJson["pedalDrive"].asFloat(s.pedalDrive);
         s.pedalTone = settingsJson["pedalTone"].asFloat(s.pedalTone);

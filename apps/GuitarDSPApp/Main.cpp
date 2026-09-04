@@ -153,6 +153,8 @@ public:
         addAndMakeVisible(feedbackVoicingBox_);
         addAndMakeVisible(ampEnabled_);
         addAndMakeVisible(cabEnabled_);
+        addAndMakeVisible(compressorEnabled_);
+        addAndMakeVisible(delayEnabled_);
         addAndMakeVisible(octaveEnabled_);
         addAndMakeVisible(bassCabinetEnabled_);
         addAndMakeVisible(safeDry_);
@@ -173,6 +175,9 @@ public:
         addAndMakeVisible(routingPageButton_);
         addAndMakeVisible(advancedPageButton_);
         addAndMakeVisible(presetsPageButton_);
+        addAndMakeVisible(compressorPageButton_);
+        addAndMakeVisible(delayPageButton_);
+        addAndMakeVisible(testSignalPageButton_);
         addAndMakeVisible(slotAButton_);
         addAndMakeVisible(slotBButton_);
         addAndMakeVisible(presetBox_);
@@ -251,18 +256,21 @@ public:
         ampEnabled_.setToggleState(true, juce::dontSendNotification);
         cabEnabled_.setButtonText("Speaker + Cab IR");
         cabEnabled_.setToggleState(true, juce::dontSendNotification);
+        compressorEnabled_.setButtonText("Enabled");
+        compressorEnabled_.setToggleState(settings_.compressorEnabled, juce::dontSendNotification);
+        delayEnabled_.setButtonText("Enabled");
+        delayEnabled_.setToggleState(settings_.delayEnabled, juce::dontSendNotification);
         octaveEnabled_.setButtonText("Octave -1");
         octaveEnabled_.setToggleState(true, juce::dontSendNotification);
         bassCabinetEnabled_.setButtonText("Bass cabinet IR");
         bassCabinetEnabled_.setToggleState(true, juce::dontSendNotification);
-        safeDry_.setButtonText("Safe dry monitor");
+        safeDry_.setButtonText("Safe dry");
         safeDry_.setToggleState(true, juce::dontSendNotification);
-        mute_.setButtonText("Mute output");
+        mute_.setButtonText("Mute");
         mute_.setToggleState(true, juce::dontSendNotification);
         matchIrLevel_.setButtonText("Match measured IR loudness");
         matchIrLevel_.setToggleState(true, juce::dontSendNotification);
         audioSettingsButton_.setButtonText("AUDIO SETTINGS");
-        audioSettingsButton_.setClickingTogglesState(true);
 
         inputTrim_.setSliderStyle(juce::Slider::LinearHorizontal);
         inputTrim_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
@@ -326,6 +334,10 @@ public:
         configureToneControl(bassGain_, "BASS DRV", settings_.bassGain);
         configureToneControl(bassTone_, "BASS TONE", settings_.bassTone);
         configureToneControl(bassLevel_, "BASS OUT", settings_.bassLevel);
+        configureToneControl(compressorMakeup_, "MAKEUP", settings_.compressorMakeupGain);
+        configureToneControl(delayFeedback_, "FEEDBACK", settings_.delayFeedback);
+        configureToneControl(delayToneKnob_, "TONE", settings_.delayTone);
+        configureToneControl(delayMix_, "MIX", settings_.delayMix);
 
         auto configureDbControl = [this](juce::Slider& slider, const juce::String& name,
                                          double minimum, double maximum, double value) {
@@ -372,11 +384,25 @@ public:
         crossoverFrequency_.setTextValueSuffix(" Hz X-OVER");
         crossoverFrequency_.onValueChange = [this] { toneControlsPending_ = true; };
 
-        rigPageButton_.setButtonText("01   CIRCUIT PEDAL");
-        advancedPageButton_.setButtonText("02   GUITAR AMPLIFIER");
-        cabinetPageButton_.setButtonText("03   SPEAKER + CABINET");
-        routingPageButton_.setButtonText("04   ROUTING + BASS");
-        presetsPageButton_.setButtonText("05   PRESETS");
+        addAndMakeVisible(delayTime_);
+        delayTime_.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        delayTime_.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 118, 22);
+        delayTime_.setRange(1.0, 2000.0, 1.0);
+        delayTime_.setSkewFactorFromMidPoint(350.0);
+        delayTime_.setValue(settings_.delayTimeMs, juce::dontSendNotification);
+        delayTime_.setTextValueSuffix(" ms TIME");
+        delayTime_.onValueChange = [this] { toneControlsPending_ = true; };
+
+        // SIGNAL CHAIN RACK tile headers, left to right in signal-flow order.
+        compressorPageButton_.setButtonText("COMPRESSOR");
+        rigPageButton_.setButtonText("CIRCUIT PEDAL");
+        advancedPageButton_.setButtonText("GUITAR AMPLIFIER");
+        cabinetPageButton_.setButtonText("SPEAKER + CABINET");
+        delayPageButton_.setButtonText("DELAY");
+        // TAB STRIP buttons.
+        routingPageButton_.setButtonText("ROUTING + BASS");
+        testSignalPageButton_.setButtonText("TEST SIGNAL");
+        presetsPageButton_.setButtonText("PRESETS");
 
         slotAButton_.setButtonText("A");
         slotBButton_.setButtonText("B");
@@ -452,6 +478,14 @@ public:
         inputRoutingBox_.onChange = [this] { updateInputRouting(); };
         ampEnabled_.onClick = [this] { updateSettingsFromControls(); rebuildRig(); };
         cabEnabled_.onClick = [this] { updateSettingsFromControls(); rebuildRig(); };
+        compressorEnabled_.onClick = [this] {
+            updateSettingsFromControls();
+            rebuildRig();
+        };
+        delayEnabled_.onClick = [this] {
+            updateSettingsFromControls();
+            rebuildRig();
+        };
         signalRoutingBox_.onChange = [this] {
             updateSettingsFromControls();
             updateRoutingGraph();
@@ -481,14 +515,7 @@ public:
                                "BUILT-IN REFERENCE / calibrated bass cabinet / not measured");
             rebuildRig();
         };
-        audioSettingsButton_.onClick = [this] {
-            const bool expanded = audioSettingsButton_.getToggleState();
-            deviceSelector_.setVisible(expanded);
-            audioSettingsButton_.setButtonText(expanded
-                ? "CLOSE AUDIO SETTINGS" : "AUDIO SETTINGS");
-            resized();
-            repaint();
-        };
+        audioSettingsButton_.onClick = [this] { setControlPage(ControlPage::audioSettings); };
         inputTrim_.onValueChange = [this] {
             engine_.setInputTrimDb(static_cast<float>(inputTrim_.getValue()));
         };
@@ -506,6 +533,9 @@ public:
         routingPageButton_.onClick = [this] { setControlPage(ControlPage::routing); };
         advancedPageButton_.onClick = [this] { setControlPage(ControlPage::amplifier); };
         presetsPageButton_.onClick = [this] { setControlPage(ControlPage::presets); };
+        compressorPageButton_.onClick = [this] { setControlPage(ControlPage::compressor); };
+        delayPageButton_.onClick = [this] { setControlPage(ControlPage::delay); };
+        testSignalPageButton_.onClick = [this] { setControlPage(ControlPage::testSignal); };
 
         slotAButton_.onClick = [this] { selectRigSlot(true); };
         slotBButton_.onClick = [this] { selectRigSlot(false); };
@@ -555,123 +585,30 @@ public:
         engine_.collectRetired();
     }
 
+    // Flat, DAW-style zone layout (issue #83): TOP BAR (global transport),
+    // SIGNAL CHAIN RACK (always-visible tiles), TAB STRIP + INSPECTOR
+    // (exactly one page of detail controls, see setControlPage()), and
+    // MONITOR DOCK (always-visible diagnostics). Each zone gets a fixed
+    // height computed once in resized() and never depends on what's
+    // currently selected elsewhere, which is what let controls overlap in
+    // the previous everything-in-one-column layout.
     void paint(juce::Graphics& graphics) override {
         graphics.fillAll(juce::Colour::fromRGB(20, 29, 34));
-        graphics.setColour(juce::Colour::fromRGB(29, 42, 48));
-        graphics.fillRoundedRectangle(chainPanel_.toFloat(), 11.0f);
-        graphics.fillRoundedRectangle(inspectorPanel_.toFloat(), 11.0f);
-        graphics.setColour(juce::Colour::fromRGB(78, 188, 180).withAlpha(0.34f));
-        graphics.drawRoundedRectangle(chainPanel_.toFloat(), 11.0f, 1.0f);
-        graphics.drawRoundedRectangle(inspectorPanel_.toFloat(), 11.0f, 1.0f);
-
-        auto guide = chainPanel_.reduced(16);
-        guide.removeFromTop(368);
-        if (guide.getHeight() > 55) {
-            graphics.setColour(juce::Colours::white.withAlpha(0.55f));
-            graphics.setFont(13.0f);
-            graphics.drawFittedText(
-                "Select a signal block to edit its full controls.\n"
-                "Routing can split guitar and octave/bass paths.",
-                guide.removeFromTop(75), juce::Justification::topLeft, 4);
-        }
+        const auto panelColour = juce::Colour::fromRGB(29, 42, 48);
+        const auto borderColour = juce::Colour::fromRGB(78, 188, 180).withAlpha(0.34f);
+        const auto drawPanel = [&](juce::Rectangle<int> bounds) {
+            if (bounds.isEmpty()) return;
+            graphics.setColour(panelColour);
+            graphics.fillRoundedRectangle(bounds.toFloat(), 9.0f);
+            graphics.setColour(borderColour);
+            graphics.drawRoundedRectangle(bounds.toFloat(), 9.0f, 1.0f);
+        };
+        drawPanel(rackArea_);
+        drawPanel(tabStripArea_.getUnion(inspectorArea_));
+        drawPanel(monitorDockArea_);
     }
 
     void resized() override {
-        auto area = getLocalBounds().reduced(14);
-        auto row = area.removeFromTop(36);
-        audioSettingsButton_.setBounds(row.removeFromRight(190).reduced(0, 3));
-        row.removeFromRight(12);
-        slotBButton_.setBounds(row.removeFromRight(40).reduced(0, 3));
-        row.removeFromRight(4);
-        slotAButton_.setBounds(row.removeFromRight(40).reduced(0, 3));
-        row.removeFromRight(12);
-        statusLabel_.setBounds(row);
-
-        if (deviceSelector_.isVisible()) {
-            deviceSelector_.setBounds(area.removeFromTop(260));
-            area.removeFromTop(8);
-        }
-
-        row = area.removeFromTop(36);
-        const int selectorWidth = std::max(160, row.getWidth() / 5);
-        pedalBox_.setBounds(row.removeFromLeft(selectorWidth).reduced(0, 2));
-        row.removeFromLeft(8);
-        ampBox_.setBounds(row.removeFromLeft(selectorWidth + 22).reduced(0, 2));
-        row.removeFromLeft(8);
-        qualityBox_.setBounds(row.removeFromLeft(selectorWidth + 12).reduced(0, 2));
-        row.removeFromLeft(8);
-        inputRoutingBox_.setBounds(row.reduced(0, 2));
-
-        area.removeFromTop(5);
-        row = area.removeFromTop(32);
-        safeDry_.setBounds(row.removeFromLeft(180));
-        ampEnabled_.setBounds(row.removeFromLeft(90));
-        cabEnabled_.setBounds(row.removeFromLeft(190));
-        mute_.setBounds(row.removeFromLeft(140));
-        resetDiagnosticsButton_.setBounds(row.removeFromRight(158).reduced(0, 2));
-        row.removeFromLeft(10);
-        if (row.getWidth() > 260) {
-            testSignalLabel_.setBounds(row.removeFromLeft(84));
-            testSignalFrequency_.setBounds(row.removeFromLeft(std::min(180, row.getWidth() / 2)));
-            row.removeFromLeft(8);
-            testSignalLevel_.setBounds(row);
-        } else {
-            testSignalLabel_.setBounds({});
-            testSignalFrequency_.setBounds({});
-            testSignalLevel_.setBounds({});
-        }
-        area.removeFromTop(10);
-
-        auto waveformArea = area.removeFromTop(96);
-        auto inputWaveArea = waveformArea.removeFromLeft(waveformArea.getWidth() / 2 - 6);
-        waveformArea.removeFromLeft(12);
-        auto& outputWaveArea = waveformArea;
-        inputMonitorTapBox_.setBounds(inputWaveArea.removeFromTop(18));
-        inputWaveform_.setBounds(inputWaveArea);
-        inputSpectrum_.setBounds(inputWaveArea);
-        auto outputWaveLabelRow = outputWaveArea.removeFromTop(18);
-        spectrumToggle_.setBounds(outputWaveLabelRow.removeFromRight(110).reduced(0, 1));
-        outputMonitorTapBox_.setBounds(outputWaveLabelRow);
-        outputWaveform_.setBounds(outputWaveArea);
-        outputSpectrum_.setBounds(outputWaveArea);
-        area.removeFromTop(10);
-
-        auto diagnostics = area.removeFromBottom(178);
-        row = diagnostics.removeFromTop(34);
-        inputTrim_.setBounds(row.removeFromLeft(row.getWidth() / 2 - 8));
-        row.removeFromLeft(16);
-        outputTrim_.setBounds(row);
-        diagnostics.removeFromTop(5);
-        routingLabel_.setBounds(diagnostics.removeFromTop(23));
-        meterLabel_.setBounds(diagnostics.removeFromTop(23));
-        performanceLabel_.setBounds(diagnostics.removeFromTop(23));
-        latencyLabel_.setBounds(diagnostics.removeFromTop(23));
-        safetyLabel_.setBounds(diagnostics.removeFromTop(23));
-        thdLabel_.setBounds(diagnostics.removeFromTop(23));
-
-        area.removeFromBottom(10);
-        const int chainWidth = std::clamp(area.getWidth() / 4, 238, 292);
-        chainPanel_ = area.removeFromLeft(chainWidth);
-        area.removeFromLeft(12);
-        inspectorPanel_ = area;
-
-        auto chain = chainPanel_.reduced(13);
-        pedalControlsTitle_.setBounds(chain.removeFromTop(40));
-        chain.removeFromTop(8);
-        rigPageButton_.setBounds(chain.removeFromTop(54));
-        chain.removeFromTop(9);
-        advancedPageButton_.setBounds(chain.removeFromTop(54));
-        chain.removeFromTop(9);
-        cabinetPageButton_.setBounds(chain.removeFromTop(54));
-        chain.removeFromTop(9);
-        routingPageButton_.setBounds(chain.removeFromTop(54));
-        chain.removeFromTop(9);
-        presetsPageButton_.setBounds(chain.removeFromTop(54));
-
-        auto panel = inspectorPanel_.reduced(18, 12);
-        ampControlsTitle_.setBounds(panel.removeFromTop(40));
-        panel.removeFromTop(5);
-
         const auto placeKnobs = [](juce::Rectangle<int> knobRow,
                                    std::initializer_list<juce::Slider*> sliders) {
             const int count = static_cast<int>(sliders.size());
@@ -681,7 +618,137 @@ public:
                 slider->setBounds(knobRow.removeFromLeft(width).reduced(3, 0));
         };
 
-        if (currentPage_ == ControlPage::pedal) {
+        auto area = getLocalBounds().reduced(14);
+
+        // TOP BAR: global controls that aren't specific to any one SIGNAL
+        // CHAIN stage (mute/safe-dry monitor, A/B compare, I/O trim,
+        // processing quality, a shortcut into the AUDIO SETTINGS tab).
+        topBarArea_ = area.removeFromTop(40);
+        area.removeFromTop(10);
+        {
+            auto row = topBarArea_;
+            audioSettingsButton_.setBounds(row.removeFromRight(150).reduced(0, 3));
+            row.removeFromRight(8);
+            slotBButton_.setBounds(row.removeFromRight(40).reduced(0, 3));
+            row.removeFromRight(4);
+            slotAButton_.setBounds(row.removeFromRight(40).reduced(0, 3));
+            row.removeFromRight(14);
+            outputTrim_.setBounds(row.removeFromRight(150).reduced(0, 5));
+            row.removeFromRight(8);
+            inputTrim_.setBounds(row.removeFromRight(150).reduced(0, 5));
+            row.removeFromRight(14);
+            mute_.setBounds(row.removeFromRight(90).reduced(0, 3));
+            safeDry_.setBounds(row.removeFromRight(140).reduced(0, 3));
+            row.removeFromRight(14);
+            qualityBox_.setBounds(row.removeFromRight(180).reduced(0, 3));
+            row.removeFromRight(10);
+            statusLabel_.setBounds(row);
+        }
+
+        // MONITOR DOCK: fixed-height band pinned to the bottom, always
+        // visible regardless of which rack tile/tab is selected -- left
+        // 60% waveform/spectrum, right 40% meters and diagnostics.
+        monitorDockArea_ = area.removeFromBottom(214);
+        area.removeFromBottom(10);
+        {
+            auto dock = monitorDockArea_.reduced(14);
+            auto left = dock.removeFromLeft(std::max(320, dock.getWidth() * 3 / 5));
+            dock.removeFromLeft(12);
+            auto& right = dock;
+
+            auto inputWaveArea = left.removeFromLeft(left.getWidth() / 2 - 6);
+            left.removeFromLeft(12);
+            auto& outputWaveArea = left;
+            inputMonitorTapBox_.setBounds(inputWaveArea.removeFromTop(18));
+            inputWaveform_.setBounds(inputWaveArea);
+            inputSpectrum_.setBounds(inputWaveArea);
+            auto outputWaveLabelRow = outputWaveArea.removeFromTop(18);
+            spectrumToggle_.setBounds(outputWaveLabelRow.removeFromRight(100).reduced(0, 1));
+            outputMonitorTapBox_.setBounds(outputWaveLabelRow);
+            outputWaveform_.setBounds(outputWaveArea);
+            outputSpectrum_.setBounds(outputWaveArea);
+
+            auto resetRow = right.removeFromTop(28);
+            resetDiagnosticsButton_.setBounds(resetRow.removeFromRight(160));
+            right.removeFromTop(6);
+            routingLabel_.setBounds(right.removeFromTop(22));
+            meterLabel_.setBounds(right.removeFromTop(22));
+            performanceLabel_.setBounds(right.removeFromTop(22));
+            latencyLabel_.setBounds(right.removeFromTop(22));
+            safetyLabel_.setBounds(right.removeFromTop(22));
+            thdLabel_.setBounds(right.removeFromTop(22));
+        }
+
+        // SIGNAL CHAIN RACK: one equal-width tile per stage, left to right
+        // in signal-flow order (COMP -> PEDAL -> AMP -> CAB -> DELAY).
+        // Each tile's header button both selects it (drives the single
+        // exclusive ControlPage below) and shows which stage it is; the
+        // enable toggle / model combo beneath it are always visible, so
+        // every stage's on/off state is visible without opening its page.
+        rackArea_ = area.removeFromTop(158);
+        area.removeFromTop(10);
+        {
+            auto rack = rackArea_.reduced(12);
+            pedalControlsTitle_.setBounds(rack.removeFromTop(22));
+            rack.removeFromTop(6);
+
+            constexpr int tileCount = 5;
+            const int tileWidth = (rack.getWidth() - (tileCount - 1) * 10) / tileCount;
+            const auto nextTile = [&] {
+                auto tile = rack.removeFromLeft(tileWidth);
+                rack.removeFromLeft(10);
+                return tile;
+            };
+
+            auto compTile = nextTile();
+            compressorPageButton_.setBounds(compTile.removeFromTop(30));
+            compTile.removeFromTop(6);
+            compressorEnabled_.setBounds(compTile.removeFromTop(26));
+
+            auto pedalTile = nextTile();
+            rigPageButton_.setBounds(pedalTile.removeFromTop(30));
+            pedalTile.removeFromTop(6);
+            pedalBox_.setBounds(pedalTile.removeFromTop(26));
+
+            auto ampTile = nextTile();
+            advancedPageButton_.setBounds(ampTile.removeFromTop(30));
+            ampTile.removeFromTop(6);
+            ampEnabled_.setBounds(ampTile.removeFromTop(24));
+            ampTile.removeFromTop(4);
+            ampBox_.setBounds(ampTile.removeFromTop(26));
+
+            auto cabTile = nextTile();
+            cabinetPageButton_.setBounds(cabTile.removeFromTop(30));
+            cabTile.removeFromTop(6);
+            cabEnabled_.setBounds(cabTile.removeFromTop(26));
+
+            auto delayTile = nextTile();
+            delayPageButton_.setBounds(delayTile.removeFromTop(30));
+            delayTile.removeFromTop(6);
+            delayEnabled_.setBounds(delayTile.removeFromTop(26));
+        }
+
+        // TAB STRIP + INSPECTOR: whichever of the rack tiles above or
+        // these tab buttons was clicked last drives exactly one page of
+        // detail controls here (see setControlPage()).
+        tabStripArea_ = area.removeFromTop(34);
+        area.removeFromTop(6);
+        inspectorArea_ = area;
+        {
+            auto strip = tabStripArea_.reduced(4, 2);
+            const int tabWidth = strip.getWidth() / 3;
+            routingPageButton_.setBounds(strip.removeFromLeft(tabWidth).reduced(3, 0));
+            testSignalPageButton_.setBounds(strip.removeFromLeft(tabWidth).reduced(3, 0));
+            presetsPageButton_.setBounds(strip.reduced(3, 0));
+        }
+
+        auto panel = inspectorArea_.reduced(18, 14);
+        ampControlsTitle_.setBounds(panel.removeFromTop(36));
+        panel.removeFromTop(6);
+
+        if (currentPage_ == ControlPage::compressor) {
+            placeKnobs(panel.removeFromTop(std::min(180, panel.getHeight())), {&compressorMakeup_});
+        } else if (currentPage_ == ControlPage::pedal) {
             placeKnobs(panel.removeFromTop(std::min(180, panel.getHeight())),
                        {&pedalDrive_, &pedalTone_, &pedalLevel_});
         } else if (currentPage_ == ControlPage::amplifier) {
@@ -696,7 +763,7 @@ public:
                 placeKnobs(panel.removeFromTop(knobHeight),
                            {&ampMaster_, &ampPresence_, &ampOutput_});
                 panel.removeFromTop(8);
-                row = panel.removeFromTop(32);
+                auto row = panel.removeFromTop(32);
                 powerTubeBox_.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(3, 0));
                 toneStackBox_.setBounds(row.reduced(3, 0));
                 panel.removeFromTop(6);
@@ -713,13 +780,16 @@ public:
             placeKnobs(panel.removeFromTop(knobHeight),
                        {&speakerCompression_, &speakerExcursion_, &cabinetOutput_});
             panel.removeFromTop(8);
-            row = panel.removeFromTop(34);
+            auto row = panel.removeFromTop(34);
             loadIrButton_.setBounds(row.removeFromLeft(220));
             row.removeFromLeft(12);
             matchIrLevel_.setBounds(row);
             irLabel_.setBounds(panel.removeFromTop(34));
+        } else if (currentPage_ == ControlPage::delay) {
+            placeKnobs(panel.removeFromTop(std::min(180, panel.getHeight())),
+                       {&delayTime_, &delayFeedback_, &delayToneKnob_, &delayMix_});
         } else if (currentPage_ == ControlPage::routing) {
-            row = panel.removeFromTop(34);
+            auto row = panel.removeFromTop(34);
             signalRoutingBox_.setBounds(row.removeFromLeft(std::min(320, row.getWidth() / 2)));
             row.removeFromLeft(8);
             octaveEnabled_.setBounds(row.removeFromLeft(130));
@@ -739,8 +809,18 @@ public:
             loadBassIrButton_.setBounds(row.removeFromLeft(220));
             row.removeFromLeft(12);
             bassIrLabel_.setBounds(row);
-        } else {
+        } else if (currentPage_ == ControlPage::testSignal) {
+            auto row = panel.removeFromTop(34);
+            inputRoutingBox_.setBounds(row);
+            panel.removeFromTop(10);
+            testSignalLabel_.setBounds(panel.removeFromTop(24));
+            panel.removeFromTop(4);
             row = panel.removeFromTop(34);
+            testSignalFrequency_.setBounds(row.removeFromLeft(row.getWidth() / 2 - 8));
+            row.removeFromLeft(16);
+            testSignalLevel_.setBounds(row);
+        } else if (currentPage_ == ControlPage::presets) {
+            auto row = panel.removeFromTop(34);
             presetBox_.setBounds(row.removeFromLeft(std::min(320, row.getWidth() / 2)));
             row.removeFromLeft(8);
             loadPresetButton_.setBounds(row.removeFromLeft(110));
@@ -753,6 +833,8 @@ public:
             savePresetButton_.setBounds(row);
             panel.removeFromTop(10);
             presetStatusLabel_.setBounds(panel.removeFromTop(60));
+        } else { // audioSettings
+            deviceSelector_.setBounds(panel);
         }
     }
 
@@ -850,22 +932,44 @@ public:
     }
 
 private:
-    enum class ControlPage { pedal, amplifier, cabinet, routing, presets };
+    // Rack tiles (compressor/pedal/amplifier/cabinet/delay) and tab-strip
+    // pages (routing/testSignal/presets/audioSettings) share this single
+    // enum/variable so tile selection and tab selection are mutually
+    // exclusive by construction -- see setControlPage() (issue #83).
+    enum class ControlPage {
+        compressor, pedal, amplifier, cabinet, delay,
+        routing, testSignal, presets, audioSettings
+    };
 
+    // The single exclusive-selection entry point for both the SIGNAL CHAIN
+    // RACK tiles (compressor/pedal/amplifier/cabinet/delay) and the TAB
+    // STRIP pages (routing/testSignal/presets/audioSettings): exactly one
+    // page is ever visible in the INSPECTOR, so there is no combination of
+    // controls left simultaneously visible to overlap (issue #83).
     void setControlPage(ControlPage page) {
         currentPage_ = page;
+        const bool compressor = page == ControlPage::compressor;
         const bool pedal = page == ControlPage::pedal;
         const bool amplifier = page == ControlPage::amplifier;
         const bool cabinet = page == ControlPage::cabinet;
+        const bool delay = page == ControlPage::delay;
         const bool routing = page == ControlPage::routing;
+        const bool testSignal = page == ControlPage::testSignal;
         const bool presets = page == ControlPage::presets;
+        const bool audioSettings = page == ControlPage::audioSettings;
 
-        const juce::String title = pedal ? "CIRCUIT PEDAL  /  " + pedalBox_.getText()
+        const juce::String title = compressor ? "COMPRESSOR"
+            : pedal ? "CIRCUIT PEDAL  /  " + pedalBox_.getText()
             : amplifier ? "GUITAR AMPLIFIER  /  " + ampBox_.getText()
             : cabinet ? "SPEAKER + CABINET RESPONSE"
+            : delay ? "DELAY"
             : routing ? "PARALLEL ROUTING + BASS AMP"
-                      : "PRESETS  /  slot " + juce::String(abActiveIsA_ ? "A" : "B") + " active";
+            : testSignal ? "TEST SIGNAL + INPUT ROUTING"
+            : presets ? "PRESETS  /  slot " + juce::String(abActiveIsA_ ? "A" : "B") + " active"
+                      : "AUDIO SETTINGS";
         ampControlsTitle_.setText(title, juce::dontSendNotification);
+
+        compressorMakeup_.setVisible(compressor);
 
         for (auto* control : std::array<juce::Component*, 3>{{
                  &pedalDrive_, &pedalTone_, &pedalLevel_}})
@@ -890,6 +994,10 @@ private:
                  &cabinetOutput_, &loadIrButton_, &matchIrLevel_, &irLabel_}})
             control->setVisible(cabinet);
 
+        for (auto* control : std::array<juce::Component*, 4>{{
+                 &delayTime_, &delayFeedback_, &delayToneKnob_, &delayMix_}})
+            control->setVisible(delay);
+
         for (auto* control : std::array<juce::Component*, 14>{{
                  &signalRoutingBox_, &octaveEnabled_, &bassCabinetEnabled_,
                  &routingGraphView_, &guitarBranchLevel_, &bassBranchLevel_,
@@ -897,26 +1005,30 @@ private:
                  &crossoverFrequency_, &loadBassIrButton_, &bassIrLabel_}})
             control->setVisible(routing);
 
+        for (auto* control : std::array<juce::Component*, 3>{{
+                 &inputRoutingBox_, &testSignalFrequency_, &testSignalLevel_}})
+            control->setVisible(testSignal);
+        testSignalLabel_.setVisible(testSignal);
+
         for (auto* control : std::array<juce::Component*, 6>{{
                  &presetBox_, &loadPresetButton_, &deletePresetButton_,
                  &presetNameEditor_, &savePresetButton_, &presetStatusLabel_}})
             control->setVisible(presets);
 
-        rigPageButton_.setColour(juce::TextButton::buttonColourId,
-            pedal ? juce::Colour::fromRGB(43, 119, 134)
-                  : juce::Colour::fromRGB(43, 55, 61));
-        advancedPageButton_.setColour(juce::TextButton::buttonColourId,
-            amplifier ? juce::Colour::fromRGB(43, 119, 134)
-                      : juce::Colour::fromRGB(43, 55, 61));
-        cabinetPageButton_.setColour(juce::TextButton::buttonColourId,
-            cabinet ? juce::Colour::fromRGB(43, 119, 134)
-                    : juce::Colour::fromRGB(43, 55, 61));
-        routingPageButton_.setColour(juce::TextButton::buttonColourId,
-            routing ? juce::Colour::fromRGB(43, 119, 134)
-                    : juce::Colour::fromRGB(43, 55, 61));
-        presetsPageButton_.setColour(juce::TextButton::buttonColourId,
-            presets ? juce::Colour::fromRGB(43, 119, 134)
-                    : juce::Colour::fromRGB(43, 55, 61));
+        deviceSelector_.setVisible(audioSettings);
+
+        const auto tileColour = [](bool active) {
+            return active ? juce::Colour::fromRGB(43, 119, 134) : juce::Colour::fromRGB(43, 55, 61);
+        };
+        compressorPageButton_.setColour(juce::TextButton::buttonColourId, tileColour(compressor));
+        rigPageButton_.setColour(juce::TextButton::buttonColourId, tileColour(pedal));
+        advancedPageButton_.setColour(juce::TextButton::buttonColourId, tileColour(amplifier));
+        cabinetPageButton_.setColour(juce::TextButton::buttonColourId, tileColour(cabinet));
+        delayPageButton_.setColour(juce::TextButton::buttonColourId, tileColour(delay));
+        routingPageButton_.setColour(juce::TextButton::buttonColourId, tileColour(routing));
+        testSignalPageButton_.setColour(juce::TextButton::buttonColourId, tileColour(testSignal));
+        presetsPageButton_.setColour(juce::TextButton::buttonColourId, tileColour(presets));
+        audioSettingsButton_.setColour(juce::TextButton::buttonColourId, tileColour(audioSettings));
         if (presets) refreshPresetList();
         if (getWidth() > 0 && getHeight() > 0) resized();
         repaint();
@@ -984,6 +1096,8 @@ private:
             juce::dontSendNotification);
         ampEnabled_.setToggleState(settings_.ampEnabled, juce::dontSendNotification);
         cabEnabled_.setToggleState(settings_.cabinetEnabled, juce::dontSendNotification);
+        compressorEnabled_.setToggleState(settings_.compressorEnabled, juce::dontSendNotification);
+        delayEnabled_.setToggleState(settings_.delayEnabled, juce::dontSendNotification);
         signalRoutingBox_.setSelectedId(
             settings_.signalRouting == SignalRouting::parallelOctaveBass ? 2
                 : settings_.signalRouting == SignalRouting::crossoverOctaveBass ? 3 : 1,
@@ -1020,11 +1134,16 @@ private:
         setPercent(bassGain_, settings_.bassGain);
         setPercent(bassTone_, settings_.bassTone);
         setPercent(bassLevel_, settings_.bassLevel);
+        setPercent(compressorMakeup_, settings_.compressorMakeupGain);
+        setPercent(delayFeedback_, settings_.delayFeedback);
+        setPercent(delayToneKnob_, settings_.delayTone);
+        setPercent(delayMix_, settings_.delayMix);
         cabinetOutput_.setValue(settings_.cabinetOutputDb, juce::dontSendNotification);
         ampOutput_.setValue(settings_.ampOutputDb, juce::dontSendNotification);
         cabinetLowCut_.setValue(settings_.cabinetLowCutHz, juce::dontSendNotification);
         cabinetHighCut_.setValue(settings_.cabinetHighCutHz, juce::dontSendNotification);
         crossoverFrequency_.setValue(settings_.crossoverFrequency, juce::dontSendNotification);
+        delayTime_.setValue(settings_.delayTimeMs, juce::dontSendNotification);
 
         toneControlsPending_ = false;
         // Re-derives settings_'s discrete fields from the widgets just set
@@ -1444,9 +1563,19 @@ private:
         settings_.bassTone = normalized(bassTone_);
         settings_.bassLevel = normalized(bassLevel_);
         settings_.crossoverFrequency = static_cast<float>(crossoverFrequency_.getValue());
+        settings_.compressorMakeupGain = normalized(compressorMakeup_);
+        settings_.delayTimeMs = static_cast<float>(delayTime_.getValue());
+        settings_.delayFeedback = normalized(delayFeedback_);
+        settings_.delayTone = normalized(delayToneKnob_);
+        settings_.delayMix = normalized(delayMix_);
 
         if (!engine_.configured() || safeDry_.getToggleState()) return;
         using guitardsp::graph::NodeCategory;
+        engine_.setNodeParameter(NodeCategory::dynamics, 0, settings_.compressorMakeupGain);
+        engine_.setNodeParameter(NodeCategory::time, 0, settings_.delayTimeMs);
+        engine_.setNodeParameter(NodeCategory::time, 1, settings_.delayFeedback);
+        engine_.setNodeParameter(NodeCategory::time, 2, settings_.delayTone);
+        engine_.setNodeParameter(NodeCategory::time, 3, settings_.delayMix);
         engine_.setNodeParameter(NodeCategory::drive, 0, settings_.pedalDrive);
         engine_.setNodeParameter(NodeCategory::drive, 1, settings_.pedalTone);
         engine_.setNodeParameter(NodeCategory::drive, 2, settings_.pedalLevel);
@@ -1513,6 +1642,8 @@ private:
         }
         settings_.ampEnabled = ampEnabled_.getToggleState();
         settings_.cabinetEnabled = cabEnabled_.getToggleState();
+        settings_.compressorEnabled = compressorEnabled_.getToggleState();
+        settings_.delayEnabled = delayEnabled_.getToggleState();
         switch (signalRoutingBox_.getSelectedId()) {
             case 2:
                 settings_.signalRouting = guitardsp::app::SignalRouting::parallelOctaveBass;
@@ -1543,6 +1674,8 @@ private:
             effective.signalRouting = guitardsp::app::SignalRouting::serialGuitar;
             effective.ampEnabled = false;
             effective.cabinetEnabled = false;
+            effective.compressorEnabled = false;
+            effective.delayEnabled = false;
         }
         const auto points = guitardsp::app::availableMonitorTapPoints(effective);
 
@@ -1603,6 +1736,8 @@ private:
             result.signalRouting = guitardsp::app::SignalRouting::serialGuitar;
             result.ampEnabled = false;
             result.cabinetEnabled = false;
+            result.compressorEnabled = false;
+            result.delayEnabled = false;
             result.cabinetImpulse.clear();
             result.bassCabinetImpulse.clear();
             return result;
@@ -1745,6 +1880,8 @@ private:
     juce::ComboBox feedbackVoicingBox_;
     juce::ToggleButton ampEnabled_;
     juce::ToggleButton cabEnabled_;
+    juce::ToggleButton compressorEnabled_;
+    juce::ToggleButton delayEnabled_;
     juce::ToggleButton octaveEnabled_;
     juce::ToggleButton bassCabinetEnabled_;
     juce::ToggleButton safeDry_;
@@ -1780,6 +1917,11 @@ private:
     juce::Slider bassTone_;
     juce::Slider bassLevel_;
     juce::Slider crossoverFrequency_;
+    juce::Slider compressorMakeup_;
+    juce::Slider delayTime_;
+    juce::Slider delayFeedback_;
+    juce::Slider delayToneKnob_;
+    juce::Slider delayMix_;
     juce::TextButton loadIrButton_;
     juce::TextButton loadBassIrButton_;
     juce::TextButton resetDiagnosticsButton_;
@@ -1789,6 +1931,9 @@ private:
     juce::TextButton routingPageButton_;
     juce::TextButton advancedPageButton_;
     juce::TextButton presetsPageButton_;
+    juce::TextButton compressorPageButton_;
+    juce::TextButton delayPageButton_;
+    juce::TextButton testSignalPageButton_;
     juce::TextButton slotAButton_;
     juce::TextButton slotBButton_;
     juce::ComboBox presetBox_;
@@ -1859,8 +2004,16 @@ private:
     bool toneControlsPending_ = false;
     bool applyingBufferFloor_ = false;
     juce::String lastBufferFloorDevice_;
-    juce::Rectangle<int> chainPanel_;
-    juce::Rectangle<int> inspectorPanel_;
+    // The four always-present zones this UI is organized into (issue #83):
+    // TOP BAR, SIGNAL CHAIN RACK, TAB STRIP + INSPECTOR, MONITOR DOCK. Each
+    // has a fixed height computed in resized() so no zone's layout depends
+    // on another zone's content, which is what let controls overlap in the
+    // previous page-based layout.
+    juce::Rectangle<int> topBarArea_;
+    juce::Rectangle<int> rackArea_;
+    juce::Rectangle<int> tabStripArea_;
+    juce::Rectangle<int> inspectorArea_;
+    juce::Rectangle<int> monitorDockArea_;
     ControlPage currentPage_ = ControlPage::pedal;
 };
 
@@ -1874,6 +2027,12 @@ public:
         setUsingNativeTitleBar(true);
         setContentOwned(new MainComponent(), true);
         setResizable(true, true);
+        // Below this, the SIGNAL CHAIN RACK tiles and MONITOR DOCK columns
+        // no longer have room for their fixed-height content without
+        // clipping (see MainComponent::resized()); it doesn't produce the
+        // overlap this UI rewrite fixed, but stays legible at every size
+        // above the floor.
+        setResizeLimits(1100, 760, 3840, 2160);
         centreWithSize(getWidth(), getHeight());
         setVisible(true);
     }
