@@ -1352,17 +1352,18 @@ private:
         const float vpk = vp - vk;
         const float vgk = vg - vk;
 
-        const auto currentFor = [&](float gridToCathode, float plateToCathode) noexcept {
-            return std::clamp(device.spec.model.plateCurrent(gridToCathode, plateToCathode), 0.0f, 0.20f);
-        };
-
-        const float current = currentFor(vgk, vpk);
-        constexpr float gridStep = 1.0e-3f;
-        const float plateStep = std::max(0.05f, std::abs(vpk) * 1.0e-4f);
-        const float gm = (currentFor(vgk + gridStep, vpk) - currentFor(vgk - gridStep, vpk)) /
-                         (2.0f * gridStep);
-        const float gp = (currentFor(vgk, vpk + plateStep) - currentFor(vgk, vpk - plateStep)) /
-                         (2.0f * plateStep);
+        // Analytic Jacobian (see TriodeModel::plateCurrentJacobian) replaces
+        // the previous two-sided central-difference gm/gp: same clamp
+        // envelope, exact partials instead of a finite-difference estimate.
+        // Zeroing gm/gp outside [0, 0.20] matches what a central difference
+        // straddling that clamp would settle to (a constant clamped current
+        // has zero slope), since the clamp is a stamp-level current limit,
+        // not part of the device model itself.
+        const auto raw = device.spec.model.plateCurrentJacobian(vgk, vpk);
+        const bool inRange = raw.current >= 0.0f && raw.current <= 0.20f;
+        const float current = std::clamp(raw.current, 0.0f, 0.20f);
+        const float gm = inRange ? raw.gm : 0.0f;
+        const float gp = inRange ? raw.gp : 0.0f;
 
         const float safeGm = std::clamp(gm, -1.0f, 1.0f);
         const float safeGp = std::clamp(gp, -1.0f, 1.0f);
@@ -1383,32 +1384,23 @@ private:
         const float vgk = vg - vk;
         const float vsk = vs - vk;
 
-        const auto plateFor = [&](float gridToCathode, float plateToCathode,
-                                  float screenToCathode) noexcept {
-            return std::clamp(
-                device.spec.model.plateCurrent(gridToCathode, plateToCathode, screenToCathode),
-                0.0f, 0.40f);
-        };
-        const auto screenFor = [&](float gridToCathode, float screenToCathode) noexcept {
-            return std::clamp(device.spec.model.screenCurrent(gridToCathode, screenToCathode),
-                              0.0f, 0.15f);
-        };
+        // Analytic Jacobian (see PentodeModel::currentsAndJacobian) replaces
+        // the previous 12-call central-difference construction below with a
+        // single closed-form evaluation. As in stampTriode, each current's
+        // partials are zeroed outside its stamp clamp envelope to match what
+        // a straddling central difference would have settled to.
+        const auto raw = device.spec.model.currentsAndJacobian(vgk, vpk, vsk);
 
-        const float plateCurrent = plateFor(vgk, vpk, vsk);
-        const float screenCurrent = screenFor(vgk, vsk);
+        const bool plateInRange = raw.plateCurrent >= 0.0f && raw.plateCurrent <= 0.40f;
+        const float plateCurrent = std::clamp(raw.plateCurrent, 0.0f, 0.40f);
+        const float gm = plateInRange ? raw.dPlateDVg : 0.0f;
+        const float gp = plateInRange ? raw.dPlateDVp : 0.0f;
+        const float gscreen = plateInRange ? raw.dPlateDVs : 0.0f;
 
-        constexpr float gridStep = 1.0e-3f;
-        const float plateStep = std::max(0.05f, std::abs(vpk) * 1.0e-4f);
-        const float screenStep = std::max(0.05f, std::abs(vsk) * 1.0e-4f);
-
-        // Central-difference Jacobian, mirroring stampTriode's gm/gp construction
-        // and extending it with a third partial (gscreen) for the screen node.
-        const float gm = (plateFor(vgk + gridStep, vpk, vsk) - plateFor(vgk - gridStep, vpk, vsk)) /
-                         (2.0f * gridStep);
-        const float gp = (plateFor(vgk, vpk + plateStep, vsk) - plateFor(vgk, vpk - plateStep, vsk)) /
-                         (2.0f * plateStep);
-        const float gscreen = (plateFor(vgk, vpk, vsk + screenStep) - plateFor(vgk, vpk, vsk - screenStep)) /
-                              (2.0f * screenStep);
+        const bool screenInRange = raw.screenCurrent >= 0.0f && raw.screenCurrent <= 0.15f;
+        const float screenCurrent = std::clamp(raw.screenCurrent, 0.0f, 0.15f);
+        const float gsGrid = screenInRange ? raw.dScreenDVg : 0.0f;
+        const float gsScreen = screenInRange ? raw.dScreenDVs : 0.0f;
 
         const float safeGm = std::clamp(gm, -1.0f, 1.0f);
         const float safeGp = std::clamp(gp, -1.0f, 1.0f);
@@ -1421,10 +1413,6 @@ private:
         }};
         stampLinearizedCurrent(device.plateLayout, plateCurrent, guess, plateJac);
 
-        const float gsGrid = (screenFor(vgk + gridStep, vsk) - screenFor(vgk - gridStep, vsk)) /
-                             (2.0f * gridStep);
-        const float gsScreen = (screenFor(vgk, vsk + screenStep) - screenFor(vgk, vsk - screenStep)) /
-                               (2.0f * screenStep);
         const float safeGsGrid = std::clamp(gsGrid, -1.0f, 1.0f);
         const float safeGsScreen = std::clamp(gsScreen, -1.0f, 1.0f);
         const std::array<JacobianTerm, 3> screenJac{{
