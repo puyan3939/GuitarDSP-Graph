@@ -56,3 +56,13 @@ ctest --test-dir build --output-on-failure
 ```
 
 Phase 0 intentionally has no JUCE dependency.
+
+## Golden reference files
+
+`tests/golden/` pins the current output of the component-level circuits
+(TS808/DS-1/Preamp/PowerAmp/FullAmp/Compressor) as a fixed baseline for
+judging future optimizations, refactors and v2 work. **These files must not
+be regenerated or edited outside of the issue that establishes or revises
+them** -- see `docs/GOLDEN_REFERENCE.md` for the full policy, the `golden`
+CMake preset they must be generated under, and the `tools/parity_check`
+comparison tool.

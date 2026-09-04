@@ -1,0 +1,14 @@
+{
+    "circuit": "compressor",
+    "sampleRateHz": 48000,
+    "newton": {
+        "maxIterations": 40,
+        "tolerance": 2e-5,
+        "note": "Hardcoded per-sample arguments to MnaCircuitEngine::processSample() inside CompressorCircuit::processSample(); not runtime-configurable. Recorded here so a change to those literals is a visible, reviewable diff against this file rather than a silent behavior change."
+    },
+    "variants": {
+        "default": {
+            "note": "CompressorCircuit exposes no setControls()/knob API today (see include/guitardsp/circuit/CompressorCircuit.h) -- threshold/ratio/attack/release are fixed by the LDR optocoupler network, not user parameters. Only one variant exists; there is no 'mid'/'full' pair to generate."
+        }
+    }
+}

@@ -1,0 +1,16 @@
+{
+    "commit": "581e83445508f68a8e5c7cb10dcf614a38d20b58",
+    "compiler": "gcc 13.3.0",
+    "cmakePreset": "golden",
+    "sampleRateHz": 48000,
+    "paramsFileHashes": {
+        "compressor": "f84ce5c89274e415",
+        "ds1": "f927a29c3fa566b8",
+        "fullamp": "f7911702be9be74f",
+        "poweramp": "792210f2cd2acc23",
+        "preamp": "12349bfce784d62c",
+        "ts808": "7c26991b5749445e"
+    },
+    "fileCount": 50,
+    "totalBytes": 17280000
+}

@@ -251,6 +251,24 @@ identical; if you add or edit a netlist op, keep both in mind. Note this
 format is a narrow, pedal-parity-focused schema — it is not the general
 `CircuitNetlist.h` schematic layer (see "Current state" above).
 
+### Golden reference files
+
+`tests/golden/` pins the current output of the six component-level circuits
+(TS808/DS-1/Preamp/PowerAmp/FullAmp/Compressor) as a fixed baseline for
+judging future optimizations, refactors and v2 work — see
+`docs/GOLDEN_REFERENCE.md` for the full policy. **Do not regenerate or edit
+`tests/golden/*.txt`, `tests/golden/MANIFEST.json` or
+`tests/golden/params/*.json` outside of the issue that establishes or
+explicitly revises them.** Regeneration (when actually approved) must use
+the `golden` CMake preset (`cmake --preset golden && cmake --build
+build-golden --target generate_golden`), which fixes `-O2`, disables
+fast-math/`-march=native`/LTO, so the files are reproducible rather than
+dependent on whatever optimization flags happen to be in effect. The
+`golden_reference` ctest (part of the default `ctest` suite) checks every
+circuit against these files at a loose tolerance suitable for a
+non-`GOLDEN` build; `tools/parity_check` is the strict bit-level comparison
+tool for two `GOLDEN`-preset builds.
+
 ## New amp work: MNA-first policy
 
 (Established in issue #43, superseding an earlier scoping call in issue #24
