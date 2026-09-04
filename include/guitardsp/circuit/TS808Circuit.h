@@ -3,6 +3,7 @@
 #include "BjtEbersMollSubcircuit.h"
 #include "DiodeParasiticSubcircuit.h"
 #include "DynamicOpAmpSubcircuit.h"
+#include "OperatingPointContinuation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -153,10 +154,24 @@ public:
         controlUpdateCountdown_ = 0;
         lastSolve_ = {};
 
-        if (!primeOperatingPoint()) return false;
+        // Analytic DC operating-point solve (capacitors open, inductors
+        // shorted, source-stepped Newton homotopy) replaces the previous
+        // fixed-length silent transient warm-up: every coupling/bypass
+        // capacitor's state is initialized at its true equilibrium regardless
+        // of its RC time constant, instead of hoping a fixed sample budget
+        // happened to be long enough.
+        DcOperatingPointOptions dcOptions{};
+        dcOptions.sourceSteps = 128;
+        dcOptions.solvesPerStep = 2;
+        const OperatingPointSourceTarget dcTargets[]{{supplySource_, 9.0f},
+                                                       {vrefSource_, 4.5f}};
+        const auto dcResult = establishDcOperatingPoint(engine_, dcTargets, dcOptions);
+        lastSolve_ = dcResult.lastSolve;
+        if (!dcResult.converged || !finiteStages()) return false;
 
-        // Once the DC neighborhood is established, return to the automatic solver
-        // so normal audio processing can use the prepared sparse nonlinear path.
+        // Once the DC operating point is established, return to the automatic
+        // solver so normal audio processing can use the prepared sparse
+        // nonlinear path.
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         // The audio-rate Newton voltage criterion is 20 ppm. Requiring the
         // separately row-scaled KCL residual to reach the engine's generic
@@ -165,14 +180,6 @@ public:
         // both criteria exactly, as the DS-1 path does, while retaining the full
         // 48-unknown circuit and its unchanged nonlinear stamps.
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 0.08, 512.0, 8192.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-        }
         return true;
     }
 
@@ -279,25 +286,6 @@ private:
             appliedLevel_ = nextLevel;
             engine_.setPotentiometerPosition(levelPot_, appliedLevel_);
         }
-    }
-
-    bool primeOperatingPoint() noexcept {
-        // Source stepping is a standard nonlinear-circuit continuation technique:
-        // each solution becomes the initial guess for the next slightly higher
-        // supply voltage. It runs only during prepare(), never on the audio thread.
-        constexpr int sourceSteps = 128;
-        constexpr int solvesPerStep = 2;
-        for (int step = 1; step <= sourceSteps; ++step) {
-            const float t = static_cast<float>(step) / static_cast<float>(sourceSteps);
-            engine_.setVoltageSource(supplySource_, 9.0f * t);
-            engine_.setVoltageSource(vrefSource_, 4.5f * t);
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
-                if (lastSolve_.singular || !finiteStages()) return false;
-            }
-        }
-        return true;
     }
 
     bool finiteStages() const noexcept {

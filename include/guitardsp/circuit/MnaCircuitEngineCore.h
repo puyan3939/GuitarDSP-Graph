@@ -776,6 +776,44 @@ public:
     float nonlinearResidualTolerance() const noexcept {
         return static_cast<float>(nonlinearResidualTolerance_);
     }
+    // DC operating-point boundary condition: while enabled, rebuildStaticCache()
+    // stamps every capacitor as an open circuit (its trapezoidal companion
+    // conductance is zeroed; only a modelled leakage resistance, if any, still
+    // conducts) and every inductor as its bare series resistance with zero
+    // companion inductive term -- exactly the "capacitors open, inductors
+    // shorted" boundary condition a SPICE .OP analysis solves the circuit
+    // under, rather than the trapezoidal dynamic companion model used for
+    // real-time sample processing. It carries no history term at all (see
+    // addDynamicRhs), so repeated processSample() calls at fixed source
+    // values converge to a genuine algebraic fixed point instead of an
+    // exponentially decaying transient -- there is no settling time to wait
+    // out. See OperatingPointContinuation.h's establishDcOperatingPoint()
+    // for the control-thread source-stepping driver built on this mode.
+    // Rebuilds the static cache immediately (rather than lazily marking it
+    // dirty for the next processSample()) so a caller's prepare()-time DC
+    // solve never leaves a pending rebuild to surprise the first real-time
+    // audio sample. Control-thread only, like prepare().
+    void setOperatingPointMode(bool enabled) noexcept {
+        if (operatingPointMode_ == enabled) return;
+        operatingPointMode_ = enabled;
+        staticCacheDirty_ = true;
+        if (prepared_) rebuildStaticCache();
+    }
+    bool operatingPointMode() const noexcept { return operatingPointMode_; }
+
+    // Forces an immediate static-cache rebuild if one is pending, rather than
+    // leaving it for the next processSample() to discover lazily. Intended
+    // for prepare()-time callers that edit a component spec (e.g. a
+    // transformer's saturated magnetizing inductance, an LDR's resistance)
+    // after establishDcOperatingPoint() returns and want that edit folded in
+    // before returning, instead of surprising the first real-time sample with
+    // an unexpected rebuild. A no-op if nothing is dirty. Control-thread only.
+    bool refreshStaticCache() noexcept {
+        if (!prepared_) return false;
+        if (staticCacheDirty_) rebuildStaticCache();
+        return true;
+    }
+
     bool sparseNonlinearSolverAvailable() const noexcept { return sparseSolver_.available(); }
     std::size_t sparseNonlinearOriginalNonZeros() const noexcept { return sparseSolver_.originalNonZeros(); }
     std::size_t sparseNonlinearFactorNonZeros() const noexcept { return sparseSolver_.factorNonZeros(); }
@@ -1077,7 +1115,9 @@ private:
 
         for (auto& c : capacitors_) {
             const float capacitance = std::max(0.0f, c.spec.capacitanceFarads);
-            c.companionConductance = 2.0f * capacitance / dt;
+            // A DC operating-point solve opens every capacitor (zero companion
+            // conductance) instead of stamping its trapezoidal companion model.
+            c.companionConductance = operatingPointMode_ ? 0.0f : (2.0f * capacitance / dt);
             if (c.companionConductance > 0.0f)
                 stampConductance(staticMatrix_, c.a, c.b, c.companionConductance);
             if (c.spec.leakageResistanceOhms > 0.0f && std::isfinite(c.spec.leakageResistanceOhms))
@@ -1101,7 +1141,10 @@ private:
 
         for (auto& l : inductors_) {
             const float inductance = std::max(1.0e-12f, l.spec.inductanceHenries);
-            l.companionAlpha = 2.0f * inductance / dt;
+            // A DC operating-point solve shorts every inductor (zero companion
+            // inductive term), leaving only its modelled series resistance --
+            // an ideal inductor's true DC impedance.
+            l.companionAlpha = operatingPointMode_ ? 0.0f : (2.0f * inductance / dt);
             const float rEq = l.companionAlpha + std::max(0.0f, l.spec.seriesResistanceOhms);
             stampBranchStructure(staticMatrix_, l.a, l.b, l.branchIndex);
             addMatrix(staticMatrix_, l.branchIndex, l.branchIndex, -rEq);
@@ -1132,6 +1175,11 @@ private:
         }
 
         for (const auto& l : inductors_) {
+            // Mirrors the capacitor loop above: a zero companion term (only
+            // reachable in DC operating-point mode, since inductanceHenries is
+            // otherwise clamped away from zero) means this branch is a plain
+            // resistive short with no trapezoidal history to reintroduce.
+            if (l.companionAlpha <= 0.0f) continue;
             const float historyVoltage = -l.companionAlpha * l.previousCurrent - l.previousVoltage;
             rhs[l.branchIndex] += historyVoltage;
         }
@@ -1789,6 +1837,7 @@ private:
     bool prepared_ = false;
     bool staticCacheDirty_ = true;
     bool linearFactorValid_ = false;
+    bool operatingPointMode_ = false;
     NonlinearSolverMode nonlinearSolverMode_ = NonlinearSolverMode::automatic;
     double nonlinearResidualTolerance_ = 3.0e-7;
     SolveStats lastStats_{};

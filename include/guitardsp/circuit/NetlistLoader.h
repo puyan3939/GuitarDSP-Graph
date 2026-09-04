@@ -23,6 +23,7 @@
 #include "DynamicOpAmpSubcircuit.h"
 #include "JsonValue.h"
 #include "MnaCircuitEngine.h"
+#include "OperatingPointContinuation.h"
 #include "PentodeParasiticSubcircuit.h"
 #include "TransformerSubcircuit.h"
 #include "TriodeParasiticSubcircuit.h"
@@ -81,10 +82,11 @@ public:
         return loadFromJson(contents.str(), error);
     }
 
-    // Builds the MNA circuit from the loaded document, primes the nonlinear
-    // DC operating point via source stepping, then warms it up at silence.
-    // Mirrors TS808Circuit::prepare() / DS1Circuit::prepare() step for step.
-    // Off the audio thread only.
+    // Builds the MNA circuit from the loaded document, then establishes its
+    // analytic DC operating point via source stepping (see
+    // OperatingPointContinuation.h::establishDcOperatingPoint()). Mirrors
+    // TS808Circuit::prepare() / DS1Circuit::prepare() / etc. step for step, so
+    // NetlistParityTests.cpp holds bit-for-bit. Off the audio thread only.
     bool prepare(double sampleRate, std::string* error = nullptr) {
         if (!loaded_) {
             if (error != nullptr) *error = "no netlist document loaded";
@@ -149,24 +151,38 @@ public:
         // around a mid-supply virtual ground (TS808/DS1's transistor/op-amp
         // stages). A self-biased triode stage returns to true ground instead,
         // so priming only requires the supply rail to be present.
+        //
+        // Analytic DC operating-point solve (capacitors open, inductors
+        // shorted, source-stepped Newton homotopy) replaces the previous
+        // prime-then-fixed-length-silent-warm-up pair: every coupling/bypass
+        // capacitor's state is initialized at its true equilibrium regardless
+        // of its RC time constant, mirroring every *Circuit::prepare() above.
         if (hasSupply) {
-            if (!primeOperatingPoint(hasVref)) return fail("failed to prime DC operating point");
+            DcOperatingPointOptions dcOptions{};
+            dcOptions.sourceSteps = sim_.sourceSteps;
+            dcOptions.solvesPerStep = sim_.solvesPerStep;
+            dcOptions.newtonTolerance = sim_.dcNewtonTolerance;
+            std::vector<OperatingPointSourceTarget> dcTargets;
+            dcTargets.push_back({supplySource_, sim_.supplyVolts});
+            if (hasVref) dcTargets.push_back({vrefSource_, sim_.vrefVolts});
+            const auto dcResult = establishDcOperatingPoint(engine_, dcTargets, dcOptions);
+            lastSolve_ = dcResult.lastSolve;
+            if (!dcResult.converged || !allNodesFinite())
+                return fail("failed to establish DC operating point");
         }
+
+        // The DC solve shorts every inductor, including a transformer op's
+        // magnetizing branch, so its saturation-dependent inductance spec was
+        // never exercised during the homotopy. Push one update through now,
+        // from the just-solved idle magnetizing current, mirroring
+        // PowerAmpCircuit::prepare()'s post-solve saturation update. Refresh
+        // the cache explicitly afterward so prepare() doesn't leave a pending
+        // rebuild for the first real-time sample to discover as a surprise.
+        updateTransformerSaturation();
+        engine_.refreshStaticCache();
 
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         engine_.setNonlinearResidualTolerance(sim_.nonlinearResidualTolerance);
-
-        const auto warmSamples = static_cast<std::size_t>(std::clamp(
-            sampleRate_ * sim_.warmupSecondsFraction,
-            static_cast<double>(sim_.warmupMinSamples),
-            static_cast<double>(sim_.warmupMaxSamples)));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(sim_.newtonMaxIterations, sim_.newtonTolerance);
-            if (lastSolve_.singular || !allNodesFinite()) return fail("circuit diverged during warm-up");
-            updateTransformerSaturation();
-            updateOpticalCouplers();
-        }
         return true;
     }
 
@@ -231,14 +247,20 @@ private:
     struct SimulationParams {
         int sourceSteps = 128;
         int solvesPerStep = 2;
-        double warmupSecondsFraction = 0.08;
-        std::size_t warmupMinSamples = 512;
-        std::size_t warmupMaxSamples = 8192;
         float nonlinearResidualTolerance = 2.0e-5f;
         int newtonMaxIterations = 40;
         float newtonTolerance = 2.0e-5f;
         float supplyVolts = 9.0f;
         float vrefVolts = 4.5f;
+        // Relative Newton voltage-delta tolerance for the DC operating-point
+        // homotopy specifically (see establishDcOperatingPoint()'s
+        // DcOperatingPointOptions::newtonTolerance), distinct from
+        // newtonTolerance above which governs realtime processSample(). A
+        // circuit with a large supply swing combined with an algebraic loop
+        // (e.g. poweramp.json's transformer) can need a looser value than the
+        // 1e-6 default to clear its float32 rounding-noise floor -- see
+        // PowerAmpCircuit::prepare()'s matching override.
+        float dcNewtonTolerance = 1.0e-6f;
     };
 
     // Bookkeeping for a "transformer" op's magnetizing inductance so it can
@@ -642,28 +664,12 @@ private:
         if (!sim.isObject()) return;
         if (sim.has("sourceSteps")) sim_.sourceSteps = sim["sourceSteps"].asInt(sim_.sourceSteps);
         if (sim.has("solvesPerStep")) sim_.solvesPerStep = sim["solvesPerStep"].asInt(sim_.solvesPerStep);
-        if (sim.has("warmupSecondsFraction")) sim_.warmupSecondsFraction = sim["warmupSecondsFraction"].asNumber(sim_.warmupSecondsFraction);
-        if (sim.has("warmupMinSamples")) sim_.warmupMinSamples = static_cast<std::size_t>(sim["warmupMinSamples"].asInt(static_cast<int>(sim_.warmupMinSamples)));
-        if (sim.has("warmupMaxSamples")) sim_.warmupMaxSamples = static_cast<std::size_t>(sim["warmupMaxSamples"].asInt(static_cast<int>(sim_.warmupMaxSamples)));
         if (sim.has("nonlinearResidualTolerance")) sim_.nonlinearResidualTolerance = sim["nonlinearResidualTolerance"].asFloat(sim_.nonlinearResidualTolerance);
         if (sim.has("newtonMaxIterations")) sim_.newtonMaxIterations = sim["newtonMaxIterations"].asInt(sim_.newtonMaxIterations);
         if (sim.has("newtonTolerance")) sim_.newtonTolerance = sim["newtonTolerance"].asFloat(sim_.newtonTolerance);
         if (sim.has("supplyVolts")) sim_.supplyVolts = sim["supplyVolts"].asFloat(sim_.supplyVolts);
         if (sim.has("vrefVolts")) sim_.vrefVolts = sim["vrefVolts"].asFloat(sim_.vrefVolts);
-    }
-
-    bool primeOperatingPoint(bool hasVref) noexcept {
-        for (int step = 1; step <= sim_.sourceSteps; ++step) {
-            const float t = static_cast<float>(step) / static_cast<float>(sim_.sourceSteps);
-            engine_.setVoltageSource(supplySource_, sim_.supplyVolts * t);
-            if (hasVref) engine_.setVoltageSource(vrefSource_, sim_.vrefVolts * t);
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            for (int settle = 0; settle < sim_.solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
-                if (lastSolve_.singular || !allNodesFinite()) return false;
-            }
-        }
-        return true;
+        if (sim.has("dcNewtonTolerance")) sim_.dcNewtonTolerance = sim["dcNewtonTolerance"].asFloat(sim_.dcNewtonTolerance);
     }
 
     // Mirrors PowerAmpCircuit::updateOutputTransformerSaturation(): only push

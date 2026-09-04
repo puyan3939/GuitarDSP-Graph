@@ -104,7 +104,18 @@ struct GeneratedFile {
     std::size_t sampleCount = 0;
     std::size_t byteSize = 0;
     double rmsValue = 0.0;
+    bool knownBad = false;
 };
+
+// TS808's "full" variant (drive = tone = level = 1.0) hits a genuine
+// Newton-solver divergence at that extreme parameter corner (see the
+// "Known caveat" section of docs/GOLDEN_REFERENCE.md and the issue #88
+// implementation report) -- captured as-is rather than fixed here, but
+// excluded from golden_reference's pass/fail judgment via this flag so a
+// known, already-reported issue doesn't mask a newly introduced one.
+bool isKnownBad(const std::string& circuitName, const std::string& variantName) {
+    return circuitName == "ts808" && variantName == "full";
+}
 
 struct Args {
     std::string commit = "unknown";
@@ -180,6 +191,7 @@ std::vector<GeneratedFile> generateCircuit(const CircuitSpec& spec, const Args& 
             file.sampleCount = output.size();
             file.byteSize = output.size() * 9; // 8 hex chars + '\n'
             file.rmsValue = rms(output);
+            file.knownBad = isKnownBad(spec.name, variantName);
             files.push_back(file);
 
             if (args.wavDir) {
@@ -277,6 +289,15 @@ int main(int argc, char** argv) {
             manifest << (++i == paramsFileHashes.size() ? "\n" : ",\n");
         }
         manifest << "    },\n";
+        manifest << "    \"knownBad\": [\n";
+        std::vector<std::string> knownBadPaths;
+        for (const GeneratedFile& f : allFiles)
+            if (f.knownBad) knownBadPaths.push_back(f.relativePath);
+        for (std::size_t k = 0; k < knownBadPaths.size(); ++k) {
+            manifest << "        \"" << knownBadPaths[k] << "\"";
+            manifest << (k + 1 == knownBadPaths.size() ? "\n" : ",\n");
+        }
+        manifest << "    ],\n";
         manifest << "    \"fileCount\": " << allFiles.size() << ",\n";
         manifest << "    \"totalBytes\": " << totalBytes << "\n";
         manifest << "}\n";

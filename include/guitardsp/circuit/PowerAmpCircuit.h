@@ -1,5 +1,6 @@
 #pragma once
 
+#include "OperatingPointContinuation.h"
 #include "PentodeParasiticSubcircuit.h"
 #include "TransformerSubcircuit.h"
 
@@ -118,28 +119,48 @@ public:
 
         lastSolve_ = {};
 
-        if (!primeOperatingPoint()) return false;
+        // Analytic DC operating-point solve (capacitors open, inductors
+        // shorted, source-stepped Newton homotopy) replaces the previous
+        // fixed-length silent transient warm-up: the cathode bypass cap's RC
+        // (47 uF into ~1.2k, tens of ms) no longer needs to be waited out. The
+        // 420 V B+ swing is larger than PreampCircuit's 300 V rail, so this
+        // uses proportionally more homotopy steps.
+        DcOperatingPointOptions dcOptions{};
+        dcOptions.sourceSteps = 280;
+        dcOptions.solvesPerStep = 3;
+        // The default 1e-6 relative Newton delta tolerance sits right at this
+        // stage's achievable float32 precision floor once the transformer's
+        // VCVS/CCCS/zero-volt-current-sense loop is combined with 400+ V node
+        // magnitudes (~4e-5 V absolute noise per accumulated-rounding solve,
+        // an order of magnitude above 1e-6 relative of 400 V): the scaled
+        // delta bounces around that floor forever instead of ever dropping
+        // below it. 1e-5 is comfortably above that floor while still tight
+        // enough for a converged operating-point seed.
+        dcOptions.newtonTolerance = 1.0e-5f;
+        const OperatingPointSourceTarget dcTargets[]{{supplySource_, supplyVolts}};
+        const auto dcResult = establishDcOperatingPoint(engine_, dcTargets, dcOptions);
+        lastSolve_ = dcResult.lastSolve;
+        if (!dcResult.converged || !finiteStages()) return false;
 
-        // Once the DC neighborhood is established, return to the automatic
+        // The DC solve shorts every inductor, including the output
+        // transformer's magnetizing branch, so its saturation-dependent
+        // inductance spec was never exercised during the homotopy. Push one
+        // update through now, from the just-solved idle magnetizing current,
+        // so the first real trapezoidal sample already uses the correctly
+        // saturated inductance instead of the unsaturated nominal value.
+        // setInductorSpec() only marks the cache dirty; refresh it explicitly
+        // so prepare() doesn't leave a pending rebuild for the first
+        // real-time sample to discover as a surprise.
+        updateOutputTransformerSaturation();
+        engine_.refreshStaticCache();
+
+        // Once the DC operating point is established, return to the automatic
         // solver for normal audio processing, matching PreampCircuit/
         // TS808Circuit/DS1Circuit's matched-residual policy so quiet/silent
         // guitar input converges in a single Newton solve instead of
         // limit-cycling near the noise floor.
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-
-        // A transformer-coupled power stage's dominant time constant is the
-        // cathode bypass cap's RC (47 uF into ~1.2k is tens of ms), similar
-        // order to PreampCircuit's output coupling, so a comparable silent
-        // warm-up is used before audio processing begins.
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 0.6, 8192.0, 65536.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-            updateOutputTransformerSaturation();
-        }
         return true;
     }
 
@@ -191,28 +212,6 @@ private:
                                     detail::magnetizingSpec(outputTransformer_, inductance));
             lastMagnetizingInductanceHenries_ = inductance;
         }
-    }
-
-    bool primeOperatingPoint() noexcept {
-        // Source stepping is a standard nonlinear-circuit continuation
-        // technique: each solution becomes the initial guess for the next
-        // slightly higher supply voltage. It runs only during prepare(),
-        // never on the audio thread. The 420 V B+ swing is larger than
-        // PreampCircuit's 300 V rail, so this uses more steps to keep each
-        // Newton jump small at the higher voltages a pentode's screen/plate
-        // stamps operate at.
-        constexpr int sourceSteps = 280;
-        constexpr int solvesPerStep = 3;
-        for (int step = 1; step <= sourceSteps; ++step) {
-            const float t = static_cast<float>(step) / static_cast<float>(sourceSteps);
-            engine_.setVoltageSource(supplySource_, supplyVolts * t);
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
-                if (lastSolve_.singular || !finiteStages()) return false;
-            }
-        }
-        return true;
     }
 
     bool finiteStages() const noexcept {

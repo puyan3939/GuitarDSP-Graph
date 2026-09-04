@@ -45,10 +45,5 @@
     { "op": "capacitor", "a": "envNode", "b": "vref", "farads": 1.0e-6, "voltageRating": 25.0, "technology": "film" },
     { "op": "resistor", "a": "envNode", "b": "vref", "ohms": 100000.0 }
   ],
-  "ports": { "input": "inputSource", "output": "outputNode", "supply": "supplySource", "vref": "vrefSource" },
-  "simulation": {
-    "warmupSecondsFraction": 1.5,
-    "warmupMinSamples": 16384,
-    "warmupMaxSamples": 98304
-  }
+  "ports": { "input": "inputSource", "output": "outputNode", "supply": "supplySource", "vref": "vrefSource" }
 }

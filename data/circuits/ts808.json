@@ -92,9 +92,6 @@
   "simulation": {
     "sourceSteps": 128,
     "solvesPerStep": 2,
-    "warmupSecondsFraction": 0.08,
-    "warmupMinSamples": 512,
-    "warmupMaxSamples": 8192,
     "nonlinearResidualTolerance": 2.0e-5,
     "newtonMaxIterations": 40,
     "newtonTolerance": 2.0e-5,

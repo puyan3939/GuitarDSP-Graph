@@ -12,15 +12,26 @@ namespace guitardsp::circuit {
 
 // Control-thread operating-point continuation for nonlinear audio circuits.
 //
-// Independent supply sources are ramped from zero with the dense pivoting oracle,
-// then selected probe nodes are observed until their windowed DC means stop moving.
-// Windowed means deliberately reject the tiny sample-to-sample trapezoidal ringing
-// that can remain around an otherwise settled bias point.
+// Two related but distinct mechanisms live in this file:
 //
-// Accuracy boundary: MnaCircuitEngine currently owns trapezoidal dynamic companion
-// models at all times, so this is a time-domain/quasi-DC operating-point continuation,
-// not yet a separate SPICE-style static matrix in which capacitors are opened and
-// inductors are shorted analytically. The distinction is explicit and tested.
+// - establishOperatingPoint() ramps independent supply sources from zero under
+//   the *trapezoidal* dynamic companion model (MnaCircuitEngine's normal
+//   real-time stamps) and then watches selected probe nodes' windowed DC means
+//   until they stop moving. This is a time-domain/quasi-DC continuation, not an
+//   analytic DC solve -- it is still watching an exponentially decaying
+//   transient settle, just through a windowed mean that rejects trapezoidal
+//   ringing. It remains useful when a caller genuinely wants to observe
+//   settling in the time domain (e.g. AudioReadinessTests.cpp).
+//
+// - establishDcOperatingPoint() instead ramps supply sources under
+//   MnaCircuitEngine::setOperatingPointMode(true) -- the engine's analytic
+//   SPICE-style .OP boundary condition (capacitors opened, inductors shorted,
+//   no trapezoidal history term at all). Because that system has no memory,
+//   repeated solves at a fixed source value converge to a genuine algebraic
+//   fixed point in a handful of Newton iterations; there is no settling time
+//   constant to wait out, and therefore no settle-window/hard-sample-cap
+//   heuristic here at all. This is what should be used to prime a circuit's
+//   capacitor/inductor state before real-time processing begins.
 struct OperatingPointSourceTarget {
     SourceHandle source{};
     float targetVolts = 0.0f;
@@ -163,6 +174,105 @@ inline OperatingPointResult establishOperatingPoint(
         }
     }
 
+    engine.setNonlinearSolverMode(previousMode);
+    return result;
+}
+
+struct DcOperatingPointOptions {
+    int sourceSteps = 128;
+    int solvesPerStep = 2;
+    int maximumNewtonIterations = 40;
+    float newtonTolerance = 1.0e-6f;
+};
+
+struct DcOperatingPointResult {
+    // `converged` reflects the last homotopy-step solve's Newton flag under the
+    // analytic DC boundary condition. Because that system has no history term,
+    // this genuinely means the algebraic operating-point equations are solved
+    // to `newtonTolerance` -- not merely that a time-domain probe stopped
+    // moving within some window.
+    bool converged = false;
+    bool singular = false;
+    int sourceStepSolves = 0;
+    MnaCircuitEngine::SolveStats lastSolve{};
+};
+
+// Establishes a circuit's DC operating point analytically (SPICE .OP style:
+// capacitors open, inductors shorted, no trapezoidal history) and leaves the
+// engine's capacitor/inductor state variables initialized at that equilibrium,
+// ready for real-time trapezoidal processing to continue from rather than from
+// a cold, all-zero start.
+//
+// Source stepping is reused here as a homotopy continuation exactly as
+// establishOperatingPoint() uses it: each solved step becomes the Newton
+// initial guess for the next, slightly higher supply voltage, so the solver
+// never has to jump from an all-zero guess directly to a fully biased
+// nonlinear circuit. Unlike establishOperatingPoint(), there is no settling
+// loop afterward -- the DC system has no memory, so the homotopy's own
+// convergence at the final (full-voltage) step *is* the operating point.
+//
+// `sources` should cover every independent supply/reference rail the circuit
+// needs primed (e.g. a 9 V supply and a 4.5 V virtual-ground reference); any
+// audio input source should already be pinned to 0 V by the caller (true by
+// construction immediately after MnaCircuitEngine::prepare(), since a freshly
+// added voltage source defaults to 0 V and prepare()'s reset() does not touch
+// source voltages).
+//
+// Control-thread only, like establishOperatingPoint() -- never call this from
+// the audio callback path.
+inline DcOperatingPointResult establishDcOperatingPoint(
+        MnaCircuitEngine& engine,
+        std::span<const OperatingPointSourceTarget> sources,
+        DcOperatingPointOptions options = {}) {
+    DcOperatingPointResult result{};
+    if (!engine.prepared()) {
+        result.singular = true;
+        return result;
+    }
+
+    options.sourceSteps = std::clamp(options.sourceSteps, 1, 4096);
+    options.solvesPerStep = std::clamp(options.solvesPerStep, 1, 32);
+    options.maximumNewtonIterations = std::clamp(options.maximumNewtonIterations, 1, 40);
+    options.newtonTolerance = std::max(1.0e-9f, options.newtonTolerance);
+
+    const auto previousMode = engine.nonlinearSolverMode();
+    engine.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::denseReference);
+    engine.setOperatingPointMode(true);
+
+    for (const auto& source : sources)
+        if (!engine.setVoltageSource(source.source, 0.0f)) {
+            result.singular = true;
+            engine.setOperatingPointMode(false);
+            engine.setNonlinearSolverMode(previousMode);
+            return result;
+        }
+
+    for (int step = 1; step <= options.sourceSteps; ++step) {
+        const float t = static_cast<float>(step) / static_cast<float>(options.sourceSteps);
+        for (const auto& source : sources)
+            engine.setVoltageSource(source.source, source.targetVolts * t);
+
+        for (int solve = 0; solve < options.solvesPerStep; ++solve) {
+            result.lastSolve = engine.processSample(options.maximumNewtonIterations,
+                                                    options.newtonTolerance);
+            ++result.sourceStepSolves;
+            if (result.lastSolve.singular) {
+                result.singular = true;
+                break;
+            }
+        }
+        if (result.singular) break;
+    }
+
+    result.converged = !result.singular && result.lastSolve.converged;
+
+    // Leave the engine in its normal trapezoidal mode: the next static-cache
+    // rebuild (triggered lazily by the dirty flag setOperatingPointMode(false)
+    // sets) restores real dt-based companion coefficients while the
+    // capacitor/inductor previousVoltage_/previousCurrent_ this DC solve just
+    // wrote via updateDynamicState() carry over unchanged -- exactly the
+    // equilibrium initial condition real-time processing should continue from.
+    engine.setOperatingPointMode(false);
     engine.setNonlinearSolverMode(previousMode);
     return result;
 }

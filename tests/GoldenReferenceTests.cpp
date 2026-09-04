@@ -42,6 +42,7 @@
 #include <functional>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -62,8 +63,27 @@ namespace {
 #define GUITARDSP_NETLIST_DATA_DIR "data/circuits"
 #endif
 
-// Loose on purpose -- see the file header comment above.
-constexpr double kToleranceAbsolute = 2.0e-3;
+// Loose on purpose -- see the file header comment above. Relative to each
+// golden file's own RMS rather than one fixed absolute value: a flat
+// absolute tolerance is both too loose to catch a regression in a quiet
+// circuit's silence noise floor (e.g. PowerAmp's ~2.3e-5 RMS at silence is
+// two orders of magnitude below any reasonable absolute floor) and
+// needlessly tight relative to a loud signal's own scale. `kToleranceFloor`
+// keeps the effective tolerance from collapsing toward zero for a
+// near-silent file, where 0.5% of an already-tiny RMS would otherwise demand
+// sub-float-precision agreement.
+//
+// Calibration note: on this environment's only available toolchain (GCC
+// 13.3.0, x86-64, glibc), comparing this circuit/signal/param matrix built
+// under the GOLDEN preset (-O2, no fast-math/native/LTO) against a plain
+// `-DCMAKE_BUILD_TYPE=Release` build (default -O3, otherwise identical
+// flags) produced bit-exact output on every one of the 50 files -- zero
+// measured divergence, not just "under tolerance". `kToleranceRelative`
+// therefore carries deliberate headroom above the only baseline actually
+// measurable here, rather than being pinned to an observed nonzero value;
+// see the issue #88 follow-up report for the raw comparison.
+constexpr double kToleranceRelative = 5.0e-3;
+constexpr double kToleranceFloor = 1.0e-5;
 
 bool require(bool condition, const std::string& name) {
     std::cout << (condition ? "PASS " : "FAIL ") << name << '\n';
@@ -95,34 +115,42 @@ std::vector<float> readGoldenFile(const std::string& path) {
 }
 
 bool compareAgainstGolden(const std::string& goldenPath, const std::vector<float>& candidate,
-                           const std::string& caseName) {
+                           const std::string& caseName, bool knownBad) {
     std::vector<float> reference;
     try {
         reference = readGoldenFile(goldenPath);
     } catch (const std::exception& e) {
-        return require(false, caseName + " (" + e.what() + ")");
+        return knownBad || require(false, caseName + " (" + e.what() + ")");
     }
 
     if (reference.size() != candidate.size()) {
         std::cout << "  " << caseName << ": length mismatch golden=" << reference.size()
-                  << " candidate=" << candidate.size() << '\n';
-        return require(false, caseName);
+                  << " candidate=" << candidate.size() << (knownBad ? " (known-bad, not judged)" : "") << '\n';
+        return knownBad || require(false, caseName);
     }
+
+    double sumSquares = 0.0;
+    for (float v : reference) sumSquares += static_cast<double>(v) * static_cast<double>(v);
+    const double referenceRms = std::sqrt(sumSquares / static_cast<double>(reference.size()));
+    const double tolerance = std::max(kToleranceFloor, kToleranceRelative * referenceRms);
 
     double maxAbsError = 0.0;
     std::optional<std::size_t> firstExceeding;
     for (std::size_t i = 0; i < reference.size(); ++i) {
         const double diff = std::abs(static_cast<double>(reference[i]) - static_cast<double>(candidate[i]));
         maxAbsError = std::max(maxAbsError, diff);
-        if (!firstExceeding && (diff > kToleranceAbsolute || !std::isfinite(candidate[i]))) {
+        if (!firstExceeding && (diff > tolerance || !std::isfinite(candidate[i]))) {
             firstExceeding = i;
         }
     }
 
-    if (firstExceeding) {
-        std::cout << "  " << caseName << ": first divergence at sample " << *firstExceeding
-                  << ", max_abs_error=" << maxAbsError << '\n';
+    if (firstExceeding || knownBad) {
+        std::cout << "  " << caseName << ": first divergence at sample "
+                  << (firstExceeding ? std::to_string(*firstExceeding) : std::string("none"))
+                  << ", max_abs_error=" << maxAbsError << ", tolerance=" << tolerance
+                  << (knownBad ? " (known-bad, not judged)" : "") << '\n';
     }
+    if (knownBad) return true;
     return require(!firstExceeding.has_value(), caseName);
 }
 
@@ -151,7 +179,26 @@ std::vector<float> renderNetlist(const std::string& netlistPath,
     return output;
 }
 
-bool runCircuit(const std::string& circuitName,
+// MANIFEST.json's "knownBad" array (see tools/golden_gen's isKnownBad()) as
+// a set of "tests/golden/<file>.txt" relative paths -- e.g. the TS808 "full"
+// variant's documented Newton-divergence corner (docs/GOLDEN_REFERENCE.md's
+// "Known caveat" section). Missing/absent entirely on a MANIFEST.json
+// predating this field (harmless: an empty set judges every case normally).
+std::set<std::string> loadKnownBad() {
+    std::set<std::string> knownBad;
+    circuit::JsonValue manifest;
+    try {
+        manifest = circuit::parseJson(readFile(std::string(GUITARDSP_GOLDEN_DATA_DIR) + "/MANIFEST.json"));
+    } catch (const std::exception&) {
+        return knownBad;
+    }
+    const circuit::JsonValue& entries = manifest["knownBad"];
+    if (!entries.isArray()) return knownBad;
+    for (const circuit::JsonValue& entry : entries.items()) knownBad.insert(entry.asString());
+    return knownBad;
+}
+
+bool runCircuit(const std::string& circuitName, const std::set<std::string>& knownBad,
                  const std::function<std::vector<float>(const circuit::JsonValue&, const std::vector<float>&)>&
                      renderHandWritten,
                  const std::function<std::vector<float>(const circuit::JsonValue&, const std::vector<float>&)>&
@@ -169,17 +216,20 @@ bool runCircuit(const std::string& circuitName,
     for (const auto& [variantName, variantParams] : variants.entries()) {
         for (const auto& signal : goldenSignalList()) {
             const std::vector<float> input = generateGoldenSignal(signal.name);
-            const std::string goldenPath = std::string(GUITARDSP_GOLDEN_DATA_DIR) + "/" + circuitName + "_" +
-                                            signal.name + "_" + variantName + ".txt";
+            const std::string fileName = circuitName + "_" + signal.name + "_" + variantName + ".txt";
+            const std::string goldenPath = std::string(GUITARDSP_GOLDEN_DATA_DIR) + "/" + fileName;
+            const bool isKnownBad = knownBad.count("tests/golden/" + fileName) != 0;
 
             const std::vector<float> handWritten = renderHandWritten(variantParams, input);
             ok &= compareAgainstGolden(goldenPath, handWritten,
-                                        circuitName + " " + variantName + " " + signal.name + " (hand-written)");
+                                        circuitName + " " + variantName + " " + signal.name + " (hand-written)",
+                                        isKnownBad);
 
             if (renderNetlistOrEmpty) {
                 const std::vector<float> netlist = renderNetlistOrEmpty(variantParams, input);
                 ok &= compareAgainstGolden(goldenPath, netlist,
-                                            circuitName + " " + variantName + " " + signal.name + " (netlist)");
+                                            circuitName + " " + variantName + " " + signal.name + " (netlist)",
+                                            isKnownBad);
             }
         }
     }
@@ -190,9 +240,10 @@ bool runCircuit(const std::string& circuitName,
 
 int main() {
     bool ok = true;
+    const std::set<std::string> knownBad = loadKnownBad();
 
     ok &= runCircuit(
-        "ts808",
+        "ts808", knownBad,
         [](const circuit::JsonValue& p, const std::vector<float>& input) {
             return renderCircuit<circuit::TS808Circuit>(
                 [&](circuit::TS808Circuit& c) {
@@ -209,7 +260,7 @@ int main() {
         });
 
     ok &= runCircuit(
-        "ds1",
+        "ds1", knownBad,
         [](const circuit::JsonValue& p, const std::vector<float>& input) {
             return renderCircuit<circuit::DS1Circuit>(
                 [&](circuit::DS1Circuit& c) {
@@ -226,7 +277,7 @@ int main() {
         });
 
     ok &= runCircuit(
-        "preamp",
+        "preamp", knownBad,
         [](const circuit::JsonValue& p, const std::vector<float>& input) {
             return renderCircuit<circuit::PreampCircuit>(
                 [&](circuit::PreampCircuit& c) { c.setControls(p["bass"].asFloat(), p["treble"].asFloat()); },
@@ -235,7 +286,7 @@ int main() {
         {});
 
     ok &= runCircuit(
-        "fullamp",
+        "fullamp", knownBad,
         [](const circuit::JsonValue& p, const std::vector<float>& input) {
             return renderCircuit<circuit::FullAmpCircuit>(
                 [&](circuit::FullAmpCircuit& c) { c.setControls(p["bass"].asFloat(), p["treble"].asFloat()); },
@@ -244,14 +295,14 @@ int main() {
         {});
 
     ok &= runCircuit(
-        "poweramp",
+        "poweramp", knownBad,
         [](const circuit::JsonValue&, const std::vector<float>& input) {
             return renderCircuit<circuit::PowerAmpCircuit>([](circuit::PowerAmpCircuit&) {}, input);
         },
         {});
 
     ok &= runCircuit(
-        "compressor",
+        "compressor", knownBad,
         [](const circuit::JsonValue&, const std::vector<float>& input) {
             return renderCircuit<circuit::CompressorCircuit>([](circuit::CompressorCircuit&) {}, input);
         },

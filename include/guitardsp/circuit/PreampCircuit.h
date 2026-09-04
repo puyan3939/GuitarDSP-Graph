@@ -1,5 +1,6 @@
 #pragma once
 
+#include "OperatingPointContinuation.h"
 #include "TriodeParasiticSubcircuit.h"
 
 #include <algorithm>
@@ -118,27 +119,29 @@ public:
         controlUpdateCountdown_ = 0;
         lastSolve_ = {};
 
-        if (!primeOperatingPoint()) return false;
+        // Analytic DC operating-point solve (capacitors open, inductors
+        // shorted, source-stepped Newton homotopy) replaces the previous
+        // fixed-length silent transient warm-up. The passive tone stack's
+        // slowest coupling-cap time constant (on the order of 100 ms: 1 uF
+        // output coupling into a ~100 k load) is no longer a concern -- the
+        // analytic solve reaches the same equilibrium regardless of how slow
+        // the RC is. The 300 V B+ swing is much larger than TS808/DS1's 9 V
+        // rail, so this uses more homotopy steps and an extra solve per step
+        // to keep each Newton jump small.
+        DcOperatingPointOptions dcOptions{};
+        dcOptions.sourceSteps = 200;
+        dcOptions.solvesPerStep = 3;
+        const OperatingPointSourceTarget dcTargets[]{{supplySource_, supplyVolts}};
+        const auto dcResult = establishDcOperatingPoint(engine_, dcTargets, dcOptions);
+        lastSolve_ = dcResult.lastSolve;
+        if (!dcResult.converged || !finiteStages()) return false;
 
-        // Once the DC neighborhood is established, return to the automatic
+        // Once the DC operating point is established, return to the automatic
         // solver for normal audio processing, matching TS808Circuit/DS1Circuit's
         // matched-residual policy so quiet/silent guitar input converges in a
         // single Newton solve instead of limit-cycling near the noise floor.
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-
-        // The passive tone stack's slowest coupling-cap time constant is on
-        // the order of 100 ms (1 uF output coupling into a ~100 k load), much
-        // slower than TS808/DS1's millisecond-scale pedal RC networks, so
-        // this stage needs a proportionally longer silent warm-up to reach a
-        // settled DC operating point before audio processing begins.
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 0.6, 8192.0, 65536.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-        }
         return true;
     }
 
@@ -225,27 +228,6 @@ private:
             appliedTreble_ = nextTreble;
             engine_.setPotentiometerPosition(treblePot_, appliedTreble_);
         }
-    }
-
-    bool primeOperatingPoint() noexcept {
-        // Source stepping is a standard nonlinear-circuit continuation
-        // technique: each solution becomes the initial guess for the next
-        // slightly higher supply voltage. It runs only during prepare(),
-        // never on the audio thread. The 300 V B+ swing is much larger than
-        // TS808/DS1's 9 V rail, so this uses more steps and an extra solve
-        // per step to keep each Newton jump small.
-        constexpr int sourceSteps = 200;
-        constexpr int solvesPerStep = 3;
-        for (int step = 1; step <= sourceSteps; ++step) {
-            const float t = static_cast<float>(step) / static_cast<float>(sourceSteps);
-            engine_.setVoltageSource(supplySource_, supplyVolts * t);
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
-                if (lastSolve_.singular || !finiteStages()) return false;
-            }
-        }
-        return true;
     }
 
     bool finiteStages() const noexcept {

@@ -4,11 +4,12 @@ Before wiring JUCE audio I/O into `GuitarDSP-Graph`, three engine-level gates ar
 
 ## 1. Nonlinear operating-point continuation
 
-`circuit/OperatingPointContinuation.h` standardizes control-thread startup for nonlinear circuits. Independent supplies are source-stepped from zero with the dense partial-pivot MNA solver, then selected probe nodes are allowed to settle until their voltages stop moving. The resulting nonlinear solution and dynamic companion history are retained as the initial condition for realtime processing.
+`circuit/OperatingPointContinuation.h` standardizes control-thread startup for nonlinear circuits, and provides two related mechanisms:
 
-This replaces the idea that every future pedal or amp should invent its own startup ramp. Existing TS808 and DS-1 circuit classes already use the same source-stepping principle internally; new circuit implementations can use the shared helper directly and those existing private primers can be migrated without changing their audio topology.
+- `establishOperatingPoint()`: independent supplies are source-stepped from zero under the engine's normal trapezoidal companion model, then selected probe nodes are allowed to settle until their windowed DC means stop moving. This is a time-domain/quasi-DC continuation, not an analytic solve -- it is still watching an exponentially decaying transient settle, just through a windowed mean that rejects trapezoidal ringing.
+- `establishDcOperatingPoint()`: independent supplies are source-stepped from zero under `MnaCircuitEngine::setOperatingPointMode(true)` -- a genuine SPICE-style static DC matrix where every capacitor is stamped as an open circuit and every inductor as its bare series resistance, with no trapezoidal history term at all. Because that system has no memory, the homotopy's own Newton convergence at the final source step *is* the operating point; there is no settling time to wait out, regardless of a capacitor's real RC time constant. The resulting node voltages become each capacitor/inductor's initial `previousVoltage`/`previousCurrent` history for realtime trapezoidal processing to continue from.
 
-Accuracy boundary: this is a time-domain/quasi-DC continuation. `MnaCircuitEngine` currently keeps trapezoidal capacitor/inductor companions active, so it is not yet a separate SPICE-style static DC matrix where capacitors are analytically open circuits and inductors are shorts. The distinction is intentional and documented rather than hidden.
+This replaces the idea that every future pedal or amp should invent its own startup ramp. `TS808Circuit`, `DS1Circuit`, `PreampCircuit`, `PowerAmpCircuit`, `CompressorCircuit` and the data-driven `NetlistCircuit` (`NetlistLoader.h`) all call `establishDcOperatingPoint()` from `prepare()`; new circuit implementations should do the same rather than inventing a bespoke private primer.
 
 ## 2. Realtime execution audit
 

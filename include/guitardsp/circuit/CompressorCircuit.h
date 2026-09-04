@@ -2,6 +2,7 @@
 
 #include "DiodeParasiticSubcircuit.h"
 #include "DynamicOpAmpSubcircuit.h"
+#include "OperatingPointContinuation.h"
 #include "guitardsp/hq/AdditionalDeviceStages.h"
 
 #include <algorithm>
@@ -134,25 +135,25 @@ public:
         lastSolve_ = {};
         lastLdrResistanceOhms_ = ldr_.resistanceOhms();
 
-        if (!primeOperatingPoint()) return false;
+        // Analytic DC operating-point solve (capacitors open, inductors
+        // shorted, source-stepped Newton homotopy) replaces the previous
+        // fixed-length silent transient warm-up: the envelope bleed network's
+        // ~100 ms release RC and the cascaded buffer/peak-detector op-amp
+        // stages' own slower settling no longer need to be waited out. At true
+        // DC the envelope node settles exactly to vref (zero drive above it),
+        // which is already the LDR's constructed dark-resistance starting
+        // point, so no post-solve LDR resistance push is needed here.
+        DcOperatingPointOptions dcOptions{};
+        dcOptions.sourceSteps = 128;
+        dcOptions.solvesPerStep = 2;
+        const OperatingPointSourceTarget dcTargets[]{{supplySource_, 9.0f},
+                                                       {vrefSource_, 4.5f}};
+        const auto dcResult = establishDcOperatingPoint(engine_, dcTargets, dcOptions);
+        lastSolve_ = dcResult.lastSolve;
+        if (!dcResult.converged || !finiteStages()) return false;
 
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-
-        // The envelope bleed network's release RC is ~100 ms by design (see the
-        // class comment), and the cascaded buffer/peak-detector op-amp stages
-        // add their own slower settling on top of that, so the warm-up needs
-        // well over a second -- not just a few RC multiples of the fastest
-        // network -- before silence-at-rest is truly settled rather than
-        // still visibly decaying.
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 1.5, 16384.0, 98304.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-            updateLdrResistance();
-        }
         return true;
     }
 
@@ -199,26 +200,6 @@ private:
             engine_.setResistance(ldrResistor_, resistanceOhms);
             lastLdrResistanceOhms_ = resistanceOhms;
         }
-    }
-
-    bool primeOperatingPoint() noexcept {
-        // Source stepping is a standard nonlinear-circuit continuation
-        // technique: each solution becomes the initial guess for the next
-        // slightly higher supply voltage. It runs only during prepare(),
-        // never on the audio thread.
-        constexpr int sourceSteps = 128;
-        constexpr int solvesPerStep = 2;
-        for (int step = 1; step <= sourceSteps; ++step) {
-            const float t = static_cast<float>(step) / static_cast<float>(sourceSteps);
-            engine_.setVoltageSource(supplySource_, 9.0f * t);
-            engine_.setVoltageSource(vrefSource_, 4.5f * t);
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
-                if (lastSolve_.singular || !finiteStages()) return false;
-            }
-        }
-        return true;
     }
 
     bool finiteStages() const noexcept {

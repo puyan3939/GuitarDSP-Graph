@@ -3,6 +3,7 @@
 #include "BjtEbersMollSubcircuit.h"
 #include "DiodeParasiticSubcircuit.h"
 #include "DynamicOpAmpSubcircuit.h"
+#include "OperatingPointContinuation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -209,7 +210,20 @@ public:
         controlUpdateCountdown_ = 0;
         lastSolve_ = {};
 
-        if (!primeOperatingPoint()) return false;
+        // Analytic DC operating-point solve (capacitors open, inductors
+        // shorted, source-stepped Newton homotopy) replaces the previous
+        // fixed-length silent transient warm-up: every coupling/bypass
+        // capacitor's state is initialized at its true equilibrium regardless
+        // of its RC time constant, instead of hoping a fixed sample budget
+        // happened to be long enough.
+        DcOperatingPointOptions dcOptions{};
+        dcOptions.sourceSteps = 128;
+        dcOptions.solvesPerStep = 2;
+        const OperatingPointSourceTarget dcTargets[]{{supplySource_, 9.0f},
+                                                       {vrefSource_, 4.5f}};
+        const auto dcResult = establishDcOperatingPoint(engine_, dcTargets, dcOptions);
+        lastSolve_ = dcResult.lastSolve;
+        if (!dcResult.converged || !finiteStages()) return false;
 
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         // The 57-unknown DS-1 combines three transistor macros with a high-gain
@@ -218,13 +232,6 @@ public:
         // floor caused endless 40-step limit cycles even at silence. Match both
         // convergence criteria while retaining every component and exact stamp.
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 0.06, 512.0, 4096.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-        }
         return true;
     }
 
@@ -330,22 +337,6 @@ private:
             appliedLevel_ = nextLevel;
             engine_.setPotentiometerPosition(levelPot_, appliedLevel_);
         }
-    }
-
-    bool primeOperatingPoint() noexcept {
-        constexpr int sourceSteps = 128;
-        constexpr int solvesPerStep = 2;
-        for (int step = 1; step <= sourceSteps; ++step) {
-            const float t = static_cast<float>(step) / static_cast<float>(sourceSteps);
-            engine_.setVoltageSource(supplySource_, 9.0f * t);
-            engine_.setVoltageSource(vrefSource_, 4.5f * t);
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
-                if (lastSolve_.singular || !finiteStages()) return false;
-            }
-        }
-        return true;
     }
 
     bool finiteStages() const noexcept {

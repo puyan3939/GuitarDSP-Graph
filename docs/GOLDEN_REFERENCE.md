@@ -92,9 +92,12 @@ is text-only; the WAV output is purely a local listening aid.
 ## 5. `MANIFEST.json`
 
 Records the commit hash the files were generated from, compiler identity,
-the CMake preset name, the sample rate, and an FNV-1a64 hash of each params
+the CMake preset name, the sample rate, an FNV-1a64 hash of each params
 JSON file (so an accidental params edit without regeneration is
-detectable).
+detectable), and a `knownBad` array of `tests/golden/<file>.txt` relative
+paths that `golden_reference` records but does not judge pass/fail (see
+"Known caveat: TS808 `full` variant" below and `tools/golden_gen`'s
+`isKnownBad()`).
 
 ## 6. `tools/parity_check`
 
@@ -111,15 +114,28 @@ Only built when `GUITARDSP_BUILD_GOLDEN_TOOLS=ON`.
 ## 7. `tests/GoldenReferenceTests.cpp` (the `golden_reference` ctest)
 
 Runs every circuit/signal/variant combination against the committed golden
-files as part of the normal `ctest` suite, at a loose absolute tolerance
-(`2e-3`), **not bit-exact**. That's a deliberate compromise: the default
-`ctest` build is not the `GOLDEN` preset, and because these are iterative
-nonlinear (Newton) solves with per-sample state, a difference from a
-different optimization level can compound across a long signal instead of
-staying at LSB scale. This test is meant to catch a broken or badly drifted
+files as part of the normal `ctest` suite, at a loose tolerance **relative
+to each golden file's own RMS** (`max(1e-5, 5e-3 * referenceRms)`), not
+bit-exact and not one fixed absolute number. That's a deliberate compromise:
+the default `ctest` build is not the `GOLDEN` preset, and because these are
+iterative nonlinear (Newton) solves with per-sample state, a difference from
+a different optimization level can compound across a long signal instead of
+staying at LSB scale. Making the tolerance relative (with an absolute floor
+so a near-silent file doesn't demand sub-float-precision agreement) keeps a
+loud signal from being needlessly tight while making a quiet circuit's
+silence noise floor -- previously invisible under one flat `2e-3` absolute
+tolerance, e.g. PowerAmp's silence RMS is only ~2.3e-5 -- actually
+regression-checked. This test is meant to catch a broken or badly drifted
 circuit in ordinary CI, not to enforce bit-exact reproducibility -- that
 guarantee only holds when comparing two `GOLDEN`-preset builds via
-`tools/parity_check`.
+`tools/parity_check`. On this policy's only measured toolchain (GCC 13.3.0),
+an O2-vs-O3 comparison of the full 50-file matrix was bit-exact (zero
+divergence), so the relative factor above carries headroom rather than
+being pinned to an observed nonzero baseline.
+
+Cases listed in `MANIFEST.json`'s `knownBad` array (see above) are still
+rendered and their max-error/tolerance printed, but do not affect the
+test's overall pass/fail result.
 
 For TS808 and DS-1, this test also renders the JSON netlist equivalent
 (`NetlistLoader.h` / `data/circuits/*.json`) against the same golden file.
@@ -142,5 +158,7 @@ rather than intended circuit behavior -- see the issue #88 implementation
 report for details. It's captured as-is because that's the point of a
 golden reference (freeze current behavior, bugs included, so a future fix
 is a visible, intentional diff against this file); it is not fixed by this
-change. Treat those four files as unusually solver-sensitive when comparing
-against them.
+change. Treat those files as unusually solver-sensitive when comparing
+against them. `tools/golden_gen` marks every `ts808_*_full.txt` file
+`knownBad` in `MANIFEST.json` for exactly this reason, and
+`GoldenReferenceTests.cpp` records but does not fail on them.

@@ -18,7 +18,7 @@ previously meant writing (and hand-verifying) a new C++ class like these.
 This netlist format lets the same physical circuit be described as data
 instead: an ordered list of node/component operations that
 `NetlistCircuit::prepare()` replays onto a fresh `MnaCircuitEngine`, plus a
-small amount of metadata (I/O ports, user-facing controls, DC-priming/warm-up
+small amount of metadata (I/O ports, user-facing controls, DC-priming
 parameters) that a hand-written class would otherwise hard-code.
 
 **Numerical parity depends on operation order.** `MnaCircuitEngine::addNode()`
@@ -174,13 +174,19 @@ BJT: `name`, `polarity`, `beta`, `nominalVbe`, `saturationVoltage`,
 - `input` / `output` are required: `processSample(x)` drives the named
   voltage source with `x` and returns the voltage at the named node.
 - `supply` / `vref` are optional. When `supply` is present, `prepare()` runs
-  the same source-stepping DC-priming continuation TS808Circuit/DS1Circuit
-  use (ramping the supply source, and the vref source if also present, from
-  0 V up to `simulation.supplyVolts`/`vrefVolts` over `simulation.sourceSteps`
-  steps) before the silence warm-up. `vref` only matters for circuits whose
-  active devices bias around a mid-supply virtual ground (TS808/DS1's
-  transistor/op-amp stages, which specify both); a self-biased triode stage
-  returns to true ground instead and only needs `supply` (see
+  the same analytic DC operating-point solve every `*Circuit::prepare()` uses
+  (`guitardsp::circuit::establishDcOperatingPoint()` in
+  `OperatingPointContinuation.h`): capacitors opened, inductors shorted, and
+  the supply source -- and the vref source if also present -- source-stepped
+  from 0 V up to `simulation.supplyVolts`/`vrefVolts` over
+  `simulation.sourceSteps` homotopy steps. Because that boundary condition has
+  no trapezoidal history term, the homotopy's own Newton convergence at the
+  final step *is* the operating point; there is no separate silent warm-up
+  afterward, and no settling time to wait out regardless of how slow a
+  coupling capacitor's real RC time constant is. `vref` only matters for
+  circuits whose active devices bias around a mid-supply virtual ground
+  (TS808/DS1's transistor/op-amp stages, which specify both); a self-biased
+  triode stage returns to true ground instead and only needs `supply` (see
   `data/circuits/preamp.json`). Omit `supply` entirely for a circuit with no
   biased/nonlinear DC operating point to prime.
 
@@ -202,21 +208,19 @@ the same >=24 kHz-update / 5 ms-ramp policy as
 ## Simulation parameters
 
 All fields in `simulation` are optional and default to the values below
-(TS808's warm-up window; override per-circuit as needed, see `ds1.json` for a
-circuit using a shorter warm-up):
+(TS808's priming schedule; override per-circuit as needed, see `poweramp.json`
+for a circuit using more/finer homotopy steps for its larger supply swing):
 
 | field                        | default  | meaning |
 |-------------------------------|---------|---------|
-| `sourceSteps`                 | 128     | DC-priming continuation steps |
-| `solvesPerStep`               | 2       | Newton solves per priming step |
-| `warmupSecondsFraction`       | 0.08    | silent warm-up length, as a fraction of sample rate |
-| `warmupMinSamples`            | 512     | warm-up length lower bound |
-| `warmupMaxSamples`            | 8192    | warm-up length upper bound |
-| `nonlinearResidualTolerance`  | 2.0e-5  | `MnaCircuitEngine::setNonlinearResidualTolerance` after priming |
+| `sourceSteps`                 | 128     | DC operating-point homotopy steps |
+| `solvesPerStep`               | 2       | Newton solves per homotopy step |
+| `nonlinearResidualTolerance`  | 2.0e-5  | `MnaCircuitEngine::setNonlinearResidualTolerance` after the DC solve |
 | `newtonMaxIterations`         | 40      | `processSample()`'s Newton iteration cap |
 | `newtonTolerance`             | 2.0e-5  | `processSample()`'s Newton voltage tolerance |
-| `supplyVolts`                 | 9.0     | DC-priming target for `ports.supply` |
-| `vrefVolts`                   | 4.5     | DC-priming target for `ports.vref` |
+| `supplyVolts`                 | 9.0     | DC operating-point target for `ports.supply` |
+| `vrefVolts`                   | 4.5     | DC operating-point target for `ports.vref` |
+| `dcNewtonTolerance`           | 1.0e-6  | Newton voltage-delta tolerance for the DC operating-point homotopy specifically (see `poweramp.json`, whose transformer algebraic loop needs a looser value to clear its float32 rounding-noise floor at 400+ V) |
 
 ## Loading a netlist
 
