@@ -156,7 +156,7 @@ cmake --build build-bench --target GuitarDSPMnaBenchmark
 ./build-bench/GuitarDSPMnaBenchmark
 ```
 
-It reports samples/second and structural counters for a 32-stage linear RC ladder and an 8-stage nonlinear diode ladder. Compare results only on the same machine, compiler, build type and CPU power policy.
+It reports samples/second and structural counters for a 32-stage linear RC ladder and an 8-stage nonlinear diode ladder. Compare results only on the same machine, compiler, build type and CPU power policy. As of issue #85 it also reports the component-level preamp/power-amp stages and the `FullAmpCircuit` preamp->power-amp cascade (`runFullAmp`), reporting each stage's own `MnaCircuitEngine` counters since the cascade is two independent engines rather than one combined solve.
 
 ## Next acceleration stages
 
@@ -180,5 +180,56 @@ It reports samples/second and structural counters for a 32-stage linear RC ladde
    than synthetic ladders only.~~ **Done.** `bench/MnaBenchmark.cpp` benchmarks
    TS808/DS-1 (pedals) and, as of issue #54, the component-level preamp and
    power-amp stages as well.
+5. ~~Replace the triode/pentode nonlinear stamps' central-difference Jacobian
+   with an analytic one.~~ **Done (issue #85).** `stampTriode`/`stampPentode`
+   in `MnaCircuitEngineCore.h` used two-sided central differences to build
+   gm/gp(/gscreen) each Newton iteration -- 3 evaluations of
+   `TriodeModel::plateCurrent` per triode stamp, 12 evaluations of
+   `PentodeModel::plateCurrent`/`screenCurrent` per pentode stamp, each of
+   which recomputes the same `exp`/`log1p`/`pow`(/`atan`) chain from scratch.
+   `TriodeModel::plateCurrentJacobian` and `PentodeModel::currentsAndJacobian`
+   (`include/guitardsp/hq/Components.h`) instead derive the exact partials in
+   closed form by chain rule through that same softplus/power-law/atan
+   structure, reusing the `exp`/`log1p`/`pow` calls the current value itself
+   already needs -- 1 model evaluation per triode stamp, 2 per pentode stamp.
+   Current values are bit-for-bit identical to before (same `plateCurrent`/
+   `screenCurrent` functions, now also called by the new methods); only the
+   Jacobian used to build each Newton step changes, which affects the path to
+   convergence, not the converged operating point (see "Nonlinear solver
+   design" in `CLAUDE.md` for why the backtracking line search's
+   backward-error convergence test doesn't depend on which Jacobian
+   approximation produced a candidate step). Regression suite (`ctest`, all
+   50 tests including `PowerAmpCircuitTests`, `FullAmpCircuitTests`,
+   `ThdSweepTests`, `NetlistParityTests`) is unaffected. Measured on this
+   repo's CI-equivalent build (Release, `GUITARDSP_BUILD_BENCHMARKS=ON`;
+   `bench/MnaBenchmark.cpp`'s `runPreamp`/`runPowerAmp`/`runFullAmp`,
+   3-run average, same machine before/after):
+
+   | Stage | Before (central diff) | After (analytic) | Speedup |
+   |---|---|---|---|
+   | Preamp (12AX7 triode) | 4.35% est. CPU | 2.88% est. CPU | ~1.51x |
+   | PowerAmp (EL34 pentode) | 7.72% est. CPU | 3.53% est. CPU | ~2.18x |
+   | FullAmp (cascade) | 12.37% est. CPU | 6.46% est. CPU | ~1.91x |
+
+   ("est. CPU" is `MnaBenchmark`'s `estimated_cpu_percent` -- realtime block
+   processing time as a fraction of wall-clock audio time, single core,
+   independent of the reporter's actual core count.) This beat the
+   conservative pre-implementation estimate (1.5-1.8x PowerAmp, 1.3-1.5x
+   FullAmp based on transcendental-call counting) since PowerAmp's pentode
+   stamp went from 12 model evaluations to 2, larger than the estimate's
+   call-counting assumed.
+6. SIMD (e.g. AVX) intra-core parallelism across nonlinear device evaluations
+   was considered as an alternative to item 5 and set aside for now: a
+   typical stamped circuit has only one triode/pentode per Newton iteration
+   (no SIMD lanes to fill across devices), and the fixed-pattern sparse
+   factorization's column addressing isn't a simple strided/vectorizable
+   access pattern as currently structured. Worth revisiting if matrix
+   factorization/back-substitution becomes the dominant cost after item 5.
+7. A simplified/lower-quality approximate mode for `FullAmpCircuit` at low
+   quality settings was also considered and set aside: profiling for issue
+   #85 found the cascade itself carries no measurable overhead beyond
+   "preamp cost + power-amp cost" (independent single-engine costs sum to
+   within ~0.1% of the measured combined cost), so there is no cascade-specific
+   inefficiency for an approximate mode to remove.
 
 The design rule is unchanged: every optimization must preserve the schematic-facing netlist contract and remain regression-compatible with the dense correctness model.

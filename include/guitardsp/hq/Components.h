@@ -102,6 +102,51 @@ struct TriodeModel {
         }
         return {current, conductance};
     }
+
+    // Plate current plus its exact partials w.r.t. grid and plate voltage,
+    // derived in closed form from plateCurrent()'s softplus/power-law chain
+    // (see docs/MNA_ACCELERATION.md). Reuses the exp/log1p/pow already needed
+    // for the current value itself -- no extra transcendental evaluations --
+    // so this replaces stampTriode's two-sided central-difference gm/gp with
+    // a single analytic pass. gp's formula mirrors linearizePlate()'s
+    // conductance above; gm is the same chain-rule step through d(inner)/dVg
+    // instead of d(inner)/dVp. Current is intentionally left unclamped to the
+    // device's operating envelope here -- stampTriode applies that clamp (and
+    // zeroes the Jacobian outside it, matching what a central difference
+    // straddling the clamp would settle to) since the clamp bound is a stamp
+    // concern, not a device-model one.
+    struct PlateJacobian {
+        float current = 0.0f;
+        float gm = 0.0f; // dI/dVg
+        float gp = 0.0f; // dI/dVp
+    };
+
+    PlateJacobian plateCurrentJacobian(float gridVoltage, float plateVoltage) const noexcept {
+        const float safePlate = std::max(0.0f, plateVoltage);
+        const float root = std::sqrt(kvb + safePlate * safePlate);
+        const float safeRoot = std::max(1.0f, root);
+        const float inner = kp * (1.0f / std::max(1.0f, mu)
+                                + gridVoltage / safeRoot);
+        const float limited = std::clamp(inner, -30.0f, 30.0f);
+        const float exponential = std::exp(limited);
+        const float logTerm = std::log1p(exponential);
+        const float current = 2.0f * std::pow(std::max(0.0f, logTerm), exponent)
+            / std::max(1.0f, kg1);
+
+        float gm = 0.0f;
+        float gp = 0.0f;
+        if (inner > -30.0f && inner < 30.0f && logTerm > 0.0f) {
+            const float softplusSlope = exponential / (1.0f + exponential);
+            const float base = exponent * current / logTerm * softplusSlope;
+            gm = base * (kp / safeRoot);
+            if (plateVoltage > 0.0f && root > 1.0f) {
+                const float innerSlope = -kp * gridVoltage * safePlate
+                    / (root * root * root);
+                gp = base * innerSlope;
+            }
+        }
+        return {current, gm, gp};
+    }
 };
 
 // Koren-style pentode/beam-tetrode power tube model, extending TriodeModel's
@@ -162,6 +207,84 @@ struct PentodeModel {
         // driveTerm but is partitioned by its own perveance kg2 rather than
         // gated by the plate-voltage knee used for plate current.
         return 2.0f * std::pow(std::max(0.0f, logTerm), exponent) / std::max(1.0f, kg2);
+    }
+
+    // Plate current, screen current, and all five partials (dPlate/d{Vg,Vp,Vs},
+    // dScreen/d{Vg,Vs}) from one closed-form evaluation, replacing
+    // stampPentode's 12 central-difference calls into plateCurrent()/
+    // screenCurrent() (each of which recomputes driveTerm's exp/log1p) with a
+    // single shared driveTerm evaluation plus the two pow() calls the current
+    // values need anyway. Derived by chain rule through driveTerm's softplus
+    // (dL/dVg, dL/dVs mirror TriodeModel::plateCurrentJacobian's gm/gp, with
+    // plate voltage replaced by screen voltage) and, for plate current, the
+    // atan "knee" term's own derivative w.r.t. plate voltage. See
+    // docs/MNA_ACCELERATION.md for the full derivation. Currents are left
+    // unclamped to the device envelope here; stampPentode applies that clamp.
+    struct CurrentJacobian {
+        float plateCurrent = 0.0f;
+        float screenCurrent = 0.0f;
+        float dPlateDVg = 0.0f;
+        float dPlateDVp = 0.0f;
+        float dPlateDVs = 0.0f;
+        float dScreenDVg = 0.0f;
+        float dScreenDVs = 0.0f;
+    };
+
+    CurrentJacobian currentsAndJacobian(float gridToCathode, float plateToCathode,
+                                        float screenToCathode) const noexcept {
+        const float safeScreen = std::max(0.0f, screenToCathode);
+        const float rootS = std::sqrt(kvb1 + safeScreen * safeScreen);
+        const float safeRootS = std::max(1.0f, rootS);
+        const float inner = kp * (1.0f / std::max(1.0f, mu)
+                                + gridToCathode / safeRootS);
+        const float limited = std::clamp(inner, -30.0f, 30.0f);
+        const float exponential = std::exp(limited);
+        const float logTerm = std::log1p(exponential);
+        const float clampedLog = std::max(0.0f, logTerm);
+
+        const float kg1Safe = std::max(1.0f, kg1);
+        const float kg2Safe = std::max(1.0f, kg2);
+        const float spaceCharge = 2.0f * std::pow(clampedLog, exponent) / kg1Safe;
+        const float screen = 2.0f * std::pow(clampedLog, exponent) / kg2Safe;
+
+        float dLdVg = 0.0f;
+        float dLdVs = 0.0f;
+        if (inner > -30.0f && inner < 30.0f && logTerm > 0.0f) {
+            const float softplusSlope = exponential / (1.0f + exponential);
+            dLdVg = softplusSlope * (kp / safeRootS);
+            if (screenToCathode > 0.0f && rootS > 1.0f) {
+                dLdVs = softplusSlope
+                    * (-kp * gridToCathode * safeScreen / (rootS * rootS * rootS));
+            }
+        }
+
+        constexpr float twoOverPi = 0.63661977236758134f;
+        const float kvbSafe = std::max(1.0e-3f, kvb);
+        const float safePlate = std::max(0.0f, plateToCathode);
+        const float kneeArg = safePlate / kvbSafe;
+        const float knee = std::atan(kneeArg) * twoOverPi;
+
+        float dKneeDVp = 0.0f;
+        if (plateToCathode > 0.0f) {
+            dKneeDVp = twoOverPi / (kvbSafe * (1.0f + kneeArg * kneeArg));
+        }
+
+        float dSpaceDL = 0.0f;
+        float dScreenDL = 0.0f;
+        if (clampedLog > 0.0f) {
+            dSpaceDL = exponent * spaceCharge / clampedLog;
+            dScreenDL = exponent * screen / clampedLog;
+        }
+
+        CurrentJacobian result;
+        result.plateCurrent = spaceCharge * knee;
+        result.screenCurrent = screen;
+        result.dPlateDVg = dSpaceDL * dLdVg * knee;
+        result.dPlateDVp = spaceCharge * dKneeDVp;
+        result.dPlateDVs = dSpaceDL * dLdVs * knee;
+        result.dScreenDVg = dScreenDL * dLdVg;
+        result.dScreenDVs = dScreenDL * dLdVs;
+        return result;
     }
 };
 
