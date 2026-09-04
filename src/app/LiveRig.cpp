@@ -5,6 +5,7 @@
 #include "guitardsp/graph/RigTopologyBuilder.h"
 #include "guitardsp/hq/BassAmpNode.h"
 #include "guitardsp/hq/CabinetChainNode.h"
+#include "guitardsp/hq/CompressorCircuitNode.h"
 
 #include <algorithm>
 #include <memory>
@@ -113,7 +114,14 @@ void applySettings(graph::Graph& graph, const graph::GraphDocument& document,
         auto* node = graph.node(mapping->second);
         if (!node) continue;
 
-        if (nodeDoc.typeId == "drive.ts808_circuit_hq" || nodeDoc.typeId == "drive.ds1_circuit_hq") {
+        if (nodeDoc.typeId == "dynamics.compressor_circuit_hq") {
+            node->setParameterValue(0, settings.compressorMakeupGain);
+        } else if (nodeDoc.typeId == "time.digital_delay") {
+            node->setParameterValue(0, settings.delayTimeMs);
+            node->setParameterValue(1, settings.delayFeedback);
+            node->setParameterValue(2, settings.delayTone);
+            node->setParameterValue(3, settings.delayMix);
+        } else if (nodeDoc.typeId == "drive.ts808_circuit_hq" || nodeDoc.typeId == "drive.ds1_circuit_hq") {
             setPedalParameters(*node, settings);
         } else if (nodeDoc.typeId == "amp.reference_hq" || nodeDoc.typeId == "amp.british_plexi_family_hq"
                    || nodeDoc.typeId == "amp.american_clean_family_hq"
@@ -149,11 +157,16 @@ void applySettings(graph::Graph& graph, const graph::GraphDocument& document,
 // behaviour byte-for-byte identical while routing it through GraphBuilder.
 RoutingTopology buildLiveRigTopology(const LiveRigSettings& settings) {
     std::vector<ChainNodeSpec> mainChain;
+    // Dynamics up front (ahead of drive), time-based effects at the tail
+    // (after the cabinet) -- the conventional guitar signal-chain ordering
+    // agreed in issue #83.
+    if (settings.compressorEnabled) mainChain.push_back({"dynamics.compressor_circuit_hq", {}});
     if (const char* pedal = pedalTypeId(settings)) mainChain.push_back({pedal, {}});
     if (settings.ampEnabled) {
         if (const char* amp = ampTypeId(settings)) mainChain.push_back({amp, {}});
     }
     if (settings.cabinetEnabled) mainChain.push_back({"cab.chain_hq", {}});
+    if (settings.delayEnabled) mainChain.push_back({"time.digital_delay", {}});
 
     RoutingTopology topology;
     if (settings.signalRouting == SignalRouting::serialGuitar) {
@@ -187,9 +200,11 @@ const char* monitorTapPointLabel(MonitorTapPoint point) noexcept {
     switch (point) {
         case MonitorTapPoint::physicalInput: return "INPUT (physical)";
         case MonitorTapPoint::physicalOutput: return "OUTPUT (physical)";
+        case MonitorTapPoint::compressorOutput: return "COMPRESSOR out";
         case MonitorTapPoint::pedalOutput: return "CIRCUIT PEDAL out";
         case MonitorTapPoint::ampOutput: return "GUITAR AMPLIFIER out";
         case MonitorTapPoint::cabinetOutput: return "SPEAKER+CABINET out";
+        case MonitorTapPoint::delayOutput: return "DELAY out";
         case MonitorTapPoint::octaveOutput: return "OCTAVE (bass branch) out";
         case MonitorTapPoint::bassAmpOutput: return "BASS AMP out";
         case MonitorTapPoint::bassCabinetOutput: return "BASS CABINET out";
@@ -199,9 +214,11 @@ const char* monitorTapPointLabel(MonitorTapPoint point) noexcept {
 
 std::vector<MonitorTapPoint> availableMonitorTapPoints(const LiveRigSettings& settings) {
     std::vector<MonitorTapPoint> points{MonitorTapPoint::physicalInput, MonitorTapPoint::physicalOutput};
+    if (settings.compressorEnabled) points.push_back(MonitorTapPoint::compressorOutput);
     if (pedalTypeId(settings) != nullptr) points.push_back(MonitorTapPoint::pedalOutput);
     if (settings.ampEnabled && ampTypeId(settings) != nullptr) points.push_back(MonitorTapPoint::ampOutput);
     if (settings.cabinetEnabled) points.push_back(MonitorTapPoint::cabinetOutput);
+    if (settings.delayEnabled) points.push_back(MonitorTapPoint::delayOutput);
     if (settings.signalRouting != SignalRouting::serialGuitar) {
         // Bass branch always has amp.bass_reference_hq (see
         // buildLiveRigTopology()); octave/bass-cabinet stages inside it are
