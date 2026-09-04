@@ -1,4 +1,5 @@
 #include "guitardsp/circuit/DS1Circuit.h"
+#include "guitardsp/circuit/FullAmpCircuit.h"
 #include "guitardsp/circuit/MnaCircuitEngine.h"
 #include "guitardsp/circuit/PowerAmpCircuit.h"
 #include "guitardsp/circuit/PreampCircuit.h"
@@ -211,6 +212,40 @@ void runPowerAmp(double sampleRate, const std::string& label) {
               << " cached_linear_unknowns=" << c.engine().sparseNonlinearCachedLinearUnknowns()
               << '\n';
 }
+
+// FullAmpCircuit cascades two independently prepared engines (see its header
+// comment / issue #41), so its per-sample cost is the sum of the preamp and
+// power-amp engines' own Newton work, not a single combined solve. Reported
+// separately per stage (issue #85) so the cascade's cost can be attributed to
+// whichever stage actually dominates it.
+void runFullAmp(double sampleRate, const std::string& label) {
+    circuit::FullAmpCircuit c;
+    if (!c.prepare(sampleRate)) return;
+    c.preamp().engine().resetPerformanceStats();
+    c.powerAmp().engine().resetPerformanceStats();
+
+    const auto samples = static_cast<std::size_t>(sampleRate * 2.0);
+    const auto begin = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < samples; ++i) {
+        const float phase = static_cast<float>(i % 480U) / 480.0f;
+        c.processSample(0.35f * std::sin(phase * 6.28318530718f));
+    }
+    const auto end = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(end - begin).count();
+    const auto preampStats = c.preamp().engine().performanceStats();
+    const auto powerAmpStats = c.powerAmp().engine().performanceStats();
+    std::cout << "fullamp_" << label << " sample_rate=" << sampleRate
+              << " samples=" << samples
+              << " seconds=" << seconds
+              << " samples_per_second=" << static_cast<double>(samples) / seconds
+              << " estimated_cpu_percent="
+              << (sampleRate / (static_cast<double>(samples) / seconds)) * 100.0
+              << " preamp_nonlinear_assemblies=" << preampStats.nonlinearAssemblies
+              << " preamp_sparse_newton_solves=" << preampStats.sparseNewtonSolves
+              << " poweramp_nonlinear_assemblies=" << powerAmpStats.nonlinearAssemblies
+              << " poweramp_sparse_newton_solves=" << powerAmpStats.sparseNewtonSolves
+              << '\n';
+}
 }
 
 int main() {
@@ -222,5 +257,6 @@ int main() {
     runDs1(96000.0, "eco2x_96k");
     runPreamp(48000.0, "1x_48k");
     runPowerAmp(48000.0, "1x_48k");
+    runFullAmp(48000.0, "1x_48k");
     return 0;
 }
