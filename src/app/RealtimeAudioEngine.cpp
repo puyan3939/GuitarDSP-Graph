@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <numbers>
+#include <optional>
 
 namespace guitardsp::app {
 
@@ -133,6 +134,7 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
     if (!configured_ || outputChannels == nullptr || numOutputChannels <= 0) return;
 
     const auto callbackStarted = std::chrono::steady_clock::now();
+    const auto cpuStarted = currentThreadCpuTimeNanoseconds();
     const float inputGain = inputGain_.load(std::memory_order_acquire);
     const float outputGain = outputGain_.load(std::memory_order_acquire);
     const float ceiling = safetyCeiling_.load(std::memory_order_acquire);
@@ -348,8 +350,17 @@ void RealtimeAudioEngine::process(const float* const* inputChannels,
 
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - callbackStarted).count();
+
+    std::optional<std::uint64_t> cpuElapsed;
+    if (cpuStarted.has_value()) {
+        if (const auto cpuEnded = currentThreadCpuTimeNanoseconds();
+            cpuEnded.has_value() && *cpuEnded >= *cpuStarted)
+            cpuElapsed = *cpuEnded - *cpuStarted;
+    }
+
     performance_.recordCallback(numSamples,
-        static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed)));
+        static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed)),
+        cpuElapsed);
 }
 
 } // namespace guitardsp::app

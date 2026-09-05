@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <optional>
 
 namespace {
 
@@ -62,6 +63,37 @@ int main() {
         ok &= require(timing.callbacks == 0 && timing.percentile95Load == 0.0f
                           && timing.percentile99Load == 0.0f,
                       "performance reset clears both realtime percentile histograms");
+    }
+
+    {
+        app::RealtimePerformanceMonitor monitor;
+        monitor.prepare(48000.0);
+
+        auto timing = monitor.snapshot();
+        ok &= require(!timing.cpuTimeAvailable && timing.cpuAverageLoad == 0.0f
+                          && timing.cpuPeakLoad == 0.0f,
+                      "cpu-time load defaults to unavailable/zero before any measurement");
+
+        // 0.25 ms / 1.00 ms budget: exercises the CPU-time-supplied overload
+        // alongside the existing wall-clock-only one above without changing
+        // wall-clock computation.
+        monitor.recordCallback(48, 500000, std::optional<std::uint64_t>(250000));
+        timing = monitor.snapshot();
+        ok &= require(timing.cpuTimeAvailable
+                          && std::abs(timing.cpuAverageLoad - 0.25f) < 1.0e-6f
+                          && std::abs(timing.averageLoad - 0.5f) < 1.0e-6f,
+                      "cpu-time load tracks separately from wall-clock load when supplied");
+
+        monitor.recordCallback(48, 1250000, std::optional<std::uint64_t>(1000000));
+        timing = monitor.snapshot();
+        ok &= require(std::abs(timing.cpuPeakLoad - 1.0f) < 1.0e-6f,
+                      "cpu-time load retains its own peak independent of wall-clock peak");
+
+        monitor.reset();
+        timing = monitor.snapshot();
+        ok &= require(!timing.cpuTimeAvailable && timing.cpuAverageLoad == 0.0f
+                          && timing.cpuPeakLoad == 0.0f,
+                      "performance reset clears cpu-time load alongside wall-clock load");
     }
 
     app::LiveRigSettings settings;
