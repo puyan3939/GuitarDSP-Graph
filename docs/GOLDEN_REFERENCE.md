@@ -134,13 +134,19 @@ including PowerAmp/Compressor), and is not superseded for those circuits.
 
 ## Known caveat: TS808 `full` variant
 
-The `ts808_*_full.txt` golden files (drive = tone = level = 1.0) contain
-very large-magnitude samples (RMS on the order of 10^3-10^8, e.g. the sweep
-file), well beyond a plausible clipped-diode output. This looks like a
-genuine Newton-solver divergence at that specific extreme parameter corner
-rather than intended circuit behavior -- see the issue #88 implementation
-report for details. It's captured as-is because that's the point of a
-golden reference (freeze current behavior, bugs included, so a future fix
-is a visible, intentional diff against this file); it is not fixed by this
-change. Treat those four files as unusually solver-sensitive when comparing
-against them.
+The five `ts808_*_full.txt` golden files (drive = tone = level = 1.0)
+contain very large-magnitude samples (RMS on the order of 10^3-10^8, e.g.
+the sweep file), well beyond a plausible clipped-diode output. This looks
+like a genuine Newton-solver divergence at that specific extreme parameter
+corner rather than intended circuit behavior -- see the issue #88
+implementation report for details, and issue #91 for confirmation that the
+same divergence still reproduces (with different exact numbers) after
+`MnaCircuitEngine::solveDcOperatingPoint()`-based DC initialization, so it
+is a runtime Newton-solve property, not a `prepare()`-time artifact. It's
+captured as-is because that's the point of a golden reference (freeze
+current behavior, bugs included, so a future fix is a visible, intentional
+diff against this file); it is not fixed by this change. These five cases
+are listed in `tests/golden/MANIFEST.json`'s `knownBad` array, which
+`golden_reference` reads to still report (but not fail on) their actual max
+error -- see `tests/GoldenReferenceTests.cpp`'s `loadKnownBad()`. Treat
+those five files as unusually solver-sensitive when comparing against them.

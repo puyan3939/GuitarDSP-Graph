@@ -745,6 +745,65 @@ public:
         return stats;
     }
 
+    // A single DC operating-point Newton solve at the circuit's *current*
+    // independent-source values: capacitors are treated as open (i = C dv/dt
+    // = 0 at DC) and inductors collapse to a plain resistor equal to their
+    // series resistance (0 ohm = an ideal short), by driving the trapezoidal
+    // companion model's coefficients to zero for the duration of this call --
+    // see rebuildStaticCache()'s `dcAnalysisActive_` branch and
+    // addDynamicRhs()'s early return below. The nonlinear solve itself is
+    // exactly processSample()'s Newton loop (line search, trust region,
+    // sparse/dense dispatch, diode junction-voltage reuse, everything) so a
+    // caller doing source-stepping continuation across many small voltage
+    // steps -- see TS808Circuit::primeOperatingPoint() for the pattern this
+    // is meant to replace -- gets the identical globalization guarantees a
+    // transient step gets. See the "Nonlinear solver design" note in
+    // CLAUDE.md for why that shared machinery, not a bespoke DC-only Newton
+    // loop, is the required approach for any new solve path.
+    //
+    // Does not touch capacitor/inductor companion history; call
+    // commitOperatingPointAsSteadyState() once a homotopy has finished
+    // ramping to its final target to seed that history from the converged
+    // solution before resuming normal transient processSample() calls.
+    SolveStats solveDcOperatingPoint(int maximumNewtonIterations = 40,
+                                     float tolerance = 1.0e-6f) noexcept {
+        const bool wasActive = dcAnalysisActive_;
+        dcAnalysisActive_ = true;
+        staticCacheDirty_ = true;
+        const SolveStats stats = processSample(maximumNewtonIterations, tolerance);
+        dcAnalysisActive_ = wasActive;
+        staticCacheDirty_ = true;
+        return stats;
+    }
+
+    // Seeds every capacitor/inductor's trapezoidal companion history from the
+    // most recent solveDcOperatingPoint() solution, so the next transient
+    // processSample() starts already at that equilibrium instead of cold
+    // (all-zero) state. A capacitor carries zero current at DC by
+    // definition; an inductor carries whatever DC current its solved branch
+    // equation implies (nonzero only if it has series resistance).
+    void commitOperatingPointAsSteadyState() noexcept {
+        for (auto& c : capacitors_) {
+            c.previousVoltage = voltage(c.a, c.b);
+            c.previousCurrent = 0.0f;
+        }
+        for (auto& l : inductors_) {
+            l.previousVoltage = voltage(l.a, l.b);
+            l.previousCurrent = l.branchIndex < solution_.size() ? solution_[l.branchIndex] : 0.0f;
+        }
+        previousSampleSolutionValid_ = false;
+        // solveDcOperatingPoint() always leaves staticCacheDirty_ set (the
+        // real-dt companion coefficients still need recomputing after the
+        // dt->infinity DC stamps). Rebuild it here, eagerly, rather than
+        // leaving it for the caller's first transient processSample(): a
+        // deferred rebuild would otherwise be charged to that first
+        // post-prepare() sample, which several tests (e.g.
+        // PreampCircuitTests' "prolonged silence preserves the cached
+        // physical operating point") assert never happens once
+        // performance counters are reset after prepare().
+        rebuildStaticCache();
+    }
+
     float voltage(Node node) const noexcept {
         if (node == ground) return 0.0f;
         const auto index = nodeIndex(node);
@@ -1058,7 +1117,16 @@ private:
     void rebuildStaticCache() noexcept {
         std::fill(staticMatrix_.begin(), staticMatrix_.end(), 0.0f);
         std::fill(staticRhs_.begin(), staticRhs_.end(), 0.0f);
-        const float dt = 1.0f / static_cast<float>(sampleRate_);
+        // A DC operating-point solve (dcAnalysisActive_) reuses this exact
+        // stamping code with dt -> infinity: a capacitor's companion
+        // conductance 2C/dt and an inductor's companion alpha 2L/dt both
+        // collapse to exactly 0.0f (finite / infinite is well-defined in
+        // IEEE 754), which is precisely "open circuit" for a capacitor and
+        // "resistor equal to series resistance" (0 ohm = ideal short) for an
+        // inductor -- see solveDcOperatingPoint() above.
+        const float dt = dcAnalysisActive_
+            ? std::numeric_limits<float>::infinity()
+            : 1.0f / static_cast<float>(sampleRate_);
 
         for (const auto& r : resistors_) {
             const float resistance = std::max(1.0e-6f, r.spec.resistanceOhms);
@@ -1124,6 +1192,16 @@ private:
     void addDynamicRhs(std::vector<float>& rhs) const noexcept {
         for (const auto& source : voltageSources_)
             rhs[source.branchIndex] += source.volts;
+
+        // A capacitor's history term is already zero in DC mode because
+        // dt = infinity drives companionConductance to exactly 0.0f (see the
+        // `continue` below). An inductor's is not: historyVoltage still
+        // carries a `-previousVoltage` term even with companionAlpha == 0,
+        // which would bias the DC solve away from the plain-resistor model
+        // solveDcOperatingPoint() relies on. Skip both loops outright so a
+        // DC solve sees an untouched open/short system with no leftover
+        // transient history.
+        if (dcAnalysisActive_) return;
 
         for (const auto& c : capacitors_) {
             if (c.companionConductance <= 0.0f) continue;
@@ -1788,6 +1866,7 @@ private:
     double sampleRate_ = 48000.0;
     bool prepared_ = false;
     bool staticCacheDirty_ = true;
+    bool dcAnalysisActive_ = false;
     bool linearFactorValid_ = false;
     NonlinearSolverMode nonlinearSolverMode_ = NonlinearSolverMode::automatic;
     double nonlinearResidualTolerance_ = 3.0e-7;

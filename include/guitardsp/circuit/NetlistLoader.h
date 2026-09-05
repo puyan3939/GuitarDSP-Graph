@@ -155,18 +155,6 @@ public:
 
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         engine_.setNonlinearResidualTolerance(sim_.nonlinearResidualTolerance);
-
-        const auto warmSamples = static_cast<std::size_t>(std::clamp(
-            sampleRate_ * sim_.warmupSecondsFraction,
-            static_cast<double>(sim_.warmupMinSamples),
-            static_cast<double>(sim_.warmupMaxSamples)));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(sim_.newtonMaxIterations, sim_.newtonTolerance);
-            if (lastSolve_.singular || !allNodesFinite()) return fail("circuit diverged during warm-up");
-            updateTransformerSaturation();
-            updateOpticalCouplers();
-        }
         return true;
     }
 
@@ -653,16 +641,34 @@ private:
     }
 
     bool primeOperatingPoint(bool hasVref) noexcept {
+        // Each step is a DC operating-point solve (capacitors open, inductors
+        // shorted -- see MnaCircuitEngine::solveDcOperatingPoint()), not a
+        // transient step, so the source-stepping homotopy converges directly
+        // to the circuit's true DC equilibrium instead of needing a separate
+        // silent warm-up afterward. Mirrors the equivalent change in the
+        // hand-written *Circuit::primeOperatingPoint() methods this format
+        // is required to stay numerically identical to (see
+        // tests/NetlistParityTests.cpp).
         for (int step = 1; step <= sim_.sourceSteps; ++step) {
             const float t = static_cast<float>(step) / static_cast<float>(sim_.sourceSteps);
             engine_.setVoltageSource(supplySource_, sim_.supplyVolts * t);
             if (hasVref) engine_.setVoltageSource(vrefSource_, sim_.vrefVolts * t);
             engine_.setVoltageSource(inputSource_, 0.0f);
             for (int settle = 0; settle < sim_.solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
+                lastSolve_ = engine_.solveDcOperatingPoint(40, 1.0e-6f);
                 if (lastSolve_.singular || !allNodesFinite()) return false;
             }
         }
+        // Must run before commitOperatingPointAsSteadyState(): both can call
+        // setInductorSpec()/setResistance() (if a transformer's saturated
+        // magnetizing inductance or an LDR's resistance moved from its
+        // construction-time default), which dirties the static cache again.
+        // Doing that before the commit's own eager rebuild folds both into
+        // the same rebuild, instead of leaving a second one pending for the
+        // first post-prepare() transient sample.
+        updateTransformerSaturation();
+        updateOpticalCouplers();
+        engine_.commitOperatingPointAsSteadyState();
         return true;
     }
 
