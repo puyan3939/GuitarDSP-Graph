@@ -1,5 +1,5 @@
 {
-    "commit": "581e83445508f68a8e5c7cb10dcf614a38d20b58",
+    "commit": "4d6505c5359144b1d43a67e72fab6c2b0f4bb9e8",
     "compiler": "gcc 13.3.0",
     "cmakePreset": "golden",
     "sampleRateHz": 48000,

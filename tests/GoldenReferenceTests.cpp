@@ -63,7 +63,16 @@ namespace {
 #define GUITARDSP_NETLIST_DATA_DIR "data/circuits"
 #endif
 
-// Loose on purpose -- see the file header comment above.
+// Loose on purpose -- see the file header comment above. This value is
+// provisional and has no measured basis: a direct Release-vs-GOLDEN-preset
+// sample-by-sample diff of all 50 files on this machine/compiler (gcc
+// 13.3.0) came back bit-exact (0 error) after the DC operating-point change
+// in issue #91, so there is no observed non-zero error to derive a tighter
+// or relative bound from yet. Once measurements from other
+// environments/compilers accumulate, consider moving to a per-file
+// tolerance relative to that file's RMS instead of this fixed absolute
+// value -- at -20 dBFS (amplitude 0.1) this constant is already 2% of the
+// signal, which may be too loose to catch a real regression.
 constexpr double kToleranceAbsolute = 2.0e-3;
 
 bool require(bool condition, const std::string& name) {
