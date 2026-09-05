@@ -218,13 +218,6 @@ public:
         // floor caused endless 40-step limit cycles even at silence. Match both
         // convergence criteria while retaining every component and exact stamp.
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 0.06, 512.0, 4096.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-        }
         return true;
     }
 
@@ -333,6 +326,11 @@ private:
     }
 
     bool primeOperatingPoint() noexcept {
+        // Each step is a DC operating-point solve (capacitors open, inductors
+        // shorted -- see MnaCircuitEngine::solveDcOperatingPoint()), not a
+        // transient step, so the source-stepping homotopy converges to the
+        // circuit's true DC equilibrium rather than to a point still partway
+        // through a capacitor's charge transient.
         constexpr int sourceSteps = 128;
         constexpr int solvesPerStep = 2;
         for (int step = 1; step <= sourceSteps; ++step) {
@@ -341,10 +339,11 @@ private:
             engine_.setVoltageSource(vrefSource_, 4.5f * t);
             engine_.setVoltageSource(inputSource_, 0.0f);
             for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
+                lastSolve_ = engine_.solveDcOperatingPoint(40, 1.0e-6f);
                 if (lastSolve_.singular || !finiteStages()) return false;
             }
         }
+        engine_.commitOperatingPointAsSteadyState();
         return true;
     }
 

@@ -126,19 +126,6 @@ public:
         // single Newton solve instead of limit-cycling near the noise floor.
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-
-        // The passive tone stack's slowest coupling-cap time constant is on
-        // the order of 100 ms (1 uF output coupling into a ~100 k load), much
-        // slower than TS808/DS1's millisecond-scale pedal RC networks, so
-        // this stage needs a proportionally longer silent warm-up to reach a
-        // settled DC operating point before audio processing begins.
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 0.6, 8192.0, 65536.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-        }
         return true;
     }
 
@@ -233,7 +220,12 @@ private:
         // slightly higher supply voltage. It runs only during prepare(),
         // never on the audio thread. The 300 V B+ swing is much larger than
         // TS808/DS1's 9 V rail, so this uses more steps and an extra solve
-        // per step to keep each Newton jump small.
+        // per step to keep each Newton jump small. Each step is a DC
+        // operating-point solve (capacitors open, inductors shorted -- see
+        // MnaCircuitEngine::solveDcOperatingPoint()), not a transient step,
+        // so the homotopy converges to the true DC equilibrium directly
+        // instead of needing a separate multi-hundred-millisecond silent
+        // warm-up afterward to wait out the output coupling cap's transient.
         constexpr int sourceSteps = 200;
         constexpr int solvesPerStep = 3;
         for (int step = 1; step <= sourceSteps; ++step) {
@@ -241,10 +233,11 @@ private:
             engine_.setVoltageSource(supplySource_, supplyVolts * t);
             engine_.setVoltageSource(inputSource_, 0.0f);
             for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
+                lastSolve_ = engine_.solveDcOperatingPoint(40, 1.0e-6f);
                 if (lastSolve_.singular || !finiteStages()) return false;
             }
         }
+        engine_.commitOperatingPointAsSteadyState();
         return true;
     }
 

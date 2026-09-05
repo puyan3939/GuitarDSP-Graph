@@ -127,19 +127,6 @@ public:
         // limit-cycling near the noise floor.
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-
-        // A transformer-coupled power stage's dominant time constant is the
-        // cathode bypass cap's RC (47 uF into ~1.2k is tens of ms), similar
-        // order to PreampCircuit's output coupling, so a comparable silent
-        // warm-up is used before audio processing begins.
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 0.6, 8192.0, 65536.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-            updateOutputTransformerSaturation();
-        }
         return true;
     }
 
@@ -200,7 +187,13 @@ private:
         // never on the audio thread. The 420 V B+ swing is larger than
         // PreampCircuit's 300 V rail, so this uses more steps to keep each
         // Newton jump small at the higher voltages a pentode's screen/plate
-        // stamps operate at.
+        // stamps operate at. Each step is a DC operating-point solve
+        // (capacitors open, inductors shorted -- see
+        // MnaCircuitEngine::solveDcOperatingPoint()), not a transient step,
+        // so the output transformer's magnetizing/leakage inductances and the
+        // cathode bypass cap's tens-of-ms RC all reach their true DC
+        // equilibrium directly, instead of needing a separate silent
+        // warm-up afterward.
         constexpr int sourceSteps = 280;
         constexpr int solvesPerStep = 3;
         for (int step = 1; step <= sourceSteps; ++step) {
@@ -208,10 +201,18 @@ private:
             engine_.setVoltageSource(supplySource_, supplyVolts * t);
             engine_.setVoltageSource(inputSource_, 0.0f);
             for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
+                lastSolve_ = engine_.solveDcOperatingPoint(40, 1.0e-6f);
                 if (lastSolve_.singular || !finiteStages()) return false;
             }
         }
+        // Must run before commitOperatingPointAsSteadyState(): it can call
+        // setInductorSpec() (if the saturated magnetizing inductance moved
+        // from its reset() default), which dirties the static cache again.
+        // Doing that before the commit's own eager rebuild folds both into
+        // the same rebuild, instead of leaving a second one pending for the
+        // first post-prepare() transient sample.
+        updateOutputTransformerSaturation();
+        engine_.commitOperatingPointAsSteadyState();
         return true;
     }
 

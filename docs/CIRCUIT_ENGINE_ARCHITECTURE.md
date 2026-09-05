@@ -26,6 +26,16 @@ The engine/subcircuit layer currently supports:
 - arbitrary node graphs with ground node 0
 - partial-pivot Gaussian elimination and convergence/singular statistics
 - mild startup damping for nonlinear Newton solves
+- a DC operating-point solve (`MnaCircuitEngine::solveDcOperatingPoint()` /
+  `commitOperatingPointAsSteadyState()`): capacitors open, inductors reduced
+  to their series resistance, solved with the same Newton/line-search
+  machinery as `processSample()`. `TS808Circuit`/`DS1Circuit`/
+  `PreampCircuit`/`PowerAmpCircuit`/`CompressorCircuit`/`NetlistLoader`'s
+  existing supply-ramp source-stepping homotopy calls this instead of a
+  transient step at each rung, then seeds capacitor/inductor companion
+  history from the converged solution -- replacing the ad hoc silent
+  transient warm-up each of those `prepare()` methods used to run
+  afterward. See issue #91.
 
 The component values come from `ComponentCatalog.h`, so nominal value, rating/tolerance metadata and nonlinear DSP parameters remain distinct.
 

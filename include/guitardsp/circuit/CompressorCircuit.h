@@ -138,21 +138,6 @@ public:
 
         engine_.setNonlinearSolverMode(MnaCircuitEngine::NonlinearSolverMode::automatic);
         engine_.setNonlinearResidualTolerance(2.0e-5f);
-
-        // The envelope bleed network's release RC is ~100 ms by design (see the
-        // class comment), and the cascaded buffer/peak-detector op-amp stages
-        // add their own slower settling on top of that, so the warm-up needs
-        // well over a second -- not just a few RC multiples of the fastest
-        // network -- before silence-at-rest is truly settled rather than
-        // still visibly decaying.
-        const auto warmSamples = static_cast<std::size_t>(
-            std::clamp(sampleRate_ * 1.5, 16384.0, 98304.0));
-        for (std::size_t i = 0; i < warmSamples; ++i) {
-            engine_.setVoltageSource(inputSource_, 0.0f);
-            lastSolve_ = engine_.processSample(40, 2.0e-5f);
-            if (lastSolve_.singular || !finiteStages()) return false;
-            updateLdrResistance();
-        }
         return true;
     }
 
@@ -205,7 +190,13 @@ private:
         // Source stepping is a standard nonlinear-circuit continuation
         // technique: each solution becomes the initial guess for the next
         // slightly higher supply voltage. It runs only during prepare(),
-        // never on the audio thread.
+        // never on the audio thread. Each step is a DC operating-point solve
+        // (capacitors open, inductors shorted -- see
+        // MnaCircuitEngine::solveDcOperatingPoint()), not a transient step,
+        // so the homotopy converges to the circuit's true DC equilibrium --
+        // including the sidechain envelope's ~100 ms release network -- in a
+        // single pass rather than needing a multi-second silent warm-up to
+        // wait that transient out.
         constexpr int sourceSteps = 128;
         constexpr int solvesPerStep = 2;
         for (int step = 1; step <= sourceSteps; ++step) {
@@ -214,10 +205,18 @@ private:
             engine_.setVoltageSource(vrefSource_, 4.5f * t);
             engine_.setVoltageSource(inputSource_, 0.0f);
             for (int settle = 0; settle < solvesPerStep; ++settle) {
-                lastSolve_ = engine_.processSample(40, 1.0e-6f);
+                lastSolve_ = engine_.solveDcOperatingPoint(40, 1.0e-6f);
                 if (lastSolve_.singular || !finiteStages()) return false;
             }
         }
+        // Must run before commitOperatingPointAsSteadyState(): it can call
+        // setResistance() (if the LDR's drive-dependent resistance moved
+        // from its construction-time default), which dirties the static
+        // cache again. Doing that before the commit's own eager rebuild
+        // folds both into the same rebuild, instead of leaving a second one
+        // pending for the first post-prepare() transient sample.
+        updateLdrResistance();
+        engine_.commitOperatingPointAsSteadyState();
         return true;
     }
 
