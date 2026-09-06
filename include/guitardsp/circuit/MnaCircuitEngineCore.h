@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +46,16 @@ public:
         int iterations = 0;
         bool converged = true;
         bool singular = false;
+        // True when the caller-requested Newton iteration budget (the
+        // `maximumNewtonIterations` argument to processSample()/
+        // solveDcOperatingPoint()) fell outside [1, 80] and was silently
+        // clamped into range. A caller that reads this as always false when
+        // it expected a larger budget to take effect (e.g. a JSON netlist's
+        // `newtonMaxIterations` override, see NetlistLoader.h) has found a
+        // real misconfiguration -- see issue #96, where this clamp already
+        // silently overrode every caller's requested value once before it
+        // was noticed.
+        bool iterationBudgetClamped = false;
     };
 
     struct PerformanceStats {
@@ -462,7 +473,19 @@ public:
         // was measured too (0.242% non-convergence, average 9.944) but rejected:
         // the marginal gain over 80 is small while the worst-case per-sample
         // cost keeps growing linearly with the budget.
+        const int requestedNewtonIterations = maximumNewtonIterations;
         maximumNewtonIterations = std::clamp(maximumNewtonIterations, 1, 80);
+        stats.iterationBudgetClamped = requestedNewtonIterations != maximumNewtonIterations;
+        // Catch a misconfigured caller (e.g. a hand-edited netlist's
+        // `newtonMaxIterations` set above 80) the moment it happens rather
+        // than only via the SolveStats flag above, which nothing is
+        // required to check. This assert costs nothing in a release build
+        // (NDEBUG strips it) and never changes what gets solved -- the
+        // clamp above already ran.
+        assert(!stats.iterationBudgetClamped
+            && "MnaCircuitEngine::processSample(): requested Newton iteration "
+               "budget was clamped to [1, 80] -- see the comment above this "
+               "clamp (issue #96) and SolveStats::iterationBudgetClamped");
         tolerance = std::max(1.0e-9f, tolerance);
         const bool nonlinear = hasNonlinearDevices();
 
