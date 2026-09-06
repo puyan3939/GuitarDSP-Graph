@@ -199,6 +199,7 @@ public:
         addAndMakeVisible(meterLabel_);
         addAndMakeVisible(routingLabel_);
         addAndMakeVisible(performanceLabel_);
+        addAndMakeVisible(cpuLoadLabel_);
         addAndMakeVisible(latencyLabel_);
         addAndMakeVisible(safetyLabel_);
         addAndMakeVisible(thdLabel_);
@@ -674,6 +675,7 @@ public:
             routingLabel_.setBounds(right.removeFromTop(22));
             meterLabel_.setBounds(right.removeFromTop(22));
             performanceLabel_.setBounds(right.removeFromTop(22));
+            cpuLoadLabel_.setBounds(right.removeFromTop(20));
             latencyLabel_.setBounds(right.removeFromTop(22));
             safetyLabel_.setBounds(right.removeFromTop(22));
             thdLabel_.setBounds(right.removeFromTop(22));
@@ -1378,13 +1380,37 @@ private:
         const int xruns = std::max(0, deviceManager_.getXRunCount() - xRunBaseline_);
         performanceLabel_.setText(
             "Driver CPU: " + juce::String(driverCpu, 1)
-                + "%    Callback avg: " + juce::String(callbackCpu, 1)
+                + "%    Callback avg (wall): " + juce::String(callbackCpu, 1)
                 + "%    P99: " + juce::String(callbackP99, 1)
                 + "%    Peak: " + juce::String(callbackPeak, 1)
                 + "%    Deadline misses: "
                 + juce::String(static_cast<juce::int64>(stats.performance.deadlineMisses))
                 + "    XRUNs: " + juce::String(xruns),
             juce::dontSendNotification);
+
+        // Callback avg above is wall-clock elapsed time (steady_clock), which
+        // includes any time this thread spent preempted/waiting for the OS
+        // scheduler, not just time actually spent computing. Thread CPU time
+        // (clock_gettime(CLOCK_THREAD_CPUTIME_ID) where available) excludes
+        // that wait, so a large gap between the two here points at scheduling
+        // contention rather than DSP cost; a small gap means the callback is
+        // genuinely compute-bound.
+        if (stats.performance.cpuTimeAvailable) {
+            const double cpuAvg = 100.0 * static_cast<double>(stats.performance.cpuAverageLoad);
+            const double cpuPeak = 100.0 * static_cast<double>(stats.performance.cpuPeakLoad);
+            const double deltaPoints = callbackCpu - cpuAvg;
+            const double ratio = cpuAvg > 1.0e-6 ? (callbackCpu / cpuAvg) : 0.0;
+            cpuLoadLabel_.setText(
+                "Callback avg (CPU time): " + juce::String(cpuAvg, 1)
+                    + "%    Peak: " + juce::String(cpuPeak, 1)
+                    + "%    wall - CPU: " + juce::String(deltaPoints, 1)
+                    + " pp    ratio: " + juce::String(ratio, 2) + "x",
+                juce::dontSendNotification);
+        } else {
+            cpuLoadLabel_.setText(
+                "Callback avg (CPU time): unavailable on this platform (wall-clock only)",
+                juce::dontSendNotification);
+        }
 
         if (currentSampleRate_ > 0.0) {
             const auto toMilliseconds = [this](int samples) {
@@ -1401,7 +1427,9 @@ private:
                     + juce::String(toMilliseconds(currentBlockSize_), 2)
                     + " ms    Device I/O: " + juce::String(ioLatency) + " smp / "
                     + juce::String(toMilliseconds(ioLatency), 2)
-                    + " ms    DSP: "
+                    // PDC = processing delay compensation, i.e. the graph's
+                    // algorithmic latency -- not a CPU load figure.
+                    + " ms    PDC: "
                     + juce::String(toMilliseconds(stats.graphLatencySamples), 2)
                     + " ms    Reported total: "
                     + juce::String(toMilliseconds(totalReportedLatency), 2) + " ms"
@@ -1985,6 +2013,7 @@ private:
     juce::Label meterLabel_;
     juce::Label routingLabel_;
     juce::Label performanceLabel_;
+    juce::Label cpuLoadLabel_;
     juce::Label latencyLabel_;
     juce::Label safetyLabel_;
     juce::Label thdLabel_;

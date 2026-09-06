@@ -5,8 +5,40 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+
+// Thread CPU time is a POSIX facility (clock_gettime(CLOCK_THREAD_CPUTIME_ID)).
+// Isolated behind this macro so a future SHARC/PIC port (or any platform
+// without it) simply falls back to wall-clock-only timing -- see
+// currentThreadCpuTimeNanoseconds() below.
+#if defined(__has_include)
+#  if __has_include(<time.h>)
+#    include <time.h>
+#  endif
+#endif
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+#define GUITARDSP_HAS_THREAD_CPU_TIME 1
+#else
+#define GUITARDSP_HAS_THREAD_CPU_TIME 0
+#endif
 
 namespace guitardsp::app {
+
+// Returns the calling thread's CPU time (time actually spent executing on a
+// core, excluding time spent preempted/waiting to be scheduled), or
+// std::nullopt on platforms without CLOCK_THREAD_CPUTIME_ID. Contrast with
+// std::chrono::steady_clock, which measures wall-clock elapsed time and so
+// includes any scheduler preemption in between.
+[[nodiscard]] inline std::optional<std::uint64_t> currentThreadCpuTimeNanoseconds() noexcept {
+#if GUITARDSP_HAS_THREAD_CPU_TIME
+    struct timespec ts {};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return std::nullopt;
+    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ULL
+        + static_cast<std::uint64_t>(ts.tv_nsec);
+#else
+    return std::nullopt;
+#endif
+}
 
 struct RealtimePerformanceSnapshot {
     std::uint64_t callbacks = 0;
@@ -18,6 +50,14 @@ struct RealtimePerformanceSnapshot {
     float peakLoad = 0.0f;
     float percentile95Load = 0.0f;
     float percentile99Load = 0.0f;
+    // Thread-CPU-time counterparts of averageLoad/peakLoad above, computed
+    // against the same per-callback budget. Only meaningful when
+    // cpuTimeAvailable is true (see currentThreadCpuTimeNanoseconds()); the
+    // gap between this and the wall-clock load above is an estimate of time
+    // spent preempted/waiting for the scheduler rather than computing.
+    float cpuAverageLoad = 0.0f;
+    float cpuPeakLoad = 0.0f;
+    bool cpuTimeAvailable = false;
 };
 
 // One audio-thread producer and a message-thread observer. Timing values are
@@ -38,11 +78,20 @@ public:
         latestBudgetNanoseconds_.store(0, std::memory_order_relaxed);
         averageLoad_.store(0.0f, std::memory_order_relaxed);
         peakLoad_.store(0.0f, std::memory_order_relaxed);
+        cpuAverageLoad_.store(0.0f, std::memory_order_relaxed);
+        cpuPeakLoad_.store(0.0f, std::memory_order_relaxed);
+        cpuTimeAvailable_.store(false, std::memory_order_relaxed);
         for (auto& bucket : loadHistogram_)
             bucket.store(0, std::memory_order_relaxed);
     }
 
-    void recordCallback(int samples, std::uint64_t elapsedNanoseconds) noexcept {
+    // cpuElapsedNanoseconds is this thread's CPU time for the callback (see
+    // currentThreadCpuTimeNanoseconds()), std::nullopt if unavailable on this
+    // platform. Existing wall-clock-only callers are unaffected -- the
+    // parameter defaults to std::nullopt and every wall-clock computation
+    // below is unchanged from before CPU-time tracking was added.
+    void recordCallback(int samples, std::uint64_t elapsedNanoseconds,
+                         std::optional<std::uint64_t> cpuElapsedNanoseconds = std::nullopt) noexcept {
         if (samples <= 0) return;
 
         const auto budget = static_cast<std::uint64_t>(
@@ -67,6 +116,19 @@ public:
             std::memory_order_relaxed);
         peakLoad_.store(std::max(peakLoad_.load(std::memory_order_relaxed), load),
                         std::memory_order_relaxed);
+
+        if (cpuElapsedNanoseconds.has_value()) {
+            const float cpuLoad = static_cast<float>(
+                static_cast<double>(*cpuElapsedNanoseconds) / static_cast<double>(budget));
+            const float previousCpuAverage = cpuAverageLoad_.load(std::memory_order_relaxed);
+            const float cpuAverage = count == 0
+                ? cpuLoad
+                : previousCpuAverage + 0.10f * (cpuLoad - previousCpuAverage);
+            cpuAverageLoad_.store(cpuAverage, std::memory_order_relaxed);
+            cpuPeakLoad_.store(std::max(cpuPeakLoad_.load(std::memory_order_relaxed), cpuLoad),
+                                std::memory_order_relaxed);
+            cpuTimeAvailable_.store(true, std::memory_order_relaxed);
+        }
 
         // One fixed atomic increment is sufficient on the realtime thread. The
         // message thread performs the histogram scan when it refreshes the UI;
@@ -109,7 +171,10 @@ public:
             averageLoad_.load(std::memory_order_relaxed),
             peakLoad_.load(std::memory_order_relaxed),
             percentile95,
-            percentile99
+            percentile99,
+            cpuAverageLoad_.load(std::memory_order_relaxed),
+            cpuPeakLoad_.load(std::memory_order_relaxed),
+            cpuTimeAvailable_.load(std::memory_order_relaxed)
         };
     }
 
@@ -123,6 +188,9 @@ private:
     std::atomic<std::uint64_t> latestBudgetNanoseconds_{0};
     std::atomic<float> averageLoad_{0.0f};
     std::atomic<float> peakLoad_{0.0f};
+    std::atomic<float> cpuAverageLoad_{0.0f};
+    std::atomic<float> cpuPeakLoad_{0.0f};
+    std::atomic<bool> cpuTimeAvailable_{false};
     std::array<std::atomic<std::uint64_t>, histogramBucketCount> loadHistogram_{};
 };
 
