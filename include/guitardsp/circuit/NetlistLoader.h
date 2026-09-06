@@ -223,7 +223,11 @@ private:
         std::size_t warmupMinSamples = 512;
         std::size_t warmupMaxSamples = 8192;
         float nonlinearResidualTolerance = 2.0e-5f;
-        int newtonMaxIterations = 40;
+        // 80 (raised from 40 -- issue #96): see MnaCircuitEngineCore.h's
+        // processSample() clamp comment for the measurements behind this
+        // value. Matches the hand-written TS808Circuit/DS1Circuit/etc.
+        // classes this format is a JSON-netlist parity twin of.
+        int newtonMaxIterations = 80;
         float newtonTolerance = 2.0e-5f;
         float supplyVolts = 9.0f;
         float vrefVolts = 4.5f;

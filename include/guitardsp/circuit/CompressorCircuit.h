@@ -151,7 +151,10 @@ public:
 
     float processSample(float input) noexcept {
         engine_.setVoltageSource(inputSource_, input);
-        lastSolve_ = engine_.processSample(40, 2.0e-5f);
+        // Iteration budget of 80 (see MnaCircuitEngineCore.h's
+        // processSample() clamp comment, issue #96, for the measurements
+        // behind this value).
+        lastSolve_ = engine_.processSample(80, 2.0e-5f);
         updateLdrResistance();
         const float out = engine_.voltage(outputNode_);
         if (lastSolve_.singular || !std::isfinite(out)) return 0.0f;

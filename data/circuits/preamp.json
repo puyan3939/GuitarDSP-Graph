@@ -55,7 +55,7 @@
     "warmupMinSamples": 8192,
     "warmupMaxSamples": 65536,
     "nonlinearResidualTolerance": 2.0e-5,
-    "newtonMaxIterations": 40,
+    "newtonMaxIterations": 80,
     "newtonTolerance": 2.0e-5,
     "supplyVolts": 300.0
   }
