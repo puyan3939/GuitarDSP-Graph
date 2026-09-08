@@ -213,10 +213,20 @@ circuit using a shorter warm-up):
 | `warmupMinSamples`            | 512     | warm-up length lower bound |
 | `warmupMaxSamples`            | 8192    | warm-up length upper bound |
 | `nonlinearResidualTolerance`  | 2.0e-5  | `MnaCircuitEngine::setNonlinearResidualTolerance` after priming |
-| `newtonMaxIterations`         | 40      | `processSample()`'s Newton iteration cap |
+| `newtonMaxIterations`         | 80      | `processSample()`'s Newton iteration cap |
 | `newtonTolerance`             | 2.0e-5  | `processSample()`'s Newton voltage tolerance |
 | `supplyVolts`                 | 9.0     | DC-priming target for `ports.supply` |
 | `vrefVolts`                   | 4.5     | DC-priming target for `ports.vref` |
+
+`newtonMaxIterations`'s default of 80 (raised from 40, issue #96) is an
+empirical choice, not an arbitrary one: measured on a 48kHz/-12dBFS
+20Hz-20kHz sweep through DS-1 (the worst case found), a 40-iteration budget
+left 7.518% of samples non-converged (44.5% within the 10-20kHz band) while
+raising the budget barely moved the *average* iteration count (8.648 at 40
+vs. 9.697 at 80), so the extra headroom is nearly free on average and cuts
+non-convergence roughly 11x. See the comment on `processSample()`'s
+iteration-count clamp in `MnaCircuitEngineCore.h` for the full measurement
+writeup, including why 160 was measured and rejected.
 
 ## Loading a netlist
 

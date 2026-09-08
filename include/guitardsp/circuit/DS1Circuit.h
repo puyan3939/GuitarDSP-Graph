@@ -258,7 +258,11 @@ public:
     float processSample(float input) noexcept {
         applySmoothedControls();
         engine_.setVoltageSource(inputSource_, input);
-        lastSolve_ = engine_.processSample(40, 2.0e-5f);
+        // Iteration budget of 80 (see MnaCircuitEngineCore.h's
+        // processSample() clamp comment, issue #96, for the measurements
+        // behind this value -- DS-1's clipper is the worst-case circuit those
+        // measurements were taken from).
+        lastSolve_ = engine_.processSample(80, 2.0e-5f);
         const float out = engine_.voltage(outputNode_);
         if (lastSolve_.singular || !std::isfinite(out)) return 0.0f;
         return out;

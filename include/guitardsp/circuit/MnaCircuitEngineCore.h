@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +46,16 @@ public:
         int iterations = 0;
         bool converged = true;
         bool singular = false;
+        // True when the caller-requested Newton iteration budget (the
+        // `maximumNewtonIterations` argument to processSample()/
+        // solveDcOperatingPoint()) fell outside [1, 80] and was silently
+        // clamped into range. A caller that reads this as always false when
+        // it expected a larger budget to take effect (e.g. a JSON netlist's
+        // `newtonMaxIterations` override, see NetlistLoader.h) has found a
+        // real misconfiguration -- see issue #96, where this clamp already
+        // silently overrode every caller's requested value once before it
+        // was noticed.
+        bool iterationBudgetClamped = false;
     };
 
     struct PerformanceStats {
@@ -389,11 +400,14 @@ public:
         solution_.assign(dimension_, 0.0f);
         candidate_.assign(dimension_, 0.0f);
         lineSearchCandidate_.assign(dimension_, 0.0f);
+        bestNonlinearCandidate_.assign(dimension_, 0.0f);
         previousSampleSolution_.assign(dimension_, 0.0f);
         workMatrix_.assign(matrixSize, 0.0f);
         workRhs_.assign(dimension_, 0.0f);
         linearLu_.assign(matrixSize, 0.0f);
         linearPivots_.assign(dimension_, 0U);
+        diodeJunctionVoltageBackup_.assign(diodes_.size(), 0.0f);
+        diodeJunctionVoltageValidBackup_.assign(diodes_.size(), 0U);
 
         // Nodes directly constrained by an independent source to ground do not need
         // Newton voltage limiting: their exact value is known from the linear MNA
@@ -449,7 +463,29 @@ public:
         if (staticCacheDirty_) rebuildStaticCache();
         assembleSampleRhs();
 
-        maximumNewtonIterations = std::clamp(maximumNewtonIterations, 1, 40);
+        // Upper-bounded at 80 (raised from 40 -- issue #96). Measured on a
+        // 48kHz/-12dBFS 20Hz-20kHz sweep through the worst case found, the DS-1
+        // clipper: a 40-iteration budget left 7.518% of samples non-converged
+        // (44.5% within the 10-20kHz band) while the *average* iteration count
+        // barely moved when the budget was raised (8.648 at 40 vs. 9.697 at 80),
+        // so the extra headroom is nearly free on average and cuts the
+        // non-convergence rate roughly 11x (to 0.677%). A 160-iteration budget
+        // was measured too (0.242% non-convergence, average 9.944) but rejected:
+        // the marginal gain over 80 is small while the worst-case per-sample
+        // cost keeps growing linearly with the budget.
+        const int requestedNewtonIterations = maximumNewtonIterations;
+        maximumNewtonIterations = std::clamp(maximumNewtonIterations, 1, 80);
+        stats.iterationBudgetClamped = requestedNewtonIterations != maximumNewtonIterations;
+        // Catch a misconfigured caller (e.g. a hand-edited netlist's
+        // `newtonMaxIterations` set above 80) the moment it happens rather
+        // than only via the SolveStats flag above, which nothing is
+        // required to check. This assert costs nothing in a release build
+        // (NDEBUG strips it) and never changes what gets solved -- the
+        // clamp above already ran.
+        assert(!stats.iterationBudgetClamped
+            && "MnaCircuitEngine::processSample(): requested Newton iteration "
+               "budget was clamped to [1, 80] -- see the comment above this "
+               "clamp (issue #96) and SolveStats::iterationBudgetClamped");
         tolerance = std::max(1.0e-9f, tolerance);
         const bool nonlinear = hasNonlinearDevices();
 
@@ -499,6 +535,13 @@ public:
         rhs_ = sampleRhs_;
         bool candidateFromFullSparseSolve = false;
         stats.converged = false;
+        // Tracks the lowest-residual candidate seen anywhere in this solve, so a
+        // budget-exhausted non-convergence (see the end of this loop) can adopt
+        // it instead of blindly trusting whichever candidate the last iteration
+        // happened to produce. Copied only when the residual actually improves,
+        // never unconditionally per iteration.
+        float bestNonlinearResidual = std::numeric_limits<float>::infinity();
+        bool haveBestNonlinearCandidate = false;
         for (int iteration = 0; iteration < maximumNewtonIterations; ++iteration) {
             for (const auto index : nonlinearMatrixIndices_)
                 matrix_[index] = staticMatrix_[index];
@@ -546,6 +589,11 @@ public:
             // the current candidate under this iteration's freshly stamped
             // Jacobian/companion sources, before any step is taken.
             const float candidateResidual = residualNorm(candidate_);
+            if (candidateResidual < bestNonlinearResidual) {
+                bestNonlinearResidual = candidateResidual;
+                bestNonlinearCandidate_ = candidate_;
+                haveBestNonlinearCandidate = true;
+            }
 
             bool solved = false;
             bool usedSparseSolve = false;
@@ -697,6 +745,11 @@ public:
                         rhs_[row] = sampleRhs_[row];
                     stampNonlinear(lineSearchCandidate_, usesPreparedSparse);
                     const float trialResidual = residualNorm(lineSearchCandidate_);
+                    if (trialResidual < bestNonlinearResidual) {
+                        bestNonlinearResidual = trialResidual;
+                        bestNonlinearCandidate_ = lineSearchCandidate_;
+                        haveBestNonlinearCandidate = true;
+                    }
                     // Accept a non-increasing residual, not only a strictly
                     // decreasing one. Once a circuit is within float precision of
                     // its true operating point, the residual has nothing left to
@@ -739,7 +792,48 @@ public:
             }
         }
 
-        if (!stats.converged) solution_ = candidate_;
+        if (!stats.converged) {
+            // The iteration budget ran out without meeting either convergence
+            // criterion above. The literal final `candidate_` is whatever the
+            // last iteration happened to produce -- sometimes a line-search
+            // step whose residual was already measured above, but sometimes the
+            // unevaluated result of the small-step sparse copy or the
+            // fixed-damping fallback (see the branches above), neither of which
+            // computes a residual for the candidate they produce. Comparing it
+            // fairly against every other candidate this solve already evaluated
+            // a residual for (bestNonlinearCandidate_/bestNonlinearResidual)
+            // means evaluating its residual too, which requires one more
+            // stampNonlinear() call. That call mutates each diode's persistent
+            // junctionVoltage/junctionVoltageValid as a side effect (see
+            // linearizeDiode), so save and restore that state around it: this
+            // extra, comparison-only evaluation must not change what the *next*
+            // sample's warm start sees, only which candidate *this* sample
+            // adopts.
+            for (std::size_t i = 0; i < diodes_.size(); ++i) {
+                diodeJunctionVoltageBackup_[i] = diodes_[i].junctionVoltage;
+                diodeJunctionVoltageValidBackup_[i] = diodes_[i].junctionVoltageValid ? 1U : 0U;
+            }
+            for (const auto index : nonlinearMatrixIndices_)
+                matrix_[index] = staticMatrix_[index];
+            for (const auto row : nonlinearRhsIndices_)
+                rhs_[row] = sampleRhs_[row];
+            stampNonlinear(candidate_, usesPreparedSparse);
+            const float finalCandidateResidual = residualNorm(candidate_);
+            for (std::size_t i = 0; i < diodes_.size(); ++i) {
+                diodes_[i].junctionVoltage = diodeJunctionVoltageBackup_[i];
+                diodes_[i].junctionVoltageValid = diodeJunctionVoltageValidBackup_[i] != 0U;
+            }
+
+            // Adopt whichever candidate this solve actually measured the lowest
+            // true nonlinear KCL residual for, not necessarily the last one
+            // tried: backtracking line search only guarantees each accepted
+            // step is non-increasing relative to the *previous* candidate, not
+            // that the very last candidate before the budget ran out is the
+            // best one seen across the whole solve.
+            solution_ = (haveBestNonlinearCandidate && bestNonlinearResidual < finalCandidateResidual)
+                ? bestNonlinearCandidate_
+                : candidate_;
+        }
         updateDynamicState();
         lastStats_ = stats;
         return stats;
@@ -1899,6 +1993,7 @@ private:
     std::vector<float> solution_;
     std::vector<float> candidate_;
     std::vector<float> lineSearchCandidate_;
+    std::vector<float> bestNonlinearCandidate_;
     std::vector<float> previousSampleSolution_;
     std::vector<float> workMatrix_;
     std::vector<float> workRhs_;
@@ -1909,6 +2004,8 @@ private:
     std::vector<std::size_t> residualRowOffsets_;
     std::vector<std::size_t> residualColumns_;
     std::vector<std::uint8_t> fixedVoltageNodes_;
+    std::vector<float> diodeJunctionVoltageBackup_;
+    std::vector<std::uint8_t> diodeJunctionVoltageValidBackup_;
     bool previousSampleSolutionValid_ = false;
     FixedPatternSparseSolver sparseSolver_;
 };
