@@ -270,3 +270,23 @@ component level — see the policy in `CLAUDE.md` for new amp work. Cabinets
 (`CabinetChainNode.h`) are speaker-dynamics plus measured-impulse-response
 convolution, not a circuit network, so they are out of scope for
 netlist-ification entirely.
+
+## A second, SPICE-subset format (not this one)
+
+`include/guitardsp/circuit/SpiceNetlistParser.h` / `SpiceNetlistLoader.h`
+(issue #99) implement a *separate*, SPICE-compatible netlist format, parsed
+and elaborated independently of everything above — `NetlistLoader.h` and
+`NetlistCircuit` are unmodified by it. Do not confuse the two: this JSON
+format is a direct, ordered replay script of `MnaCircuitEngine` calls with
+stable `preset`/`spec` device metadata; the SPICE-subset format reads
+plain-text SPICE decks (`R`/`L`/`C`/`D`/`Q`/`V`/`I`/`E`/`X` cards, `.MODEL`,
+`.PARAM`, `{...}` expressions) so pedal circuits published online can be
+reused with minimal translation. `data/circuits/spice/ts808.cir` is its
+first (and, as of issue #99, only) circuit, checked for parity against both
+`TS808Circuit.h` and `data/circuits/ts808.json` in
+`tests/NetlistParityTests.cpp`. See `SpiceNetlistParser.h`'s and
+`SpiceNetlistLoader.h`'s own header comments for the full grammar, the
+`OPAMP`/`POT`/`CAP` `.MODEL` extensions and their rationale, and the
+known-limitation note in `tests/NetlistParityTests.cpp` about internal MNA
+node-numbering differences near TS808's already-documented Newton-solver-
+divergence corner (issue #88/#91).

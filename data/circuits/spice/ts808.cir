@@ -1,0 +1,128 @@
+* TS808 -- SPICE-subset netlist (issue #99, Layer A step 1, second round).
+*
+* Equivalent to data/circuits/ts808.json / guitardsp::circuit::TS808Circuit
+* (include/guitardsp/circuit/TS808Circuit.h). Parsed by
+* guitardsp::circuit::parseSpiceNetlist() (SpiceNetlistParser.h) and
+* elaborated by guitardsp::circuit::SpiceCircuit (SpiceNetlistLoader.h) --
+* see tests/NetlistParityTests.cpp's checkTs808SpiceParity(), which asserts
+* this file's output agrees with both TS808Circuit.h and the JSON netlist
+* to the same 5e-4 tolerance the other parity checks in that file use.
+*
+* Port convention (see SpiceNetlistLoader.h): "VIN" is the audio input,
+* "VSUPPLY"/"VREF" are the supply/virtual-ground rails primed at prepare()
+* time, and node "OUT" is the audio output.
+*
+* Knobs: drive/tone/level are .PARAM values in [0,1], matching this engine's
+* user-facing control range (see data/circuits/ts808.json's "controls"
+* object and tests/golden/params/ts808.json's "mid"/"full" variants). Each
+* is the mechanical position of one potentiometer pair below -- see the
+* comment above each pair for why the pair's two resistor cards carry a
+* POT-typed .MODEL instead of being stamped as plain resistors, and why
+* their own {...} arithmetic is documentary rather than what actually gets
+* stamped (SpiceNetlistLoader.h's top-of-file comment has the full
+* rationale). Defaulted to the "mid" golden variant (0.5/0.5/0.5); tests
+* override via SpiceCircuit::setParam().
+.PARAM DRIVE=0.5
+.PARAM TONE=0.5
+.PARAM LEVEL=0.5
+
+* Device models. Parameter names intentionally match this engine's own
+* guitardsp::hq::*Spec fields (see SpiceNetlistParser.h's header comment)
+* rather than real SPICE Gummel-Poon/op-amp parameters -- this solver
+* doesn't implement full Gummel-Poon, so inventing a translation from real
+* SPICE parameters would be a fictitious precision with real bit-rot risk,
+* not genuine compatibility.
+*
+* 2SC1815-style NPN (TS808's input/output buffer transistors): twoN3904()
+* preset with TS808Circuit.h's own beta/Vbe/Vsat/Vce(max)/Ic(max) overrides;
+* thermalVoltage is left at the preset default (0.02585).
+.MODEL Q2SC1815TS808 NPN(BETA=350 NOMINALVBE=0.62 SATURATIONVOLTAGE=0.15
++ MAXCOLLECTORVOLTAGE=50 MAXCOLLECTORCURRENTAMPS=0.15 INPUTCAPACITANCEFARADS=8P)
+
+* 1N4148-style clipping diodes: guitardsp::hq::component_presets::oneN4148()
+* preset, unmodified.
+.MODEL D1N4148TS808 D(NOMINALFORWARDVOLTAGE=0.65 SATURATIONCURRENT=2N
++ EMISSIONCOEFFICIENT=1.9 THERMALVOLTAGE=0.02585 SERIESRESISTANCEOHMS=1.0
++ JUNCTIONCAPACITANCEFARADS=2P REVERSEVOLTAGERATING=100 CURRENTRATINGAMPS=0.20)
+
+* JRC4558-style op-amp: guitardsp::hq::component_presets::jrc4558() preset,
+* unmodified. Shared by both the nonlinear clip-stage macro (6-node X card)
+* and the ideal tone-stage buffer (4-node X card) below.
+.MODEL JRC4558TS808 OPAMP(OPENLOOPGAINDB=100 GAINBANDWIDTHHZ=3MEG
++ SLEWRATEVOLTSPERSECOND=1MEG INPUTBIASCURRENTAMPS=100N INPUTOFFSETVOLTAGE=2M
++ INPUTNOISEVOLTSPERROOTHZ=18N OUTPUTCURRENTLIMITAMPS=25M
++ POSITIVERAILHEADROOMVOLTS=1.5 NEGATIVERAILHEADROOMVOLTS=1.5 OUTPUTRESISTANCEOHMS=70)
+
+* Drive pot: 500k, audio taper, wired "backwards" (INVERT=1) to match
+* controls.drive.invert in data/circuits/ts808.json.
+.MODEL POTDRIVE POT(TAPER=AUDIO OHMS=500K INVERT=1)
+* Tone pot: 20k, linear taper, also wired backwards (controls.tone.invert).
+.MODEL POTTONE POT(TAPER=LINEAR OHMS=20K INVERT=1)
+* Level pot: 100k, audio taper, wired forwards (controls.level.invert=false).
+.MODEL POTLEVEL POT(TAPER=AUDIO OHMS=100K INVERT=0)
+
+* Electrolytic output coupling cap: only guitardsp::hq::CapacitorSpec's
+* leakageResistanceOhms field actually affects the solve (see
+* SpiceNetlistParser.h's "CAP" .MODEL doc comment), and
+* NetlistLoader.h's capacitorSpec() helper sets it to 5 Meg for electrolytic
+* parts (1 Geg for everything else, which is this subset's default).
+.MODEL ELECTROLYTIC CAP(LEAKAGEOHMS=5MEG)
+
+* --- Supply / virtual-ground / input ports ---
+VSUPPLY SUPPLY 0 DC 0
+VREF VREF 0 DC 0
+VIN INPUTJACK 0 DC 0
+
+* --- Input buffer (2SC1815-style emitter follower) ---
+C1 INPUTJACK INPUTCOUPLED 22N
+R1 INPUTCOUPLED Q1BASE 1K
+R2 VREF Q1BASE 510K
+Q1 SUPPLY Q1BASE Q1EMITTER Q2SC1815TS808
+R3 Q1EMITTER 0 10K
+
+* --- Clip stage (inverting op-amp with back-to-back clipping diodes) ---
+C2 Q1EMITTER CLIPNONINV 1U
+R4 CLIPNONINV VREF 10K
+* Nonlinear op-amp macro: output, nonInverting, inverting, positiveRail,
+* negativeRail, reference (6 nodes -- see SpiceNetlistLoader.h's X-card doc).
+XCLIP CLIPOUT CLIPNONINV CLIPINV SUPPLY 0 0 JRC4558TS808
+C3 CLIPINV CLIPHPNODE 47N
+R5 CLIPHPNODE 0 4.7K
+R6 CLIPINV CLIPFEEDBACKNODE 51K
+* Drive pot pair: high-to-wiper then wiper-to-low, sharing node CLIPOUT as
+* both wiper *and* low (drivePot's wiper/low JSON fields are the same node).
+* The two cards' own {...} values are a linear-taper approximation for a
+* plain-SPICE reader only; SpiceNetlistLoader.h replaces this pair with one
+* addPotentiometer() call using POTDRIVE's OHMS/TAPER/INVERT instead.
+RDRIVEA CLIPFEEDBACKNODE CLIPOUT {500K*DRIVE} POTDRIVE
+RDRIVEB CLIPOUT CLIPOUT {500K*(1-DRIVE)} POTDRIVE
+D1 CLIPINV CLIPOUT D1N4148TS808
+D2 CLIPOUT CLIPINV D1N4148TS808
+C4 CLIPINV CLIPOUT 51P
+
+* --- Tone stage (passive RC network buffered by an ideal op-amp) ---
+R7 CLIPOUT TONENONINV 1K
+C5 TONENONINV 0 220N
+R8 TONENONINV VREF 10K
+* Tone pot pair: high-to-wiper then wiper-to-low (distinct wiper/low nodes).
+RTONEA TONENONINV TONEWIPERNODE {20K*TONE} POTTONE
+RTONEB TONEWIPERNODE TONEINV {20K*(1-TONE)} POTTONE
+C6 TONEWIPERNODE TONERCNODE 220N
+R9 TONERCNODE 0 220
+R10 TONEOUT TONEINV 1K
+* Ideal op-amp macro: output, nonInverting, inverting, reference (4 nodes).
+XTONE TONEOUT TONENONINV TONEINV 0 JRC4558TS808
+
+* --- Level stage and output buffer ---
+C7 TONEOUT LEVELFEED 1U
+R11 LEVELFEED LEVELTOP 1K
+* Level pot pair: high-to-wiper then wiper-to-low.
+RLEVELA LEVELTOP LEVELWIPER {100K*(1-LEVEL)} POTLEVEL
+RLEVELB LEVELWIPER 0 {100K*LEVEL} POTLEVEL
+C8 LEVELWIPER Q3BASE 100N
+R12 VREF Q3BASE 510K
+Q2 SUPPLY Q3BASE Q3EMITTER Q2SC1815TS808
+R13 Q3EMITTER 0 10K
+R14 Q3EMITTER OUTPUTCOUPLINGINPUT 100
+C9 OUTPUTCOUPLINGINPUT OUT 10U ELECTROLYTIC
+R15 OUT 0 10K

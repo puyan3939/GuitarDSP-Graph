@@ -4,11 +4,23 @@
 // (issue #99, Layer A / "circuit simulator" step 1). Mirrors JsonValue.h's
 // approach: a small hand-written parser with no third-party dependency,
 // producing an in-memory document (SpiceNetlist) rather than driving
-// MnaCircuitEngine directly.
+// MnaCircuitEngine directly. See SpiceNetlistLoader.h for the elaborator
+// that turns a SpiceNetlist into a runnable MnaCircuitEngine circuit.
 //
 // Supported syntax:
-//  - Element cards: R, L, C, D, Q, V, I, E (case-insensitive kind letter).
-//  - ".MODEL" directive, for device types "D" and "NPN"/"PNP" only.
+//  - Element cards: R, L, C, D, Q, V, I, E (case-insensitive kind letter),
+//    and X (a minimal subcircuit-call card -- see below).
+//  - ".MODEL" directive, for device types "D"/"NPN"/"PNP" (as before), plus
+//    three engine-macro extensions "OPAMP", "POT" and "CAP" (see below).
+//  - ".PARAM name=value [name2=value2 ...]" for named numeric parameters
+//    (issue #99 follow-up). Values must be plain SPICE numbers (with an
+//    optional magnitude suffix); expressions are not supported in .PARAM
+//    itself, only when a .PARAM name is *used* inside a `{...}` value.
+//  - `{...}`-bracketed arithmetic expressions anywhere an element card would
+//    otherwise take a plain numeric value (e.g. "R1 A B {100k*drive}").
+//    Expression grammar/evaluation lives in SpiceExpression.h: four
+//    arithmetic operators, unary minus, parentheses, and identifiers that
+//    must resolve to a `.PARAM` name at elaboration time.
 //  - Full-line comments starting with '*' and inline comments starting with
 //    ';'.
 //  - Continuation lines starting with '+', joined onto the previous card.
@@ -20,11 +32,49 @@
 //  - Ground aliasing: node names "0" and "GND" (case-insensitive) both
 //    canonicalize to "0".
 //
+// The "X" card and the "OPAMP"/"POT" .MODEL types are this format's only
+// deliberate departure from being a strict real-SPICE subset (issue #99's
+// second round, "オペアンプの表現"/"ポットの表現"):
+//  - "OPAMP" .MODEL parameters are named after guitardsp::hq::OpAmpSpec's
+//    own fields (openLoopGainDb, gainBandwidthHz, ...), not real SPICE
+//    op-amp model parameters -- this engine's op-amp macros
+//    (MnaCircuitEngine::addOpAmp / addDynamicOpAmpSubcircuit) are a
+//    behavioral macro, not a subcircuit expansion, so there is nothing to
+//    gain by inventing a translation from real SPICE op-amp parameters and
+//    real risk of the translation silently drifting from what the macro
+//    actually does.
+//  - "POT" .MODEL parameters (TAPER/OHMS/INVERT) describe a component
+//    property (the taper law and total resistance of a potentiometer, plus
+//    which electrical sense two paired resistor cards represent), not a
+//    circuit equation -- see SpiceNetlistLoader.h for how a "POT"-tagged
+//    resistor pair is elaborated into a single MnaCircuitEngine
+//    potentiometer using the exact same
+//    guitardsp::hq::PotentiometerSpec::normalizedElectricalPosition() code
+//    the JSON netlist format uses, not a re-derived formula.
+//  - "CAP" .MODEL parameters (currently just LEAKAGEOHMS) exist only
+//    because guitardsp::hq::CapacitorSpec::leakageResistanceOhms is the one
+//    capacitor field (besides capacitanceFarads itself) that actually
+//    changes MnaCircuitEngineCore's stamp -- every other CapacitorSpec field
+//    (tolerancePercent, voltageRatingVolts, esrOhms, dielectricAbsorption)
+//    is unused by the solver, so there is nothing to gain by exposing them
+//    here. A 'C' card with no model reference defaults to the same
+//    leakage guitardsp::circuit::NetlistLoader.h uses for every non-
+//    electrolytic part (1e9 ohms).
+//  - "X" here is *not* SPICE's .SUBCKT-expanding X card: it has no
+//    .SUBCKT/.ENDS to expand, and only exists so an OPAMP-typed .MODEL can
+//    be instantiated (4 nodes = MnaCircuitEngine::addOpAmp's ideal op-amp;
+//    6 nodes = addDynamicOpAmpSubcircuit's nonlinear macro). A real SPICE
+//    reading this file would treat X as an undefined subcircuit call and
+//    reject it -- there is no way to extend .MODEL-only semantics onto a
+//    real SPICE X card without inventing a fictitious .SUBCKT, which would
+//    be a worse compatibility break than a nonstandard-but-honest X usage.
+//    Kept deliberately minimal, per issue #99: no .SUBCKT/.ENDS support.
+//
 // Deliberately out of scope (see issue #99): J/M/F/G/H element cards,
-// .SUBCKT/.ENDS/X subcircuit calls, .PARAM and expression evaluation, and
-// analysis cards (.TRAN/.AC/.OP). A card using any of these is a parse
-// error, not a silent no-op, so a user authoring their own circuit gets a
-// clear diagnostic instead of a silently-dropped component.
+// .SUBCKT/.ENDS proper, and analysis cards (.TRAN/.AC/.OP). A card using any
+// of these is a parse error, not a silent no-op, so a user authoring their
+// own circuit gets a clear diagnostic instead of a silently-dropped
+// component.
 //
 // Unlike real SPICE, the first non-comment line of the deck is NOT treated
 // as an implicit title/comment: only lines beginning with '*' are comments.
@@ -34,18 +84,11 @@
 // would be a worse default for a format aimed at users hand-authoring
 // circuits.
 //
-// This header only builds the parsed SpiceNetlist structure; it does not
-// elaborate a netlist into an MnaCircuitEngine circuit. See the note in the
-// issue #99 writeup for why TS808 elaboration is not implemented here yet:
-// TS808's clipping stage relies on the "dynamicOpAmp" macro (saturation,
-// slew-rate limiting -- not a plain linear VCVS) and its three controls are
-// potentiometers, neither of which is representable with a bare
-// R/L/C/D/Q/V/I/E element set without extending the format beyond real
-// SPICE semantics.
-//
 // Real-time contract: like JsonValue.h/NetlistLoader.h, this parser only
 // ever runs on the control thread while a circuit is being loaded, never
 // from the audio callback path.
+
+#include "SpiceExpression.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -58,109 +101,40 @@
 namespace guitardsp::circuit {
 
 // One element card: kind is the uppercase reference-designator letter
-// ('R','L','C','D','Q','V','I','E'); nodes/values are in card order.
-// modelName (canonical uppercase) is only populated for 'D'/'Q'.
+// ('R','L','C','D','Q','V','I','E','X'); nodes/values are in card order.
+// modelName is populated for 'D'/'Q'/'X' (always) and 'R'/'L' (only when an
+// optional trailing model-name field is present, e.g. a potentiometer-pair
+// resistor -- see SpiceNetlistLoader.h).
 struct SpiceElement {
     char kind = '\0';
     std::string name;
     std::vector<std::string> nodes;
-    std::vector<double> values;
+    std::vector<SpiceValue> values;
     std::string modelName;
     int line = 0;
 };
 
-// One ".MODEL" card. type is canonical uppercase ("D", "NPN" or "PNP");
-// params keys are canonical uppercase (e.g. "IS", "N", "RS", "BF", "VAF").
+// One ".MODEL" card. type is canonical uppercase ("D", "NPN", "PNP",
+// "OPAMP" or "POT"); numeric params are canonical uppercase keys (e.g. "IS",
+// "N", "RS", "OHMS"). stringParams holds any key=value pair whose value
+// didn't parse as a SPICE number (e.g. "TAPER=AUDIO") -- generic rather than
+// special-cased to a fixed key list, so it works for any current or future
+// symbolic .MODEL parameter.
 struct SpiceModel {
     std::string name;
     std::string type;
     std::unordered_map<std::string, double> params;
+    std::unordered_map<std::string, std::string> stringParams;
     int line = 0;
 };
 
 struct SpiceNetlist {
     std::vector<SpiceElement> elements;
     std::unordered_map<std::string, SpiceModel> models; // keyed by canonical uppercase name
-};
-
-// Thrown for malformed SPICE text. Always carries the 1-based source line
-// number and that logical line's (comment-stripped, continuation-joined)
-// content, per issue #99's requirement that syntax errors be traceable back
-// to the offending line for a user hand-authoring a circuit.
-class SpiceParseError : public std::runtime_error {
-public:
-    SpiceParseError(int line, std::string lineText, const std::string& message)
-        : std::runtime_error("line " + std::to_string(line) + ": '" + lineText + "' -- " + message),
-          line_(line), lineText_(std::move(lineText)) {}
-
-    int line() const noexcept { return line_; }
-    const std::string& lineText() const noexcept { return lineText_; }
-
-private:
-    int line_;
-    std::string lineText_;
+    std::unordered_map<std::string, double> params;      // .PARAM values, keyed by canonical uppercase name
 };
 
 namespace spice_detail {
-
-inline std::string toUpperCopy(std::string_view s) {
-    std::string r(s);
-    for (char& c : r) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return r;
-}
-
-inline std::string trimCopy(std::string_view s) {
-    std::size_t b = 0;
-    std::size_t e = s.size();
-    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
-    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
-    return std::string(s.substr(b, e - b));
-}
-
-inline bool isValidNodeName(const std::string& canonical) noexcept {
-    if (canonical.empty()) return false;
-    for (char c : canonical) {
-        if (!std::isalnum(static_cast<unsigned char>(c))) return false;
-    }
-    return true;
-}
-
-inline std::string canonicalNode(std::string_view raw) {
-    std::string upper = toUpperCopy(raw);
-    if (upper == "0" || upper == "GND") return "0";
-    return upper;
-}
-
-// Parses a SPICE numeric literal with an optional trailing magnitude suffix
-// (T/G/MEG/K/M/U/N/P/F, case-insensitive) followed by ignored trailing unit
-// text. Delegates the mantissa/exponent scan to strtod so "2.2e-9", "4.7k",
-// "1MEG" and "10uF" all parse the same way real SPICE would.
-inline double parseSpiceNumber(const std::string& token, bool& ok) {
-    if (token.empty()) { ok = false; return 0.0; }
-    char* end = nullptr;
-    const double mantissa = std::strtod(token.c_str(), &end);
-    if (end == token.c_str()) { ok = false; return 0.0; }
-    ok = true;
-
-    const std::string rest(end);
-    double multiplier = 1.0;
-    if (rest.size() >= 3 && toUpperCopy(rest.substr(0, 3)) == "MEG") {
-        multiplier = 1.0e6;
-    } else if (!rest.empty()) {
-        switch (std::toupper(static_cast<unsigned char>(rest[0]))) {
-            case 'T': multiplier = 1.0e12; break;
-            case 'G': multiplier = 1.0e9; break;
-            case 'K': multiplier = 1.0e3; break;
-            case 'M': multiplier = 1.0e-3; break;
-            case 'U': multiplier = 1.0e-6; break;
-            case 'N': multiplier = 1.0e-9; break;
-            case 'P': multiplier = 1.0e-12; break;
-            case 'F': multiplier = 1.0e-15; break;
-            default: multiplier = 1.0; break;
-        }
-    }
-    return mantissa * multiplier;
-}
 
 struct LogicalLine {
     int line = 0;
@@ -208,6 +182,48 @@ inline std::vector<LogicalLine> joinLogicalLines(std::string_view text) {
     return result;
 }
 
+// Replaces every `{...}` span in `text` with a compact placeholder token
+// ("@EXPR0@", "@EXPR1@", ...) and appends the span's inner text (braces
+// stripped) to `outExprs` at the matching index. Runs before tokenize() so
+// the outer card tokenizer never has to know about expression syntax (which
+// has its own '(' / ')' handling -- see SpiceExpression.h's tokenizeExpr).
+inline std::string extractBraceExpressions(const std::string& text, int line,
+                                            std::vector<std::string>& outExprs) {
+    std::string result;
+    result.reserve(text.size());
+    std::size_t i = 0;
+    while (i < text.size()) {
+        if (text[i] == '{') {
+            const std::size_t close = text.find('}', i + 1);
+            if (close == std::string::npos) throw SpiceParseError(line, text, "unterminated '{' expression");
+            result += "@EXPR";
+            result += std::to_string(outExprs.size());
+            result += '@';
+            outExprs.push_back(text.substr(i + 1, close - i - 1));
+            i = close + 1;
+        } else if (text[i] == '}') {
+            throw SpiceParseError(line, text, "unmatched '}' with no preceding '{'");
+        } else {
+            result += text[i];
+            ++i;
+        }
+    }
+    return result;
+}
+
+// Returns true and sets `index` if `tok` is an "@EXPRn@" placeholder
+// produced by extractBraceExpressions().
+inline bool tryParseExprPlaceholder(const std::string& tok, std::size_t& index) {
+    if (tok.size() < 7 || tok.compare(0, 5, "@EXPR") != 0 || tok.back() != '@') return false;
+    const std::string digits = tok.substr(5, tok.size() - 6);
+    if (digits.empty()) return false;
+    for (char c : digits) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+    }
+    index = static_cast<std::size_t>(std::strtoul(digits.c_str(), nullptr, 10));
+    return true;
+}
+
 // Splits a logical line's text into tokens on whitespace, treating '(' and
 // ')' as their own tokens even when not separated by whitespace (so
 // ".model D1 D(IS=1n)" and ".model D1 D (IS=1n)" tokenize identically).
@@ -231,6 +247,29 @@ inline std::vector<std::string> tokenize(const std::string& line) {
     return tokens;
 }
 
+inline void parseParamCard(const std::vector<std::string>& tokens, const LogicalLine& ll, SpiceNetlist& netlist) {
+    const auto fail = [&](const std::string& message) -> void {
+        throw SpiceParseError(ll.line, ll.text, message);
+    };
+    if (tokens.size() < 2) fail("'.param name=value [...]' requires at least one assignment");
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+        const std::string& tok = tokens[i];
+        const std::size_t eq = tok.find('=');
+        if (eq == std::string::npos) fail("expected 'name=value' .param assignment, got '" + tok + "'");
+        const std::string name = toUpperCopy(tok.substr(0, eq));
+        if (name.empty()) fail("'.param' assignment is missing a name");
+        bool ok = false;
+        const double value = parseSpiceNumber(tok.substr(eq + 1), ok);
+        if (!ok) {
+            fail("invalid numeric value for .param '" + name +
+                 "' (expressions are not supported inside .PARAM itself, only when a "
+                 ".PARAM name is referenced inside a '{...}' element value)");
+        }
+        if (netlist.params.count(name) != 0) fail("duplicate .PARAM name '" + name + "'");
+        netlist.params[name] = value;
+    }
+}
+
 inline void parseModelCard(const std::vector<std::string>& tokens, const LogicalLine& ll, SpiceNetlist& netlist) {
     const auto fail = [&](const std::string& message) -> void {
         throw SpiceParseError(ll.line, ll.text, message);
@@ -240,9 +279,10 @@ inline void parseModelCard(const std::vector<std::string>& tokens, const Logical
     SpiceModel model;
     model.name = toUpperCopy(tokens[1]);
     model.type = toUpperCopy(tokens[2]);
-    if (model.type != "D" && model.type != "NPN" && model.type != "PNP") {
+    if (model.type != "D" && model.type != "NPN" && model.type != "PNP" &&
+        model.type != "OPAMP" && model.type != "POT" && model.type != "CAP") {
         fail("unsupported .model type '" + tokens[2] +
-             "' (only D and NPN/PNP are implemented in this SPICE subset)");
+             "' (only D, NPN/PNP, OPAMP, POT and CAP are implemented in this SPICE subset)");
     }
     for (std::size_t i = 3; i < tokens.size(); ++i) {
         const std::string& tok = tokens[i];
@@ -250,10 +290,18 @@ inline void parseModelCard(const std::vector<std::string>& tokens, const Logical
         const std::size_t eq = tok.find('=');
         if (eq == std::string::npos) fail("expected 'key=value' model parameter, got '" + tok + "'");
         const std::string key = toUpperCopy(tok.substr(0, eq));
+        const std::string rawValue = tok.substr(eq + 1);
         bool ok = false;
-        const double value = parseSpiceNumber(tok.substr(eq + 1), ok);
-        if (!ok) fail("invalid numeric value for model parameter '" + key + "'");
-        model.params[key] = value;
+        const double value = parseSpiceNumber(rawValue, ok);
+        if (ok) {
+            model.params[key] = value;
+        } else {
+            // Not a number: a symbolic parameter value (e.g. TAPER=AUDIO).
+            // Stored generically rather than special-cased to one key, so
+            // any current or future symbolic .MODEL parameter works the
+            // same way.
+            model.stringParams[key] = toUpperCopy(rawValue);
+        }
     }
     model.line = ll.line;
 
@@ -261,15 +309,25 @@ inline void parseModelCard(const std::vector<std::string>& tokens, const Logical
     netlist.models.emplace(model.name, std::move(model));
 }
 
-inline void parseElementCard(const std::vector<std::string>& tokens, const LogicalLine& ll, SpiceNetlist& netlist) {
+inline void parseElementCard(const std::vector<std::string>& tokens, const LogicalLine& ll,
+                              const std::vector<std::string>& exprTexts, SpiceNetlist& netlist) {
     const auto fail = [&](const std::string& message) -> void {
         throw SpiceParseError(ll.line, ll.text, message);
     };
-    const auto num = [&](const std::string& tok) -> double {
+    const auto val = [&](const std::string& tok) -> SpiceValue {
+        std::size_t index = 0;
+        if (tryParseExprPlaceholder(tok, index)) {
+            if (index >= exprTexts.size()) fail("internal error resolving expression placeholder '" + tok + "'");
+            SpiceValue v;
+            v.expr = parseSpiceExpr(exprTexts[index], ll.line, ll.text);
+            return v;
+        }
         bool ok = false;
         const double value = parseSpiceNumber(tok, ok);
         if (!ok) fail("invalid numeric value '" + tok + "'");
-        return value;
+        SpiceValue v;
+        v.literal = value;
+        return v;
     };
     const auto node = [&](const std::string& tok) -> std::string {
         const std::string canonical = canonicalNode(tok);
@@ -288,18 +346,24 @@ inline void parseElementCard(const std::vector<std::string>& tokens, const Logic
     switch (kind) {
         case 'R':
         case 'L': {
-            if (tokens.size() != 4) {
+            if (tokens.size() != 4 && tokens.size() != 5) {
                 fail(std::string(kind == 'R' ? "resistor" : "inductor") +
-                     " card 'Xxx n1 n2 value' requires exactly 2 nodes and a value");
+                     " card 'Xxx n1 n2 value [modelName]' requires exactly 2 nodes, a value, "
+                     "and an optional trailing model reference");
             }
             element.nodes = {node(tokens[1]), node(tokens[2])};
-            element.values = {num(tokens[3])};
+            element.values = {val(tokens[3])};
+            if (tokens.size() == 5) element.modelName = toUpperCopy(tokens[4]);
             break;
         }
         case 'C': {
-            if (tokens.size() != 4) fail("capacitor card 'Cxx n1 n2 value' requires exactly 2 nodes and a value");
+            if (tokens.size() != 4 && tokens.size() != 5) {
+                fail("capacitor card 'Cxx n1 n2 value [modelName]' requires exactly 2 nodes, a value, "
+                     "and an optional trailing model reference (a CAP-typed .MODEL)");
+            }
             element.nodes = {node(tokens[1]), node(tokens[2])};
-            element.values = {num(tokens[3])};
+            element.values = {val(tokens[3])};
+            if (tokens.size() == 5) element.modelName = toUpperCopy(tokens[4]);
             break;
         }
         case 'D': {
@@ -324,10 +388,10 @@ inline void parseElementCard(const std::vector<std::string>& tokens, const Logic
         case 'I': {
             if (tokens.size() == 4) {
                 element.nodes = {node(tokens[1]), node(tokens[2])};
-                element.values = {num(tokens[3])};
+                element.values = {val(tokens[3])};
             } else if (tokens.size() == 5 && toUpperCopy(tokens[3]) == "DC") {
                 element.nodes = {node(tokens[1]), node(tokens[2])};
-                element.values = {num(tokens[4])};
+                element.values = {val(tokens[4])};
             } else {
                 fail(std::string(kind == 'V' ? "voltage" : "current") +
                      " source card 'Xxx n+ n- [DC] value' requires 2 nodes and a value");
@@ -337,7 +401,16 @@ inline void parseElementCard(const std::vector<std::string>& tokens, const Logic
         case 'E': {
             if (tokens.size() != 6) fail("VCVS card 'Exx n+ n- nc+ nc- gain' requires exactly 4 nodes and a gain value");
             element.nodes = {node(tokens[1]), node(tokens[2]), node(tokens[3]), node(tokens[4])};
-            element.values = {num(tokens[5])};
+            element.values = {val(tokens[5])};
+            break;
+        }
+        case 'X': {
+            if (tokens.size() < 3) {
+                fail("'X' card 'Xxx node1 [node2 ...] modelName' requires at least 1 node and a model name "
+                     "(this SPICE subset's X only instantiates an OPAMP-typed .MODEL -- see SpiceNetlistParser.h)");
+            }
+            for (std::size_t i = 1; i + 1 < tokens.size(); ++i) element.nodes.push_back(node(tokens[i]));
+            element.modelName = toUpperCopy(tokens.back());
             break;
         }
         case 'J':
@@ -364,23 +437,27 @@ inline SpiceNetlist parseSpiceNetlist(std::string_view text) {
     SpiceNetlist netlist;
     const std::vector<spice_detail::LogicalLine> logicalLines = spice_detail::joinLogicalLines(text);
     for (const spice_detail::LogicalLine& ll : logicalLines) {
-        const std::vector<std::string> tokens = spice_detail::tokenize(ll.text);
+        std::vector<std::string> exprTexts;
+        const std::string substituted = spice_detail::extractBraceExpressions(ll.text, ll.line, exprTexts);
+        const std::vector<std::string> tokens = spice_detail::tokenize(substituted);
         if (tokens.empty()) continue;
 
         if (tokens[0][0] == '.') {
             const std::string directive = spice_detail::toUpperCopy(tokens[0]);
             if (directive == ".MODEL") {
                 spice_detail::parseModelCard(tokens, ll, netlist);
+            } else if (directive == ".PARAM") {
+                spice_detail::parseParamCard(tokens, ll, netlist);
             } else {
                 throw SpiceParseError(ll.line, ll.text,
                     "unsupported directive '" + tokens[0] +
-                    "' (only .MODEL is implemented in this SPICE subset; "
-                    ".SUBCKT/.PARAM/.TRAN/.AC/.OP etc. are out of scope, see issue #99)");
+                    "' (only .MODEL and .PARAM are implemented in this SPICE subset; "
+                    ".SUBCKT/.TRAN/.AC/.OP etc. are out of scope, see issue #99)");
             }
             continue;
         }
 
-        spice_detail::parseElementCard(tokens, ll, netlist);
+        spice_detail::parseElementCard(tokens, ll, exprTexts, netlist);
     }
     return netlist;
 }

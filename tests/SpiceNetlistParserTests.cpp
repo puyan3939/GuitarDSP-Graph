@@ -3,6 +3,8 @@
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 using namespace guitardsp;
 
@@ -221,6 +223,103 @@ int main() {
     {
         const std::string message = expectError("R1 IN* OUT 1k\n");
         ok &= require(!message.empty(), "non-alphanumeric node name is rejected");
+    }
+
+    // --- .PARAM (issue #99 second round) ---
+    {
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist(".param DRIVE=0.5 tone=0.25\n");
+        ok &= require(netlist.params.size() == 2 &&
+                      nearlyEqual(netlist.params.at("DRIVE"), 0.5) &&
+                      nearlyEqual(netlist.params.at("TONE"), 0.25),
+                      ".param accepts multiple name=value assignments, canonicalized to uppercase");
+    }
+    {
+        const std::string message = expectError(".param drive={100k*2}\n");
+        ok &= require(!message.empty(), ".param rejects an expression value (only .MODEL/element values may use {...})");
+    }
+    {
+        const std::string message = expectError(".param drive=0.5\n.param drive=0.6\n");
+        ok &= require(!message.empty(), "duplicate .PARAM name is rejected");
+    }
+
+    // --- {...} expressions on element values ---
+    {
+        const std::string text = ".param drive=0.5\nR1 A B {100k*drive}\n";
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist(text);
+        ok &= require(netlist.elements.size() == 1 && netlist.elements[0].values[0].isExpression(),
+                      "a '{...}' element value parses as an expression, not a literal");
+        std::unordered_map<std::string, double> params{{"DRIVE", 0.5}};
+        ok &= require(nearlyEqual(netlist.elements[0].values[0].evaluate(params), 50000.0),
+                      "expression evaluates '100k*drive' against a param map");
+        params["DRIVE"] = 1.0;
+        ok &= require(nearlyEqual(netlist.elements[0].values[0].evaluate(params), 100000.0),
+                      "expression re-evaluates against an updated param map without re-parsing");
+    }
+    {
+        const std::string text = "R1 A B {500k*(1-drive)}\n";
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist(text);
+        std::unordered_map<std::string, double> params{{"DRIVE", 0.2}};
+        ok &= require(nearlyEqual(netlist.elements[0].values[0].evaluate(params), 400000.0),
+                      "expression grammar supports parentheses and unary-minus-free subtraction");
+        std::vector<std::string> deps;
+        circuit::collectSpiceExprParams(netlist.elements[0].values[0].expr, deps);
+        ok &= require(deps.size() == 1 && deps[0] == "DRIVE",
+                      "collectSpiceExprParams() finds the one .PARAM an expression depends on");
+    }
+    {
+        const std::string message = expectError("R1 A B {drive^2}\n");
+        ok &= require(!message.empty(), "expression grammar rejects an unsupported operator ('^', no functions/exponent)");
+    }
+    {
+        const std::string message = expectError("R1 A B {100k*\n");
+        ok &= require(!message.empty(), "unterminated '{' expression is rejected");
+    }
+
+    // --- .MODEL OPAMP/POT/CAP extensions (issue #99 second round) ---
+    {
+        const std::string text = ".model OPX OPAMP(OPENLOOPGAINDB=100 GAINBANDWIDTHHZ=3MEG)\n";
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist(text);
+        const auto& model = netlist.models.at("OPX");
+        ok &= require(model.type == "OPAMP" && nearlyEqual(model.params.at("OPENLOOPGAINDB"), 100.0) &&
+                      nearlyEqual(model.params.at("GAINBANDWIDTHHZ"), 3.0e6),
+                      "OPAMP .model type and numeric parameters parse");
+    }
+    {
+        const std::string text = ".model POTX POT(TAPER=AUDIO OHMS=500K INVERT=1)\n";
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist(text);
+        const auto& model = netlist.models.at("POTX");
+        ok &= require(model.type == "POT" && model.stringParams.at("TAPER") == "AUDIO" &&
+                      nearlyEqual(model.params.at("OHMS"), 500000.0) && nearlyEqual(model.params.at("INVERT"), 1.0),
+                      "POT .model type parses a symbolic TAPER value and numeric OHMS/INVERT");
+    }
+    {
+        const std::string text = ".model CAPX CAP(LEAKAGEOHMS=5MEG)\n";
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist(text);
+        ok &= require(netlist.models.at("CAPX").type == "CAP", "CAP .model type parses");
+    }
+
+    // --- X card (issue #99 second round) ---
+    {
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist("X1 OUT NP NM SUP 0 0 OPX\n");
+        ok &= require(netlist.elements.size() == 1 && netlist.elements[0].kind == 'X' &&
+                      netlist.elements[0].nodes.size() == 6 && netlist.elements[0].modelName == "OPX",
+                      "X card with 6 nodes (dynamic op-amp macro) parses");
+    }
+    {
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist("X1 OUT NP NM 0 OPX\n");
+        ok &= require(netlist.elements.size() == 1 && netlist.elements[0].nodes.size() == 4,
+                      "X card with 4 nodes (ideal op-amp) parses");
+    }
+    {
+        const std::string message = expectError("X1 OPX\n");
+        ok &= require(!message.empty(), "X card with no nodes is rejected");
+    }
+
+    // --- Optional trailing model reference on R/C cards (potentiometer/CAP pairing) ---
+    {
+        const circuit::SpiceNetlist netlist = circuit::parseSpiceNetlist("R1 A B 1k POTX\nC1 A B 1u CAPX\n");
+        ok &= require(netlist.elements[0].modelName == "POTX" && netlist.elements[1].modelName == "CAPX",
+                      "R and C cards accept an optional trailing model-name field");
     }
 
     // --- Non-throwing convenience wrapper ---
