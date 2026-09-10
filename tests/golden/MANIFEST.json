@@ -1,5 +1,5 @@
 {
-    "commit": "a8c04128fecbbabcbba83e3987c8aaebf8d4270d",
+    "commit": "9d77767824fe18d1c00c62ddc2e46d1c59e2f154",
     "compiler": "gcc 13.3.0",
     "cmakePreset": "golden",
     "sampleRateHz": 48000,
@@ -12,13 +12,5 @@
         "ts808": "a74a8fbba8166112"
     },
     "fileCount": 50,
-    "totalBytes": 17280000,
-    "knownBad": [
-        "ts808_impulse_full",
-        "ts808_silence_full",
-        "ts808_sine20_full",
-        "ts808_sine3_full",
-        "ts808_sweep_full"
-    ],
-    "knownBadNote": "drive=tone=level=1.0 hits a documented Newton-solver divergence at that extreme parameter corner during ordinary audio processing (see docs/GOLDEN_REFERENCE.md and issue #88); golden_reference still reports these cases' actual max error but excludes them from pass/fail. See issue #91."
+    "totalBytes": 17280000
 }

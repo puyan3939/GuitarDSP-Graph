@@ -132,21 +132,36 @@ still-useful property (hand-written vs. netlist cross-representation
 agreement at the current build's output, across a wider parameter sweep and
 including PowerAmp/Compressor), and is not superseded for those circuits.
 
-## Known caveat: TS808 `full` variant
+## Resolved: TS808/DS-1 `full` variant divergence (issue #88, #91, #96, #99)
 
-The five `ts808_*_full.txt` golden files (drive = tone = level = 1.0)
-contain very large-magnitude samples (RMS on the order of 10^3-10^8, e.g.
-the sweep file), well beyond a plausible clipped-diode output. This looks
-like a genuine Newton-solver divergence at that specific extreme parameter
-corner rather than intended circuit behavior -- see the issue #88
-implementation report for details, and issue #91 for confirmation that the
-same divergence still reproduces (with different exact numbers) after
-`MnaCircuitEngine::solveDcOperatingPoint()`-based DC initialization, so it
-is a runtime Newton-solve property, not a `prepare()`-time artifact. It's
-captured as-is because that's the point of a golden reference (freeze
-current behavior, bugs included, so a future fix is a visible, intentional
-diff against this file); it is not fixed by this change. These five cases
-are listed in `tests/golden/MANIFEST.json`'s `knownBad` array, which
-`golden_reference` reads to still report (but not fail on) their actual max
-error -- see `tests/GoldenReferenceTests.cpp`'s `loadKnownBad()`. Treat
-those five files as unusually solver-sensitive when comparing against them.
+The five `ts808_*_full.txt` golden files (drive = tone = level = 1.0) used to
+contain very large-magnitude samples (RMS on the order of 10^3-10^8, e.g. the
+sweep file), well beyond a plausible clipped-diode output, and were listed in
+`tests/golden/MANIFEST.json`'s `knownBad` array so `golden_reference` would
+report but not fail on them (see `tests/GoldenReferenceTests.cpp`'s
+`loadKnownBad()`, which still supports an empty or populated `knownBad` list
+for any future case that needs the same treatment).
+
+Root cause (issue #99): `potentiometers_`' wiper-contact resistance floor in
+`MnaCircuitEngineCore.h` (`contactFloorOhms`) was `1e-3` ohm, a value with no
+physical basis. At a pot's extreme position (only reachable at exactly knob
+= 1.0, e.g. TS808's `levelPot` and DS-1's equivalent) that floor becomes the
+only resistance in a wiper-side RC branch, collapsing that branch's tau far
+below one sample period. The trapezoidal (Tustin) discretization used for
+capacitor companion models is A-stable but not L-stable, so at that
+stiffness its discrete pole moved outside the unit circle and the branch
+self-oscillated on silent input -- a genuine runtime Newton-solve-adjacent
+instability, not a `prepare()`-time artifact (consistent with issue #91's
+finding that DC-operating-point initialization didn't fix it). Raising the
+floor to `0.1` ohm -- itself a physically plausible wiper contact resistance,
+not a tuned workaround -- eliminates the instability; measured steady-state
+per-sample state ratio at TS808's `levelPot` extreme went from `1.00044`
+(diverges) at `1e-3` ohm to `~0.99998` (decays) anywhere in `0.03`-`1.0` ohm.
+
+The five `ts808_*_full` cases (and the previously-fine-but-now-shifted five
+`ds1_*_full` cases, since `contactFloorOhms` is shared across every
+potentiometer in the engine) were regenerated under this fix and now pass
+`golden_reference`'s normal tolerance with no `knownBad` entry required.
+Every `mid`/`default` golden file (i.e. every case not driving a pot to its
+extreme position) is byte-identical to before -- the floor only engages
+within `contactFloorOhms` of a pot's mechanical end of travel.
