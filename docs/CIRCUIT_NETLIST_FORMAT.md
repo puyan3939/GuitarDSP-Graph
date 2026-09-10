@@ -281,12 +281,20 @@ format is a direct, ordered replay script of `MnaCircuitEngine` calls with
 stable `preset`/`spec` device metadata; the SPICE-subset format reads
 plain-text SPICE decks (`R`/`L`/`C`/`D`/`Q`/`V`/`I`/`E`/`X` cards, `.MODEL`,
 `.PARAM`, `{...}` expressions) so pedal circuits published online can be
-reused with minimal translation. `data/circuits/spice/ts808.cir` is its
-first (and, as of issue #99, only) circuit, checked for parity against both
-`TS808Circuit.h` and `data/circuits/ts808.json` in
-`tests/NetlistParityTests.cpp`. See `SpiceNetlistParser.h`'s and
-`SpiceNetlistLoader.h`'s own header comments for the full grammar, the
-`OPAMP`/`POT`/`CAP` `.MODEL` extensions and their rationale, and the
-known-limitation note in `tests/NetlistParityTests.cpp` about internal MNA
-node-numbering differences near TS808's already-documented Newton-solver-
-divergence corner (issue #88/#91).
+reused with minimal translation. `data/circuits/spice/ts808.cir` (issue #99)
+and `data/circuits/spice/ds1.cir` (issue #103) are its two circuits so far,
+checked for parity against both the hand-written class
+(`TS808Circuit.h`/`DS1Circuit.h`) and the corresponding JSON netlist
+(`data/circuits/ts808.json`/`ds1.json`) in `tests/NetlistParityTests.cpp`. No
+new `.MODEL` type was needed for DS-1: it only uses NPN transistors, silicon
+diodes, an ideal op-amp, the nonlinear (dynamic) op-amp macro and
+linear-taper potentiometers, all already exercised by `ts808.cir`. See
+`SpiceNetlistParser.h`'s and `SpiceNetlistLoader.h`'s own header comments for
+the full grammar, the `OPAMP`/`POT`/`CAP` `.MODEL` extensions and their
+rationale, and the known-limitation notes in `tests/NetlistParityTests.cpp`
+about internal MNA node-numbering differences: for TS808 this is confined to
+its already-documented Newton-solver-divergence corner (issue #88/#91), but
+for DS-1 the disagreement is broader and non-monotonic in the knob
+settings (reported, not gated, in `checkDs1SpiceParity()` — see that
+function's comment for the investigation and why it was left open rather
+than papered over with a looser tolerance).
