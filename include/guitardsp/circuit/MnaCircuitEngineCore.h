@@ -1228,7 +1228,25 @@ private:
         }
 
         for (const auto& p : potentiometers_) {
-            constexpr float contactFloorOhms = 1.0e-3f;
+            // 0.1 ohm approximates a real potentiometer's wiper contact
+            // resistance (carbon/conductive-plastic wipers typically land in
+            // the 0.1-1 ohm range at the mechanical end of travel; they are
+            // never a literal short). This used to be 1e-3 ohm, a value with
+            // no physical justification, and that non-physical smallness was
+            // itself the cause of a real bug: at a pot's extreme position
+            // this floor is the only resistance left in a wiper-side
+            // RC branch, so tau = R*C for that branch collapsed to ~100 ps
+            // -- twenty thousand times shorter than one sample period at
+            // 48 kHz. The trapezoidal (Tustin) discretization used for
+            // capacitor companion models is A-stable but not L-stable, so at
+            // that stiffness its discrete pole moves outside the unit
+            // circle and the branch self-oscillates with silent input.
+            // Measured effect on TS808's levelPot (drive=tone=0.5, silence
+            // input, steady-state per-sample state ratio): 1e-3 ohm gives
+            // 1.00044 (diverges); 0.03-1.0 ohm all give ~0.99998 (decays),
+            // i.e. any physically plausible floor fixes it and the exact
+            // value above ~0.03 ohm barely matters. See issue #99.
+            constexpr float contactFloorOhms = 0.1f;
             const float total = std::max(2.0f * contactFloorOhms, p.spec.totalResistanceOhms);
             const float position = std::clamp(p.spec.normalizedElectricalPosition(), 0.0f, 1.0f);
             const float lowResistance = std::max(contactFloorOhms, total * position);
