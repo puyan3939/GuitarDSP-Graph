@@ -1,0 +1,155 @@
+* DS-1 -- SPICE-subset netlist (issue #103, following issue #99's ts808.cir).
+*
+* Equivalent to data/circuits/ds1.json / guitardsp::circuit::DS1Circuit
+* (include/guitardsp/circuit/DS1Circuit.h). Parsed by
+* guitardsp::circuit::parseSpiceNetlist() (SpiceNetlistParser.h) and
+* elaborated by guitardsp::circuit::SpiceCircuit (SpiceNetlistLoader.h) --
+* see tests/NetlistParityTests.cpp's checkDs1SpiceParity(), which asserts
+* this file's output agrees with both DS1Circuit.h and the JSON netlist to
+* the same 5e-4 tolerance the other parity checks in that file use.
+*
+* No new .MODEL extension was needed: DS-1 only uses NPN transistors, silicon
+* diodes, an ideal op-amp, a nonlinear (dynamic) op-amp macro and linear-taper
+* potentiometers, all of which ts808.cir already exercises. See this issue's
+* "0." investigation for the element-by-element table.
+*
+* Port convention (see SpiceNetlistLoader.h): "VIN" is the audio input,
+* "VSUPPLY"/"VREF" are the supply/virtual-ground rails primed at prepare()
+* time, and node "OUT" is the audio output.
+*
+* Knobs: distortion/tone/level are .PARAM values in [0,1], matching this
+* engine's user-facing control range (see data/circuits/ds1.json's
+* "controls" object and tests/golden/params/ds1.json's "mid"/"full"
+* variants). Each is the mechanical position of one potentiometer pair below
+* -- see the comment above each pair for why the pair's two resistor cards
+* carry a POT-typed .MODEL instead of being stamped as plain resistors, and
+* why their own {...} arithmetic is documentary rather than what actually
+* gets stamped (SpiceNetlistLoader.h's top-of-file comment has the full
+* rationale). Defaulted to DS1Circuit's own defaults (0.55/0.50/0.55); tests
+* override via SpiceCircuit::setParam().
+.PARAM DISTORTION=0.55
+.PARAM TONE=0.50
+.PARAM LEVEL=0.55
+
+* Device models. Parameter names intentionally match this engine's own
+* guitardsp::hq::*Spec fields (see SpiceNetlistParser.h's header comment)
+* rather than real SPICE Gummel-Poon/op-amp parameters -- this solver
+* doesn't implement full Gummel-Poon, so inventing a translation from real
+* SPICE parameters would be a fictitious precision with real bit-rot risk,
+* not genuine compatibility.
+*
+* 2SC2240-style NPN (DS-1's input/booster/output-buffer transistors):
+* twoN5088() preset with DS1Circuit.h's own beta/Vbe/Vsat/Vce(max)/Ic(max)/
+* Cin overrides; thermalVoltage is left at the preset default (0.02585).
+.MODEL Q2SC2240DS1 NPN(BETA=350 NOMINALVBE=0.62 SATURATIONVOLTAGE=0.15
++ MAXCOLLECTORVOLTAGE=120 MAXCOLLECTORCURRENTAMPS=0.10 INPUTCAPACITANCEFARADS=12P)
+
+* 1S1588/1S2473/1N4148-style diodes (op-amp input protection and the
+* antiparallel hard clipper): guitardsp::hq::component_presets::oneN4148()
+* preset, unmodified -- same numeric values as ts808.cir's D1N4148TS808.
+.MODEL D1N4148DS1 D(NOMINALFORWARDVOLTAGE=0.65 SATURATIONCURRENT=2N
++ EMISSIONCOEFFICIENT=1.9 THERMALVOLTAGE=0.02585 SERIESRESISTANCEOHMS=1.0
++ JUNCTIONCAPACITANCEFARADS=2P REVERSEVOLTAGERATING=100 CURRENTRATINGAMPS=0.20)
+
+* NJM3404/NJM2904-style dual op-amp: DS1Circuit.h's ds1OpAmp() spec,
+* unmodified. Shared by both the ideal unity buffer (4-node X card) and the
+* nonlinear variable-gain macro (6-node X card) below.
+.MODEL NJM3404DS1 OPAMP(OPENLOOPGAINDB=100 GAINBANDWIDTHHZ=1.2MEG
++ SLEWRATEVOLTSPERSECOND=500K INPUTBIASCURRENTAMPS=40N INPUTOFFSETVOLTAGE=2M
++ INPUTNOISEVOLTSPERROOTHZ=40N OUTPUTCURRENTLIMITAMPS=20M
++ POSITIVERAILHEADROOMVOLTS=1.5 NEGATIVERAILHEADROOMVOLTS=0.05 OUTPUTRESISTANCEOHMS=50)
+
+* Distortion (drive) pot: 100k, linear taper, wired "backwards" (INVERT=1)
+* to match controls.distortion.invert in data/circuits/ds1.json.
+.MODEL POTDISTORTION POT(TAPER=LINEAR OHMS=100K INVERT=1)
+* Tone pot: 20k, linear taper, wired forwards (controls.tone.invert=false).
+.MODEL POTTONE POT(TAPER=LINEAR OHMS=20K INVERT=0)
+* Level pot: 100k, linear taper, wired forwards (controls.level.invert=false).
+.MODEL POTLEVEL POT(TAPER=LINEAR OHMS=100K INVERT=0)
+
+* Electrolytic output coupling cap: only guitardsp::hq::CapacitorSpec's
+* leakageResistanceOhms field actually affects the solve (see
+* SpiceNetlistParser.h's "CAP" .MODEL doc comment), and
+* NetlistLoader.h's capacitorSpec() helper sets it to 5 Meg for electrolytic
+* parts (1 Geg for everything else, which is this subset's default).
+.MODEL ELECTROLYTIC CAP(LEAKAGEOHMS=5MEG)
+
+* --- Supply / virtual-ground / input ports ---
+VSUPPLY SUPPLY 0 DC 0
+VREF VREF 0 DC 0
+VIN INPUTJACK 0 DC 0
+
+* --- Input buffer (2SC2240-style emitter follower) ---
+R1 INPUTJACK INPUTSERIES 1K
+C1 INPUTSERIES Q1BASE 47N
+R2 VREF Q1BASE 470K
+Q1 SUPPLY Q1BASE Q1EMITTER Q2SC2240DS1
+R3 Q1EMITTER 0 10K
+
+* --- Bass-shaping high-pass couplings (JFET effect switch omitted, per
+* DS1Circuit.h's engaged-path model) ---
+C2 Q1EMITTER FIRSTHIGHPASS 470N
+R4 FIRSTHIGHPASS 0 100K
+C3 FIRSTHIGHPASS Q2BASE 47N
+R5 Q2BASE 0 100K
+
+* --- Q2 booster (common-emitter, 22 ohm emitter resistor, 470k/250pF
+* collector-to-base shunt feedback) ---
+R6 SUPPLY Q2COLLECTOR 10K
+R7 Q2EMITTER 0 22
+R8 Q2COLLECTOR Q2BASE 470K
+C4 Q2COLLECTOR Q2BASE 250P
+Q2 Q2COLLECTOR Q2BASE Q2EMITTER Q2SC2240DS1
+
+* --- Op-amp input coupling, protection diode, and unity buffer half ---
+C5 Q2COLLECTOR OPAMPINPUT 68N
+R9 OPAMPINPUT VREF 100K
+D1 0 OPAMPINPUT D1N4148DS1
+* Ideal op-amp macro: output, nonInverting, inverting, reference (4 nodes).
+XBUFFER OPAMPBUFFEROUT OPAMPINPUT OPAMPBUFFERINV 0 NJM3404DS1
+R10 OPAMPBUFFEROUT OPAMPBUFFERINV 100K
+
+* --- Variable non-inverting distortion gain (second op-amp half) ---
+* Nonlinear op-amp macro: output, nonInverting, inverting, positiveRail,
+* negativeRail, reference (6 nodes -- see SpiceNetlistLoader.h's X-card doc).
+XGAIN GAINOUT OPAMPBUFFEROUT GAININV SUPPLY 0 0 NJM3404DS1
+* Distortion pot pair: high-to-wiper then wiper-to-low, sharing node GAINOUT
+* as both wiper *and* low (drivePot's wiper/low JSON fields are the same
+* node) -- same pattern as ts808.cir's drive pot.
+RDISTA GAININV GAINOUT {100K*DISTORTION} POTDISTORTION
+RDISTB GAINOUT GAINOUT {100K*(1-DISTORTION)} POTDISTORTION
+C6 GAININV GAINOUT 100P
+R11 GAININV GAINFEEDBACKGROUND 4.7K
+C7 GAINFEEDBACKGROUND 0 470N
+
+* --- Hard-clipping network (antiparallel silicon diodes around true
+* ground, after the op-amp bias is removed by C8) ---
+R12 GAINOUT CLIPCOUPLINGINPUT 2.2K
+C8 CLIPCOUPLINGINPUT CLIPNODE 470N
+D2 CLIPNODE 0 D1N4148DS1
+D3 0 CLIPNODE D1N4148DS1
+C9 CLIPNODE 0 10N
+
+* --- Passive Big-Muff-family tone blend ---
+C10 CLIPNODE TONEHIGHPRE 22N
+R13 TONEHIGHPRE TONEHIGH 2.2K
+R14 TONEHIGH 0 6.8K
+R15 CLIPNODE TONELOW 6.8K
+C11 TONELOW 0 100N
+* Tone pot pair: high-to-wiper then wiper-to-low (distinct wiper/low nodes).
+RTONEA TONEHIGH TONEWIPERNODE {20K*TONE} POTTONE
+RTONEB TONEWIPERNODE TONELOW {20K*(1-TONE)} POTTONE
+
+* --- Level stage and output buffer ---
+* Level pot pair: high-to-wiper then wiper-to-low; low is true ground.
+RLEVELA TONEWIPERNODE LEVELWIPER {100K*LEVEL} POTLEVEL
+RLEVELB LEVELWIPER 0 {100K*(1-LEVEL)} POTLEVEL
+R16 LEVELWIPER LEVELPOST 10K
+R17 LEVELPOST 0 1MEG
+C12 LEVELPOST Q3BASE 47N
+R18 VREF Q3BASE 1MEG
+Q3 SUPPLY Q3BASE Q3EMITTER Q2SC2240DS1
+R19 Q3EMITTER 0 10K
+R20 Q3EMITTER OUTPUTCOUPLINGINPUT 1K
+C13 OUTPUTCOUPLINGINPUT OUT 1U ELECTROLYTIC
+R21 OUT 0 100K
